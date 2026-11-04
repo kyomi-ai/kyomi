@@ -41,18 +41,22 @@ ignore = [
     "RUSTSEC-2026-0195", # unbounded namespace-declaration allocation in NsReader (memory-exhaustion DoS)
 
     # -------------------------------------------------------------------------
-    # rsa 0.9.10 — no patched version exists, at all
+    # rsa 0.9.10 and 0.10.0-rc.19 — the advisory has no patched version
     # -------------------------------------------------------------------------
     # Marvin Attack: potential key recovery through timing sidechannels.
-    # The advisory lists NO patched versions; the RustCrypto fix landed only in
-    # the 0.10.0-rc line, which is still pre-release.
+    # The advisory's `patched` list is intentionally empty: the crypto-bigint
+    # migration (RustCrypto/RSA#394) did not close it, and the advisory still
+    # lists rsa 0.9.10 (latest stable) and 0.10.0-rc.18 (latest rc) as
+    # affected as of 2026-09-12. The lockfile has 0.9.10 plus 0.10.0-rc.19 via
+    # crypto-glue 0.2.2, so this ID-level ignore covers both.
     #
     # Reaches us through six direct dependents, none of which we control:
     #   sqlx-mysql, jsonwebtoken, russh and internal-russh-forked-ssh-key,
-    #   kyomi-datasource, and superboring (web-push-native). crypto-glue
-    #   moved to rsa 0.10.0-rc.19 with crypto-glue 0.2.2 (verified 2026-11-05).
+    #   kyomi-datasource, and superboring (web-push-native).
     #
-    # Remove when: rsa 0.10 ships stable AND the crates above adopt it.
+    # Remove when: the advisory lists a patched version and every rsa copy in
+    # Cargo.lock (0.9.10 and crypto-glue's 0.10.0-rc.x) moves to it; confirm
+    # with `cargo audit` without this ignore.
     "RUSTSEC-2023-0071", # Marvin Attack: potential key recovery through timing sidechannels
 
     # -------------------------------------------------------------------------
