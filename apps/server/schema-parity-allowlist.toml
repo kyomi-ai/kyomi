@@ -114,11 +114,6 @@ column = "id"
 reason = "Postgres SERIAL vs SQLite INTEGER PRIMARY KEY AUTOINCREMENT — see the SERIAL/AUTOINCREMENT note above this section."
 
 [[entry]]
-table = "conversation_discussed"
-column = "id"
-reason = "Postgres SERIAL vs SQLite INTEGER PRIMARY KEY AUTOINCREMENT — see the SERIAL/AUTOINCREMENT note above this section."
-
-[[entry]]
 table = "conversation_read_status"
 column = "id"
 reason = "Postgres SERIAL vs SQLite INTEGER PRIMARY KEY AUTOINCREMENT — see the SERIAL/AUTOINCREMENT note above this section."
@@ -207,11 +202,6 @@ reason = "Postgres SERIAL vs SQLite INTEGER PRIMARY KEY AUTOINCREMENT — see th
 table = "datasource_configs"
 column = "id"
 reason = "Postgres default `('ds-' || SUBSTRING(md5(random()::text), 1, 24))` is a redundant safety net — kyomi_core/kyomi_auth always generate and supply the id explicitly on insert (SQLite has no such default and works the same way). See apps/server/migrations/20260215000000_baseline.sql."
-
-[[entry]]
-table = "workspace_knowledge_chunks"
-column = "chunk_id"
-reason = "Postgres `chunk_id uuid DEFAULT gen_random_uuid()` was not touched by 20260315000000_uuid_columns_to_text.sql (that migration only covered agent_learnings, charts, collections, oauth_clients, analytics_sites). The column still classifies as Text on both backends (uuid folds into the Text class) and the application always supplies chunk_id explicitly on insert, so the Postgres default is redundant/dead code exactly like datasource_configs.id above — not a live divergence."
 
 [[entry]]
 table = "ownership_transfers"

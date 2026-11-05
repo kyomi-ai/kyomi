@@ -1549,6 +1549,20 @@ async fn migration_chains_produce_matching_schemas() {
         .await
         .unwrap_or_else(|e| panic!("drop scratch database `{scratch_db}`: {e}"));
 
+    // KYO-956: both legacy tables are intentionally dropped by the forward-only
+    // migration in each chain. A future migration that recreates either table
+    // must fail this check rather than silently restoring the dead schema.
+    for removed in ["conversation_discussed", "workspace_knowledge_chunks"] {
+        assert!(
+            !pg_schema.contains_key(removed),
+            "Postgres schema still contains `{removed}` after the migration chain"
+        );
+        assert!(
+            !sqlite_schema.contains_key(removed),
+            "SQLite schema still contains `{removed}` after the migration chain"
+        );
+    }
+
     // Indexes/PKs/FKs are only meaningful to compare for tables that exist
     // on both sides — a table missing entirely from one backend is already
     // reported by diff_schemas, and comparing its indexes/FKs too would
