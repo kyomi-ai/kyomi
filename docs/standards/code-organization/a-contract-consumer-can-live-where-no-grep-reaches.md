@@ -69,10 +69,12 @@ falls under.
 #     rename failure) are genuine errors and fall under the documented `1`.
 ```
 
+(private/local review log; not tracked in this repository)
+
 Real precedent — five tickets across the `2026-08-30`–`2026-09-03` window, every one of them
 caught by a reviewer leaving the repo, never by a build or a suite:
 
-- **KYO-629** (review log `2026-09-03`, `20:35`) — the `worktree-lifecycle-selftests` job
+- **KYO-629** (review log (private/local; not tracked in this repository) `2026-09-03`, `20:35`) — the `worktree-lifecycle-selftests` job
   gained a `name:`. The reviewer went to the setting rather than the tree:
   > `gh api repos/kyomi-ai/kyomi/branches/main/protection` confirms required checks are
   > exactly `["Clippy", "Lint Suppression Policy", "Trivy Security Scan"]` — the job rename
@@ -80,14 +82,14 @@ caught by a reviewer leaving the repo, never by a build or a suite:
 
   It was safe. It was safe by luck of which three checks are required, and the only way to
   know that was the API call.
-- **KYO-596 rework** (review log `2026-09-02`, `20:31`) — `mark-branch-stranded.sh` grew two
+- **KYO-596 rework** (review log (private/local; not tracked in this repository) `2026-09-02`, `20:31`) — `mark-branch-stranded.sh` grew two
   new failure paths. The contract lives outside the repo, and the check was whether the
   widening still fit it:
   > Checked the exit-code contract against `~/.claude/skills/backlog-fast/SKILL.md` Step 0.5
   > (outside this repo, per instructions not to edit it): it documents "0 tombstoned or
   > already tombstoned, 1 error, 2 usage error" — still accurate, since every new exit path
   > added by this rework … is a genuine error and correctly falls under exit 1.
-- **KYO-607** (review log `2026-09-03`, `09:40`) — the case where the claim about the
+- **KYO-607** (review log (private/local; not tracked in this repository) `2026-09-03`, `09:40`) — the case where the claim about the
   out-of-repo consumer was simply false. `check-ticket-in-flight.sh`'s header justifies
   keeping its conceptual check numbering because the numbers are *"used everywhere in this
   file, in `scripts/README.md`, and in both skill files"*:
@@ -98,12 +100,12 @@ caught by a reviewer leaving the repo, never by a build or a suite:
 
   The don't-renumber conclusion survived; the stated evidence for it did not. A reader who
   greps the skill files for "check 4" finds nothing, or finds someone else's check 3.
-- **KYO-567** (review log `2026-08-30`, cycles at `15:40`, `16:51`, `16:57`) — three separate
+- **KYO-567** (review log (private/local; not tracked in this repository) `2026-08-30`, cycles at `15:40`, `16:51`, `16:57`) — three separate
   review cycles each re-read the same three out-of-repo documents to confirm the 8-hour
   staleness threshold, the tombstone durability rule, and the rejected open-a-PR alternative
   were stated identically in the code and in all three. Three cycles, because there is no
   cheaper way and nothing automated to inherit.
-- **KYO-628** (review log `2026-09-03`, `17:15`) — inserting a step into
+- **KYO-628** (review log (private/local; not tracked in this repository) `2026-09-03`, `17:15`) — inserting a step into
   `skills/merge-sweeper/SKILL.md` renumbered its successor, so every `Step N` cross-reference
   inside the document, plus a "five buckets" tally, had to move with it. Verified with
   `grep -n "Step [0-9]"` over the whole file, not by reading the diff.
@@ -139,5 +141,5 @@ it; the failure here is that the restatement sits somewhere the reader will neve
 for the KYO-607 half specifically, where the cited document existed and the claim attached to
 it did not hold.
 
-Mined from the `2026-08-30` through `2026-09-03` review logs (KYO-567, KYO-568, KYO-584,
+Mined from the `2026-08-30` through `2026-09-03` review logs (private/local; not tracked in this repository) (KYO-567, KYO-568, KYO-584,
 KYO-596, KYO-607, KYO-628, KYO-629).

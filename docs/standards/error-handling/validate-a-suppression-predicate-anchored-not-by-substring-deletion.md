@@ -78,7 +78,7 @@ function cfg_predicate_is_test(pred) {
 
 Real precedent: KYO-558 / KYO-612 (2026-09-03), `scripts/lint/check-disposal-safety.sh:458`
 and `:511` — 🔴 both times, the second reintroduced by the first's fix. See
-`docs/review-logs/2026-09-03.md`.
+`docs/review-logs/2026-09-03.md` (private/local review log; not tracked in this repository).
 
 See also `empty-on-failure-must-not-look-like-a-real-result.md` in this section (a failed
 check must not be readable as a passing one) and

@@ -91,7 +91,7 @@ fi
 ```
 
 Precedent — **KYO-712**, *"bind review signature to the diff it approved"*, `2026-09-11`
-review log, the **initial** entry (2 🔴). Finding #2 is this rule, and the reviewer
+review log (private/local; not tracked in this repository), the **initial** entry (2 🔴). Finding #2 is this rule, and the reviewer
 reproduced it rather than reasoning about it: signed cleanly with no `--allow-unstaged`,
 added an untracked trigger file, hand-appended the `ALLOW-UNSTAGED:` line, and watched the
 real hook print *"skipped for unstaged/untracked files — acknowledged at signing"* for a

@@ -1,7 +1,7 @@
 # Name the nearest sibling rule inside the new rule — or don't add the file
 
 Every rule in `docs/standards/` is mined from the same source: the last week or two of
-`docs/review-logs/`. Several agents mine that window, and they converge — on the same
+`docs/review-logs/` (private/local review log; not tracked in this repository). Several agents mine that window, and they converge — on the same
 incidents, in the same order, because the loudest incidents are loud for everyone. Two
 agents starting from KYO-446's spliced `assert!` and KYO-455's 74-test split will write
 the same rule, with different words and a different slug, and both will be correct.
@@ -56,19 +56,21 @@ grep -rlni 'conflict\|resolution\|conserve' docs/standards/   # your topic's voc
 git fetch origin && git log --all --diff-filter=A --name-only -- 'docs/standards/**'
 ```
 
+(private/local review log; not tracked in this repository)
+
 Nine reviews in the 2026-08-23 → 2026-08-30 window treat this as a named, first-class
 verification step — which is what makes it an established convention rather than one
 reviewer's habit — and the one time it was skipped it was the sole blocking finding in a
 six-file batch:
 
-- **KYO-533 cycle 1** (`2026-08-30`, `00:33`) — 🟡 Copy-Paste, refused signing.
+- (private/local review log; not tracked in this repository) **KYO-533 cycle 1** (`2026-08-30`, `00:33`) — 🟡 Copy-Paste, refused signing.
   `a-resolving-identifier-is-not-a-verified-claim.md` "substantially duplicates the
   pre-existing sibling `verify-a-precedent-claim-against-its-source.md`… both use the
   *identical* flagship incident (KYO-429, cycles 1 and 2)… but never mentions
   [it], despite it being the closest overlap of all four." Cycle 2 (`00:40`) named the
   standing hazard: *"near-duplicate rules landing without a disambiguating
   cross-reference."* The fix was one additive sentence — no existing line changed.
-- **KYO-468** (`2026-08-29`, `12:28`) — the case that proves the check is not sufficient as
+- (private/local review log; not tracked in this repository) **KYO-468** (`2026-08-29`, `12:28`) — the case that proves the check is not sufficient as
   practised. `prove-a-conflict-resolution-conserved-every-line.md` was reviewed for exactly
   this and passed: "genuinely additive over the nearest sibling
   (`verify-the-object-that-ships-not-the-working-tree.md`)… explicitly cross-referenced."
@@ -77,7 +79,7 @@ six-file batch:
   (PR #434) and `2f9b5dce` (PR #437) — citing the *same six incidents* (KYO-446, KYO-407 ×2, KYO-452,
   KYO-455, KYO-491). KYO-564 now tracks merging them; KYO-562 tracks the pair plus this
   rule.
-- **Done right, six times:** KYO-407 (`2026-08-23`, `00:49`) confirmed a carried-across
+- (private/local review log; not tracked in this repository) **Done right, six times:** KYO-407 (`2026-08-23`, `00:49`) confirmed a carried-across
   rule "does not already exist on `origin/main` (no duplicate)"; KYO-469 (`08-23`, `13:05`)
   "not duplicative of its sibling… explicitly cross-referenced"; KYO-492 carryover
   (`08-24`, `04:10`) grepped all of `docs/standards/` for the overlapping vocabulary and

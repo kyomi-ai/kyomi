@@ -45,27 +45,29 @@ the guarantee is weaker than you want, write the weaker one (see
 // the refetch stop propagating; it is load-bearing, not decorative.
 ```
 
+(private/local review log; not tracked in this repository)
+
 Five reviews across the `2026-08-20` → `2026-08-24` logs turned on exactly this move, and
 all three crate versions they name still match `Cargo.lock` today:
 
-- **KYO-429 (2026-08-22, `05:06`)** — the `Memo` notify-on-change question above,
+- (private/local review log; not tracked in this repository) **KYO-429 (2026-08-22, `05:06`)** — the `Memo` notify-on-change question above,
   settled against `reactive_graph-0.2.14`. The reviewer's phrasing is the point: the fix is
   *"real, not a no-op"* — a verdict only the library's source could produce.
-- **KYO-443 + KYO-426 (2026-08-22, `08:40`)** — the fix depended on Leptos re-subscribing
+- (private/local review log; not tracked in this repository) **KYO-443 + KYO-426 (2026-08-22, `08:40`)** — the fix depended on Leptos re-subscribing
   conditionally. Confirmed in `reactive_graph-0.2.14`'s `src/computed/inner.rs`:
   `any_subscriber.clear_sources(...)` runs before every recompute, so an untaken branch
   genuinely does not resubscribe. The companion `PartialEq` dedupe claim was checked the same
   way (`Memo::new` requires `T: PartialEq`; the inner impl only calls `sub.mark_dirty()` when
   `changed`).
-- **KYO-440 (2026-08-24, `13:49` cycle 2)** — whether a superseded popup monitor could
+- (private/local review log; not tracked in this repository) **KYO-440 (2026-08-24, `13:49` cycle 2)** — whether a superseded popup monitor could
   double-fire came down to `gloo-timers 0.3.0`'s `impl Drop for Interval`/`Timeout` calling
   `clear_interval`/`clear_timeout` synchronously and unconditionally. Read, not assumed; with
   it the race is *"structurally impossible"* rather than merely unlikely.
-- **KYO-401 (2026-08-21, `14:20`)** — `axum-core 0.5.6`: `impl IntoResponse for String` and
+- (private/local review log; not tracked in this repository) **KYO-401 (2026-08-21, `14:20`)** — `axum-core 0.5.6`: `impl IntoResponse for String` and
   for `&'static str` both route through `Cow<'static, str>::into_response()`, so a new
   owned-`String` body is byte-identical to the `&'static str` it replaced. The whole
   "is this a behaviour change?" question, answered by one file.
-- **KYO-390 (2026-08-20, `18:50`)** — a lockfile-only PR, where the risk argument was that
+- (private/local review log; not tracked in this repository) **KYO-390 (2026-08-20, `18:50`)** — a lockfile-only PR, where the risk argument was that
   the moved `windows-sys` edges are all `cfg(windows)`-gated. The reviewer pulled the real
   `Cargo.toml` for `errno`, `home`, `dirs-sys` and `dlmalloc` out of the local registry cache
   and confirmed each one's `[target."cfg(windows)".dependencies]` declaration, rather than

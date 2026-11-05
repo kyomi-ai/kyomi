@@ -83,7 +83,7 @@ if !should_handle_event(event_context_type, msg.session_id.as_deref()) {
 
 Real precedent — three tickets, two languages, one week:
 
-- **KYO-584** (`2026-09-02`, `00:35`) — 🟡, blocked signing, `scripts/link-agent-skills.sh` in
+- (private/local review log; not tracked in this repository) **KYO-584** (`2026-09-02`, `00:35`) — 🟡, blocked signing, `scripts/link-agent-skills.sh` in
   `kyomi-private`. *"`--kyomi-repo`/`$KYOMI_REPO` existence is only validated when the path is
   relative … An absolute path — which is both the documented default (`$HOME/repos/kyomi`) and
   how every usage example in the script's own header is written — takes the `/*) : ;;` no-op
@@ -98,7 +98,7 @@ Real precedent — three tickets, two languages, one week:
   standing comment — *"Do not reintroduce a relative-only special case here: this script never
   creates the kyomi repo, so both path forms must be validated identically"* (commit `535ab1b`,
   branch `jason/kyo-584-agent-skills`).
-- **KYO-567** (`2026-08-30`, `16:51` cycle 2) — 🟡, `scripts/mark-branch-stranded.sh`'s pasteable
+- (private/local review log; not tracked in this repository) **KYO-567** (`2026-08-30`, `16:51` cycle 2) — 🟡, `scripts/mark-branch-stranded.sh`'s pasteable
   release summary. *"an `if`/`elif`/`elif` with exactly three arms … and this exact state
   (`LOCAL_RENAMED=0`, `LOCAL_BRANCH_CHECKED_OUT_AT` empty, `LOCAL_BRANCH_EXISTS=1`) matches none
   of them"*, so a failed local rename printed no `Local:` line at all and the summary *"looks
@@ -108,7 +108,7 @@ Real precedent — three tickets, two languages, one week:
   fourth condition, an in-code note that *"every other combination … is unreachable by
   construction"*, and Test 2b, which forces the failure with a pre-created conflicting local
   `stranded/<branch>` ref and asserts on the stdout summary.
-- **KYO-501** (`2026-08-29`, `08:33`) — the same shape in Rust, in
+- (private/local review log; not tracked in this repository) **KYO-501** (`2026-08-29`, `08:33`) — the same shape in Rust, in
   `crates/kyomi-ui/src/components/chat/chat_engine.rs`. *"Before this fix, `error` filtered only
   on `context_type` inline and never read `msg.session_id` — on the main chat page
   (`context_type = None`) the inline filter was skipped entirely, so any session's error rendered

@@ -82,7 +82,7 @@ rather than in production is the reason it has no landed line number to point at
 Motivating findings: **KYO-710** (`2026-09-10`, *"KYO-710 cron auth-failure
 detection"*) — the sole 🔴, reproduced live by the reviewer; the diff it was raised
 against was never committed and the branch has since been released as stranded, so the
-review log is the durable record, not the code. **KYO-471 / KYO-422** — the
+review log (private/local; not tracked in this repository) is the durable record, not the code. **KYO-471 / KYO-422** — the
 `headRefName` precedent, which *is* on `origin/main` and carries its own
 "DO NOT MATCH ON PR BODY OR TITLE" comment at `check-ticket-in-flight.sh:44`.
 

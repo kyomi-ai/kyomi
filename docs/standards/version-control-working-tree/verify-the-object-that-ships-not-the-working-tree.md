@@ -27,6 +27,8 @@ git status --short              # must be empty
 cargo test -p kyomi-ui          # now the tree and HEAD agree
 ```
 
+(private/local review log; not tracked in this repository)
+
 Real precedent: on 2026-08-22 a KYO-446 review found (🔴) that `HEAD` (`0eb65102`) held an unclosed macro invocation in `datasources.rs` — the new comment block had been spliced into the middle of a preceding test's unterminated `assert!(...)`. A three-line repair sat staged but never committed, so *every* check/clippy/test run on that branch, the reviewer's included, had passed against a working tree that the pushed commit would not reproduce. Pushing as-is would have failed CI immediately and broken the build for anyone checking out that commit. Related: the 2026-08-23 KYO-424 re-review, where diffing against the merge-base instead of `HEAD` would have buried the entire fix-up inside a 700-line new-file diff, and the 2026-08-22 KYO-407 rebase, where a prior pass through the same `mod tests` tail had silently dropped a closing brace.
 
 This is the commit-boundary sibling of `verify-tree-is-current-before-concluding.md`: that rule is about a tree behind the *remote*, this one about a tree ahead of your own *commit*. Both are conclusions drawn from a view that isn't the one that counts.

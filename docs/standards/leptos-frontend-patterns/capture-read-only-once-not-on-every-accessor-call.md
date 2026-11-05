@@ -64,7 +64,7 @@ impl ChatEngine {
 }
 ```
 
-Flagged and fixed in **KYO-781** (review log `2026-09-24`, `11:20` — "KYO-781 chat_engine
+Flagged and fixed in **KYO-781** (review log (private/local; not tracked in this repository) `2026-09-24`, `11:20` — "KYO-781 chat_engine
 disposal-safety fix"): `ChatEngine`, `ChatStateMachine`, and `ThinkingManager`
 (`crates/kyomi-ui/src/components/chat/{chat_engine,chat_state,thinking}.rs`) all had this exact
 shape — a `ReadSignal` re-derived via `.read_only()` inside an accessor method rather than
@@ -72,7 +72,7 @@ captured once. The reviewer reproduced the panic directly: reverting `ChatEngine
 back to `self.messages.read_only()` and running the disposal test reproduced the exact panic at
 `rw.rs:181:37`, then confirmed the fix (capture-once) made the same test pass by returning `None`
 via `try_get_untracked()` on the stored handle instead. Re-reviewed and re-signed after a rebase
-(review log `2026-09-24`, `10:30`), where the diff was confirmed byte-identical to the originally
+(review log (private/local; not tracked in this repository) `2026-09-24`, `10:30`), where the diff was confirmed byte-identical to the originally
 signed version and the same source-level mechanism was independently re-verified.
 
 Distinct from [derive-disposal-scope-is-where-it-was-created.md](derive-disposal-scope-is-where-it-was-created.md):

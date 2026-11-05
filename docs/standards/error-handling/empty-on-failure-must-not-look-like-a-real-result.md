@@ -56,12 +56,12 @@ sorted_str=$(printf '%s\n' "${matches[@]}" | sort) \
 mapfile -t sorted <<< "$sorted_str"
 ```
 
-Mined from the `2026-08-20` and `2026-08-23` review logs, which record this shape twice in
+Mined from the `2026-08-20` and `2026-08-23` review logs (private/local; not tracked in this repository), which record this shape twice in
 four days, in two languages, at two severities — cited by log date and by the shape of each
 claim, since both were logged against in-flight branch state (see
 [anchor a citation to a symbol, not a line number](../comments-documentation/anchor-a-citation-to-a-symbol-not-a-line-number.md)):
 
-- **KYO-480 (2026-08-23, 🔴, blocked signing; resolved in cycle 2).** The sync-bootstrap
+- (private/local review log; not tracked in this repository) **KYO-480 (2026-08-23, 🔴, blocked signing; resolved in cycle 2).** The sync-bootstrap
   path reported each entity type's count as `.len()` of a vec that a pre-existing
   `unwrap_or_else(|e| { warn; vec![] })` had already emptied. The delta path's own
   producer was correct — it omitted a failed type from the map — so the two producers
@@ -74,7 +74,7 @@ claim, since both were logged against in-flight branch state (see
   `insert_count_if_present(counts, key, Option<i64>)` helper that omits `None` rather
   than ever recording `0`, with the `Option` derived from the `Result` before the
   degradation.
-- **KYO-386 (2026-08-20, 🟡).** `mapfile -t sorted < <(printf … | sort)`, adopted to
+- (private/local review log; not tracked in this repository) **KYO-386 (2026-08-20, 🟡).** `mapfile -t sorted < <(printf … | sort)`, adopted to
   silence a cosmetic shellcheck warning, traded away fail-fast behaviour: the reviewer
   demonstrated it empirically by making the pipeline `exit 17` — the previous form
   aborted the script, the new one printed an empty array and exited 0. The consumer read

@@ -56,7 +56,7 @@ RIGHT — same gap, named:
 
 Three review-log entries make the shape of this concrete:
 
-- **KYO-436**, review log `2026-08-22`, `14:10` (initial review, 🟡 MAJOR, category
+- **KYO-436**, review log (private/local; not tracked in this repository) `2026-08-22`, `14:10` (initial review, 🟡 MAJOR, category
   "Other: Unmet ticket acceptance criterion"):
   > KYO-436's own AC #5 ("A refused `window.close()` no longer leaves the user with an
   > unexplained window") is explicitly called out in the ticket body and left completely
@@ -66,7 +66,7 @@ Three review-log entries make the shape of this concrete:
   the very ticket this PR is closing."* This cost a full review cycle before the fix landed in
   cycle 2.
 
-- **The same PR, same ticket**, `15:05` (re-review, cycle 2) — the contrasting right case,
+- (private/local review log; not tracked in this repository) **The same PR, same ticket**, `15:05` (re-review, cycle 2) — the contrasting right case,
   from the reviewer's Notes:
   > Implementer separately disclosed, honestly and up front, that no live provider
   > (Google/Snowflake/Databricks) handshake has been manually verified per KYO-436 AC #3, for
@@ -76,7 +76,7 @@ Three review-log entries make the shape of this concrete:
   Two unmet ACs, one PR. The silent one (#5) was 🟡-blocking and cost a cycle. The disclosed
   one (#3) was accepted without one. The difference was disclosure, not severity.
 
-- **KYO-444**, review log `2026-08-22`, `08:10` — the carve-out itself will not accept a
+- **KYO-444**, review log (private/local; not tracked in this repository) `2026-08-22`, `08:10` — the carve-out itself will not accept a
   promise in place of a ticket, for deferrals of any kind, not only unmet ACs:
   > Not signing — one 🟡 MAJOR (item 1) needs a test before merge; no ticket exists to defer it
   > under the carve-out.
@@ -86,7 +86,7 @@ Three review-log entries make the shape of this concrete:
   It's cited here only for what it shows about the carve-out's own bar: an unfiled ticket
   blocks signing regardless of what kind of gap it's covering for.)
 
-Related: KYO-375, review log `2026-08-20`, `17:18`, is the out-of-repo-mechanism case this
+Related: KYO-375, review log (private/local; not tracked in this repository) `2026-08-20`, `17:18`, is the out-of-repo-mechanism case this
 rule deliberately excludes — a diff that was itself clean while the ticket it closed depended
 on an unwritten change to a machine-local skill file. The reviewer's own framing of why it
 still surfaced the gap is the same instinct this rule is written from:

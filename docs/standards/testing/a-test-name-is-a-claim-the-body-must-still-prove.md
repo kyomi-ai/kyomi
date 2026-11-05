@@ -37,7 +37,7 @@ the weaker claim the body actually proves and say in a comment why the stronger 
 tested here.
 
 ```rust
-// WRONG — the pre-fix name, per the KYO-541 review log (`docs/review-logs/2026-09-14.md`,
+// WRONG — the pre-fix name, per the KYO-541 review log (`docs/review-logs/2026-09-14.md` (private/local review log; not tracked in this repository),
 // 17:16 entry); already renamed before landing, so there is no `<sha>^` on `main` to quote.
 #[tokio::test]
 async fn edit_knowledge_file_refreshes_knowledge_chunks_exactly_once() { /* ... */ }
@@ -59,14 +59,14 @@ async fn edit_knowledge_file_refreshes_knowledge_chunks_via_unified_path() { /* 
 
 Real precedent:
 
-- **KYO-541** — `docs/review-logs/2026-09-14.md`, *"KYO-541: refresh both dashboard/knowledge
+- **KYO-541** — `docs/review-logs/2026-09-14.md` (private/local review log; not tracked in this repository), *"KYO-541: refresh both dashboard/knowledge
   search indexes on edit"*, 17:16 entry, finding #2 (🟢, Test Coverage — overclaim):
   `edit_knowledge_file_refreshes_knowledge_chunks_exactly_once`'s name implied a
   runtime-verified "exactly once" guarantee the body never measured; the doc comment
   candidly said so, the bare name did not. Resolved same day in the immediate re-review
   (identifier renamed to `..._via_unified_path`, doc comment reworded) — quoted above as it
   stands on `main`.
-- **KYO-697** — `docs/review-logs/2026-09-14.md`, *"KYO-697: typed `EmailSendError` for
+- **KYO-697** — `docs/review-logs/2026-09-14.md` (private/local review log; not tracked in this repository), *"KYO-697: typed `EmailSendError` for
   email send observability"*, cycle-2 finding #3 and cycle-3 finding #2 (both 🟢, Naming):
   `crates/kyomi-auth/src/email_service.rs`'s `email_service_not_configured_by_default` was
   flagged across two consecutive re-review cycles as no longer testing a default — "the body

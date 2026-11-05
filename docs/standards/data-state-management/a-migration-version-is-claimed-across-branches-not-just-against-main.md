@@ -53,11 +53,11 @@ RIGHT — enumerate what is in flight, not just what has landed:
   # → 00037 is claimed by an open PR; take 00038 and say so in the PR body.
 ```
 
-Precedent — two open branches, both correct, both `00037`. **KYO-622** (review log
+Precedent — two open branches, both correct, both `00037`. **KYO-622** (review log (private/local; not tracked in this repository)
 `2026-09-06`, heading *"KYO-622: container-liveness GC for the catalog-archive scope
 check"*) adds `apps/server/migrations-sqlite/00037_add_datasource_container_cache.sql`, and
 its re-review explicitly records the check that passed: *"no migration filename collision
-(sqlite `00037` is next in sequence)"*. **KYO-683** (review log `2026-09-10`, heading
+(sqlite `00037` is next in sequence)"*. **KYO-683** (review log (private/local; not tracked in this repository) `2026-09-10`, heading
 *"KYO-683 Phase 1: signup single-email (server-side)"*) adds
 `apps/server/migrations-sqlite/00037_reconcile_unverified_user_rows.sql`. Neither had landed
 as of `main` @ `851462da`, whose highest SQLite migration is still `00036`. The reviewer who

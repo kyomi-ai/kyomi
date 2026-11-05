@@ -71,7 +71,7 @@ fn an_absent_or_empty_price_id_both_resolve_to_none() {
 Real precedent — two tests, three reviews, three days, and one diff that produced two different
 totals depending on who ran it:
 
-- **KYO-257** (`2026-09-02` log, `KYO-257: un-quarantine has_hsts_header_when_not_demo`, 🟢) —
+- (private/local review log; not tracked in this repository) **KYO-257** (`2026-09-02` log, `KYO-257: un-quarantine has_hsts_header_when_not_demo`, 🟢) —
   `apps/server/tests/contract_health.rs::has_hsts_header_when_not_demo` was un-quarantined by
   adding `FRONTEND_URL: "https://ci-test.kyomi.invalid"` to the `cargo test` step in
   `.github/workflows/ci.yml`. The reviewer: *"`FRONTEND_URL` is set only for the CI step, not
@@ -79,14 +79,14 @@ totals depending on who ran it:
   still see this test fail, reproducing (in miniature) the original quarantine condition."*
   Accepted as the ticket's sanctioned option, mitigated only by a doc comment naming the exact
   local invocation.
-- **KYO-271 / KYO-368** (`2026-09-03` log, the two
+- (private/local review log; not tracked in this repository) **KYO-271 / KYO-368** (`2026-09-03` log, the two
   `KYO-271 / KYO-368: extract kyomi-auth … SQLite test fixtures` entries) — the same staged
   diff, reviewed twice on the same day, reported **774 passed / 0 failed** in one session and
   **773 passed / 1 failed** in the other. The entire delta was
   `stripe_config::tests::test_all_lookups_return_none_without_env`, failing "because this
   shell's `.env` populates `STRIPE_*` vars". Each reviewer had to establish independently that
   a red test had nothing to do with a diff about SQLite fixtures.
-- **KYO-636** (`2026-09-04` log,
+- (private/local review log; not tracked in this repository) **KYO-636** (`2026-09-04` log,
   `KYO-636: tracing interest-cache race guard consolidation (independent re-verification)`) —
   the same test, the same cause, a third time, a day later. The reviewer reproduced it, then
   had to run the targeted suite three times under `env -u STRIPE_*` to get a usable result.
