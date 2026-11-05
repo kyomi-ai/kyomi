@@ -1074,6 +1074,65 @@ pub struct ContainerLivenessOutcome {
     pub archived_tables: Vec<String>,
 }
 
+/// Source-container discovery, independent of table enumeration or caching.
+/// Only projects whose entire container listing succeeded can prove absence.
+/// Failed containers with known names belong in `present`, even if no tables
+/// could be listed. Unknown failures leave their project out of `complete_projects`.
+#[derive(Default)]
+pub struct ContainerLivenessEvidence {
+    pub present: HashSet<ContainerKey>,
+    pub complete_projects: HashSet<String>,
+    /// SQL catalogs/databases can store datasets as `catalog.schema`. A
+    /// discovered parent protects all its descendants until their own discovery
+    /// can provide independent evidence; a partial table crawl cannot remove them.
+    pub protected_subtrees: HashSet<ContainerKey>,
+}
+
+impl ContainerLivenessEvidence {
+    fn protects(&self, key: &ContainerKey) -> bool {
+        self.present.contains(key)
+            || self.protected_subtrees.iter().any(|(project, dataset)| {
+                // SQL configured containers are matched case-insensitively.
+                // Protect old cached spellings too when their listing fails.
+                // BigQuery uses exact keys and never sets protected_subtrees.
+                project == &key.0
+                    && key.1.get(..dataset.len()).is_some_and(|prefix| prefix.eq_ignore_ascii_case(dataset))
+                    && key.1.get(dataset.len()..).is_some_and(|suffix| suffix.is_empty() || suffix.starts_with('.'))
+            })
+    }
+
+    fn confirms_absence(&self, key: &ContainerKey) -> bool {
+        self.complete_projects.contains(&key.0) && !self.protects(key)
+    }
+}
+
+/// Reconcile using explicit container discovery rather than whole-run errors.
+/// Callers must retain their existing `outcome.archive` trust guard: a wholly
+/// empty run is still insufficient evidence for destructive cleanup (KYO-622).
+/// Connect retains the whole-run API until its wire protocol supplies attribution.
+pub async fn reconcile_container_liveness_with_evidence(
+    db: &DbPool,
+    workspace_id: &str,
+    datasource_config_id: &str,
+    evidence: &ContainerLivenessEvidence,
+) -> Result<ContainerLivenessOutcome> {
+    if evidence.complete_projects.is_empty() {
+        return Ok(ContainerLivenessOutcome {
+            archived_containers: Vec::new(),
+            archived_tables: Vec::new(),
+        });
+    }
+    reconcile_container_liveness_scoped(
+        db,
+        workspace_id,
+        datasource_config_id,
+        &evidence.present,
+        |key| evidence.confirms_absence(key),
+        |key| evidence.protects(key),
+    )
+    .await
+}
+
 /// Reclaim `datasource_table_cache` rows belonging to a container that has
 /// genuinely stopped existing at the source.
 ///
@@ -1086,20 +1145,12 @@ pub struct ContainerLivenessOutcome {
 /// reclaims it — see `datasource_container_cache`'s migration for the full
 /// background.
 ///
-/// `run_complete` MUST be `false` whenever the calling run produced ANY
-/// error (a denied container, a failed table listing, a partial discovery
-/// failure folded into an opaque error string). Neither `discover_all_containers`
-/// (`kyomi_agent::catalog::traits`, a flat `Result<Vec<String>>`) nor
-/// Connect's `CatalogResult` (per-container failures are opaque strings
-/// folded into `errors`, not attributable to a container) can say
-/// "enumeration succeeded for containers X and Y but not Z" — only "did
-/// this run's enumeration succeed as a whole". Whole-run completeness is
-/// therefore the only sound evidence available; this deliberately does NOT
-/// attempt to parse `errors` strings to attribute a failure to a specific
-/// container. Being conservative here is deliberate: a table-level error
-/// does not strictly mean a container was missed, but the archive-wrongly
-/// -vs-preserve-a-stale-row asymmetry means treating "maybe missed" as
-/// "definitely missed, for GC purposes" is the only safe default.
+/// Legacy API for discovery protocols without structured evidence (Connect,
+/// whose protocol upgrade is tracked in KYO-940). `run_complete` MUST be
+/// `false` whenever that run produced any error; opaque diagnostic strings
+/// cannot identify which missing container failed. SQL and BigQuery REST use
+/// [`reconcile_container_liveness_with_evidence`] instead, keeping discovery
+/// presence separate from table enumeration and downstream cache failures.
 ///
 /// When `run_complete` is `false` this is a strict no-op — not even a
 /// `missed_runs` counter reset — and returns an empty outcome without
@@ -1151,37 +1202,25 @@ pub async fn reconcile_container_liveness(
         });
     }
 
+    reconcile_container_liveness_scoped(
+        db, workspace_id, datasource_config_id, enumerated_containers,
+        |key| !enumerated_containers.contains(key), |key| enumerated_containers.contains(key),
+    ).await
+}
+
+async fn reconcile_container_liveness_scoped(
+    db: &DbPool,
+    workspace_id: &str,
+    datasource_config_id: &str,
+    enumerated_containers: &HashSet<ContainerKey>,
+    confirms_absence: impl Fn(&ContainerKey) -> bool,
+    is_present: impl Fn(&ContainerKey) -> bool,
+) -> Result<ContainerLivenessOutcome> {
     let is_pg = db.is_postgres();
     let now_expr = kyomi_core::sql_compat::now(is_pg);
 
-    // Step 1: every enumerated container was just seen this (complete) run
-    // — reset its streak.
-    for (project_id, dataset_id) in enumerated_containers {
-        let sql = format!(
-            "INSERT INTO datasource_container_cache \
-                (workspace_id, datasource_config_id, project_id, dataset_id, last_seen_at, missed_runs, created_at, updated_at) \
-             VALUES ($1, $2, $3, $4, {now}, 0, {now}, {now}) \
-             ON CONFLICT (workspace_id, datasource_config_id, project_id, dataset_id) \
-             DO UPDATE SET last_seen_at = {now}, missed_runs = 0, updated_at = {now}",
-            now = now_expr,
-        );
-        kyomi_core::db_execute!(
-            db,
-            &sql,
-            workspace_id,
-            datasource_config_id,
-            project_id,
-            dataset_id
-        )
-        .map_err(|e| {
-            kyomi_core::Error::Internal(format!(
-                "failed to record container liveness for {project_id}.{dataset_id}: {e}"
-            ))
-        })?;
-    }
-
-    // Step 2: which currently-live containers were NOT enumerated this run
-    // — same "live" definition `check_container_coverage` uses, keyed by
+    // Read currently-live containers before resetting presence and advancing
+    // confirmed misses — same "live" definition `check_container_coverage` uses, keyed by
     // the same `(project_id, dataset_id)` tuple per `ContainerKey`'s doc
     // comment.
     #[derive(sqlx::FromRow)]
@@ -1209,11 +1248,40 @@ pub async fn reconcile_container_liveness(
         ))
     })?;
 
-    let missing: Vec<ContainerKey> = live_rows
-        .into_iter()
-        .map(|r| (r.project_id, r.dataset_id))
-        .filter(|key| !enumerated_containers.contains(key))
-        .collect();
+    let live_keys: Vec<ContainerKey> = live_rows.into_iter()
+        .map(|r| (r.project_id, r.dataset_id)).collect();
+    // A known parent protects its cached children and invalidates any old
+    // miss streak for them, including when the parent's table listing failed.
+    let mut present = enumerated_containers.clone();
+    present.extend(live_keys.iter().filter(|key| is_present(key)).cloned());
+    // Step 1: every enumerated container was just seen this (complete) run
+    // — reset its streak.
+    for (project_id, dataset_id) in &present {
+        let sql = format!(
+            "INSERT INTO datasource_container_cache \
+                (workspace_id, datasource_config_id, project_id, dataset_id, last_seen_at, missed_runs, created_at, updated_at) \
+             VALUES ($1, $2, $3, $4, {now}, 0, {now}, {now}) \
+             ON CONFLICT (workspace_id, datasource_config_id, project_id, dataset_id) \
+             DO UPDATE SET last_seen_at = {now}, missed_runs = 0, updated_at = {now}",
+            now = now_expr,
+        );
+        kyomi_core::db_execute!(
+            db,
+            &sql,
+            workspace_id,
+            datasource_config_id,
+            project_id,
+            dataset_id
+        )
+        .map_err(|e| {
+            kyomi_core::Error::Internal(format!(
+                "failed to record container liveness for {project_id}.{dataset_id}: {e}"
+            ))
+        })?;
+    }
+
+    let missing: Vec<ContainerKey> = live_keys.into_iter()
+        .filter(|key| confirms_absence(key)).collect();
 
     let mut archived_containers = Vec::new();
     let mut archived_tables = Vec::new();
@@ -4216,6 +4284,49 @@ mod tests {
         );
         assert!(!after.material);
     }
+    #[tokio::test]
+    async fn discovery_protected_descendant_resets_its_prior_miss_streak() {
+        let db = DbPool::connect("sqlite::memory:").await.expect("sqlite");
+        let DbPool::Sqlite(sq) = &db else {
+            unreachable!()
+        };
+        let (workspace, ds) = seed_container_scoped_fixture(
+            sq,
+            "discoveryreset",
+            &[("proj", "denied.private", "old")],
+        )
+        .await;
+        let absent = HashSet::new();
+        reconcile_container_liveness(&db, &workspace, &ds, &absent, true)
+            .await
+            .expect("first miss");
+        let mut evidence = ContainerLivenessEvidence::default();
+        evidence.complete_projects.insert("proj".into());
+        evidence.present.insert(("proj".into(), "denied".into()));
+        evidence
+            .protected_subtrees
+            .insert(("proj".into(), "denied".into()));
+        reconcile_container_liveness_with_evidence(&db, &workspace, &ds, &evidence)
+            .await
+            .expect("parent reappears");
+        assert_eq!(
+            read_liveness_row(sq, &ds, "proj", "denied.private").await,
+            Some((0, true))
+        );
+        evidence.present.clear();
+        evidence.protected_subtrees.clear();
+        for miss in 1..=MISSED_COMPLETE_RUNS_BEFORE_ARCHIVE {
+            let outcome =
+                reconcile_container_liveness_with_evidence(&db, &workspace, &ds, &evidence)
+                    .await
+                    .expect("new miss");
+            assert_eq!(
+                outcome.archived_containers.len(),
+                usize::from(miss == MISSED_COMPLETE_RUNS_BEFORE_ARCHIVE)
+            );
+        }
+    }
+
 }
 
 #[cfg(test)]
