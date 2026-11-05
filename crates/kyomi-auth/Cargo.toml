@@ -10,6 +10,7 @@ kyomi-core = { workspace = true }
 kyomi-connect-protocol = { workspace = true }
 kyomi-embed = { workspace = true }
 kyomi-types = { workspace = true }
+kyomi-mcp-client = { workspace = true }
 kyomi-knowledge = { workspace = true }
 kyomi-datasource-server = { workspace = true }
 axum = { workspace = true }

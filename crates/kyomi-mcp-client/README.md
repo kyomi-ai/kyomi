@@ -29,7 +29,11 @@ No stdio, old HTTP+SSE transport, server requests, sampling, elicitation, roots,
 prompt import, subscriptions, SSE reconnection or automatic mutation retry is enabled.
 Tools must first be listed to obtain the validated header schema. The caller still
 must check exact revision-bound grants before invoking them. Invalid modern header
-annotations are excluded. Remote results and JSON-RPC errors are typed outcomes;
+annotations are excluded. `list_tools_catalog` returns valid tools plus bounded
+rejected-tool diagnostics (exact remote name and static reason); rejected names
+still count toward catalog limits and duplicate-name checks. The compatibility
+`list_tools` port returns only valid definitions. Discovery UIs use the diagnostic
+catalog port rather than hiding exclusions. Remote results and JSON-RPC errors are typed outcomes;
 remote text is untrusted and should not be logged as credentials or instructions.
 
 `call_tool_cancellable` accepts a one-shot cancellation receiver tied to exactly one
