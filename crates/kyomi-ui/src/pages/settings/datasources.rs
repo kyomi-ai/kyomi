@@ -9431,33 +9431,11 @@ fn EditModeCatalogTab(
                                     {
                                         stats_action.dispatch(id);
                                     }
-                                    // KYO-327: an "idle" status can still mean
-                                    // some containers/schemas were denied
-                                    // during discovery — `resolve_final_status`
-                                    // folds a partial run down to "idle" as
-                                    // long as at least one table was found
-                                    // elsewhere. `progress.warnings` (the same
-                                    // structured array `get_catalog_stats`
-                                    // reads into `CatalogStatsResult`) carries
-                                    // those denials; read directly, never
-                                    // parsed out of the "failed" arm's
-                                    // collapsed `error` string below.
-                                    let warning_count = resp
-                                        .progress
-                                        .as_ref()
-                                        .and_then(|p| p.get("warnings"))
-                                        .and_then(|w| w.as_array())
-                                        .map(Vec::len)
-                                        .unwrap_or(0);
-                                    if warning_count > 0 {
-                                        let container_word = if warning_count == 1 {
-                                            "container"
-                                        } else {
-                                            "containers"
-                                        };
+                                    let warnings = extract_refresh_warnings(resp.progress.as_ref());
+                                    if !warnings.is_empty() {
                                         toast_info(format!(
-                                            "Catalog refresh completed with warnings — \
-                                             {warning_count} {container_word} could not be read"
+                                            "Catalog refresh completed with warnings: {}",
+                                            warnings.join("; ")
                                         ));
                                     } else {
                                         toast_success("Catalog refresh complete".to_string());
@@ -9475,6 +9453,10 @@ fn EditModeCatalogTab(
                                     .map(|s| s.to_string())
                                     .unwrap_or_else(|| "Catalog refresh failed".to_string());
                                 toast_error(detail);
+                                let warnings = extract_refresh_warnings(resp.progress.as_ref());
+                                if !warnings.is_empty() {
+                                    toast_info(format!("Catalog refresh warnings: {}", warnings.join("; ")));
+                                }
                             }
                             _ => {}
                         }
@@ -9838,40 +9820,22 @@ fn EditModeCatalogTab(
                             })
                     }}
 
-                    // Persistent partial-refresh-warnings notice (KYO-327).
-                    // Companion to the failed-refresh notice above: the last
-                    // refresh completed (`catalog_refresh_status == "idle"`)
-                    // but one or more containers/schemas could not be read —
-                    // e.g. a permission-denied schema alongside otherwise-
-                    // successful discovery. Renders from `CatalogStatsResult`
-                    // any time the page loads, same as the failed-refresh
-                    // notice, so a background/initial refresh with warnings
-                    // (nobody was watching the poller) still leaves a visible
-                    // trace. Mutually exclusive with the failed notice above:
-                    // `get_catalog_stats` only populates `refresh_warnings`
-                    // when `refresh_failed` is false, so the two can never
-                    // both render for the same stats snapshot — no extra
-                    // guard needed here beyond the same transient-error
-                    // suppression the failed notice uses.
+                    // Warnings carry additional details for successful and failed
+                    // refreshes, independently of the failure reason above.
                     {move || {
                         if refresh_action.value().get().and_then(|r| r.err()).is_some() {
                             return None;
                         }
                         stats
                             .get()
-                            .filter(|s| !s.refresh_failed && !s.refresh_warnings.is_empty())
+                            .filter(|s| !s.refresh_warnings.is_empty())
                             .map(|s| {
-                                let count = s.refresh_warnings.len();
-                                let container_word = if count == 1 { "container" } else { "containers" };
                                 let detail = s.refresh_warnings.join("; ");
                                 view! {
                                     <Alert variant=AlertVariant::Warning class="mt-3">
-                                        <AlertTitle>"Catalog refresh completed with warnings"</AlertTitle>
+                                        <AlertTitle>"Catalog refresh warnings"</AlertTitle>
                                         <AlertDescription>
-                                            {format!(
-                                                "{count} {container_word} could not be read during the \
-                                                 last refresh: {detail}"
-                                            )}
+                                            {detail}
                                         </AlertDescription>
                                     </Alert>
                                 }
