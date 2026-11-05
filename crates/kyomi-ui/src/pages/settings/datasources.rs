@@ -3879,12 +3879,14 @@ pub fn DatasourceModal(
                     set_modal_oauth_email.try_set(email);
                     set_modal_oauth_expired.try_set(false);
                     set_modal_oauth_connecting.try_set(false);
-                    // BigQuery OAuth never runs Test & Discover (the generic
-                    // button is hidden for this type — the remote system is
-                    // verified by the OAuth handshake itself, not a query).
-                    // Without this, `test_result` would stay `None` forever
-                    // and the create-mode "Next" gate below would never
-                    // unlock, since that gate is the only other writer.
+                    // Record OAuth completion as a successful connection result
+                    // and discovery status without running Test & Discover.
+                    // This write is not required to unlock the current create-mode
+                    // gate: Datasource(_) OAuth modes pass before save, and the
+                    // retired GoogleAccount/kyomi_oauth path accepts the connected
+                    // signal set above. None/service_account uses test success;
+                    // reaching that mode from this OAuth arm is the cross-mode
+                    // defect tracked by KYO-921.
                     set_test_result.try_set(Some(TestConnectionResult {
                         success: true,
                         message: "Connected to Google".to_string(),
