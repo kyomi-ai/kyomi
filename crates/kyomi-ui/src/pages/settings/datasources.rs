@@ -5302,6 +5302,12 @@ fn ConnectCreateSuccessView(
     }
 }
 
+// Only a successful capability response establishes a restriction. The server
+// remains the correctness boundary when this hint is unavailable or stale.
+fn google_disconnect_blocked_by_sign_in(result: Option<Result<bool, ServerFnError>>) -> bool {
+    matches!(result, Some(Ok(true)))
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Modal OAuth Status Panel (shared 4-state UI)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -5347,6 +5353,9 @@ fn ModalOAuthStatusPanel(
     on_disconnect: Callback<()>,
     /// Whether the disconnect action is currently pending.
     disconnect_pending: Signal<bool>,
+    /// Only the global Google account panel supplies this sign-in restriction.
+    #[prop(default = Signal::stored(false))]
+    disconnect_blocked: Signal<bool>,
     /// Called when the popup-monitor (KYO-437) detects a connect attempt
     /// resolved without an OAuth `postMessage` ever arriving — the popup
     /// was closed, or the attempt timed out. Built by
@@ -5460,9 +5469,9 @@ fn ModalOAuthStatusPanel(
                         <Button
                             variant=ButtonVariant::Outline
                             size=ButtonSize::Sm
-                            disabled=Signal::derive(move || disconnect_pending.get())
+                            disabled=Signal::derive(move || disconnect_pending.try_get().unwrap_or(false) || disconnect_blocked.try_get().unwrap_or(false))
                             on:click=move |_| {
-                                if !disconnect_pending.get_untracked() {
+                                if !disconnect_pending.get_untracked() && !disconnect_blocked.get_untracked() {
                                     on_disconnect.run(());
                                 }
                             }
@@ -5479,6 +5488,13 @@ fn ModalOAuthStatusPanel(
                             }}
                         </Button>
                     </div>
+                    <Show when=move || disconnect_blocked.get()>
+                        <p class="text-sm text-muted-foreground mt-2">
+                            "Google is your only sign-in method. Add a password or passkey in "
+                            <a href="/settings/security" class="text-primary underline">"Settings → Security"</a>
+                            " before disconnecting."
+                        </p>
+                    </Show>
                 }.into_any();
             }
 
@@ -6246,6 +6262,13 @@ fn BigQueryAuthModeSection(
         oauth_config_missing(&cfg_oauth_client_id.get(), &cfg_oauth_client_secret.get())
     });
 
+    // Unknown/loading/error remains enabled; only a successful server answer
+    // establishes that Google is the sole sign-in method.
+    let google_only = Resource::new(|| (), |_| crate::server_fns::security::google_is_only_sign_in_method());
+    let google_disconnect_blocked = Signal::derive(move || {
+        google_disconnect_blocked_by_sign_in(google_only.try_get().flatten())
+    });
+
     // ── Disconnect callbacks — wraps the Action dispatch in a Callback<()>.
     let on_google_disconnect = Callback::new(move |()| {
         if !google_disconnect_action.pending().get_untracked() {
@@ -6381,6 +6404,7 @@ fn BigQueryAuthModeSection(
                         cfg_missing=Signal::stored(false)
                         on_disconnect=on_google_disconnect
                         disconnect_pending=google_disconnect_pending
+                        disconnect_blocked=google_disconnect_blocked
                         on_recover=on_oauth_recover
                     />
                     <Show when=move || !oauth_connected.get()>
