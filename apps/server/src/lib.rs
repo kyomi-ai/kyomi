@@ -120,6 +120,10 @@ pub fn build_router(state: state::AppState, _extras: ServerExtras) -> Router {
         .nest("/api/v1/auth", routes::auth_token::routes())
         .nest("/api/v1/auth", routes::auth_google_oauth::routes())
         .nest("/api/v1/auth/oauth", routes::auth_datasource_oauth::routes())
+        .nest(
+            "/api/v1/personal-mcp/oauth",
+            routes::personal_mcp_oauth::production(&state),
+        )
         .nest("/api/v1/dashboards", routes::dashboard_export::routes())
         .nest("/api/v1/billing", routes::billing::routes())
         .nest("/api/v1/integrations", routes::integrations::routes())
@@ -248,7 +252,7 @@ pub fn build_router(state: state::AppState, _extras: ServerExtras) -> Router {
         .layer(axum::middleware::from_fn(middleware::security_headers))
         .layer(axum::Extension(middleware::DemoModeFlag(demo_mode)))
         .layer(middleware::cors_layer())
-        .layer(TraceLayer::new_for_http())
+        .layer(TraceLayer::new_for_http().make_span_with(http_trace_span))
         .layer(RequestBodyLimitLayer::new(10 * 1024 * 1024)) // 10 MB
 }
 
@@ -307,3 +311,12 @@ pub fn build_service(
 > {
     wrap_service(build_router(state, ServerExtras::default()))
 }
+
+/// OAuth callback query strings contain one-use credentials. Record only path,
+/// never URI, headers, or request/response bodies in the global HTTP span.
+fn http_trace_span(request: &axum::http::Request<axum::body::Body>) -> tracing::Span {
+    tracing::info_span!("http_request", method = %request.method(), path = request.uri().path())
+}
+
+#[cfg(test)]
+mod http_trace_tests;
