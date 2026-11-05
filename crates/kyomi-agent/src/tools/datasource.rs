@@ -237,8 +237,9 @@ impl AgentTool for QueryDatasourceTool {
             kyomi_datasource_server::provider::QueryStatus::Error => {
                 let raw_err = result.error.unwrap_or_else(|| "Unknown query error".to_string());
                 tracing::warn!(raw_error = %raw_err, datasource = %ds.slug, "datasource query error (sanitized for agent)");
-                // A dry run proves unrecognized analysis errors happened before
-                // execution; transport, timeout and decoding errors stay uncertain.
+                // A dry run that reproduces the original analysis error proves
+                // the query was rejected before execution; transport, timeout,
+                // decoding and different errors stay uncertain.
                 let rejected = super::query_utils::query_error_is_recoverable(
                     provider.as_ref(),
                     ds.datasource_type.as_ref(),
