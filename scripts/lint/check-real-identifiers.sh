@@ -356,6 +356,7 @@ my %ALLOWED_DOMAINS = (
     'kyomi.dev'           => 'first-party development domain',
     'kyomi.invalid'       => 'first-party test domain under the .invalid TLD, reserved for this purpose (RFC 2606)',
     'fcm.googleapis.com'  => 'Firebase Cloud Messaging — a public third-party API endpoint this app calls, not a customer identifier',
+    'anthropic.com'       => 'public agent-attribution trailer domain, not a customer identifier',
     'company.com'         => 'common placeholder domain used in fixture/example data',
     'evil.com'            => 'deliberately-named placeholder domain used in adversarial/security test fixtures',
     'email.com'           => 'common placeholder domain used in fixture/example data',
