@@ -1586,6 +1586,26 @@ async fn migration_chains_produce_matching_schemas() {
         "SQLite knowledge_chunks is missing `idx_knowledge_chunks_workspace` after the migration chain"
     );
 
+    // KYO-961: the dashboard_id delete/cascade paths need this index on both
+    // chains. It is non-unique, so schema parity itself does not compare it;
+    // assert its name, table and indexed column explicitly.
+    assert!(
+        pg_indexes.iter().any(|i| {
+            i.table == "knowledge_chunks"
+                && i.name == "idx_knowledge_chunks_dashboard_id"
+                && i.key_signature == ["dashboard_id"]
+        }),
+        "Postgres knowledge_chunks is missing or misdefines `idx_knowledge_chunks_dashboard_id` after the migration chain"
+    );
+    assert!(
+        sqlite_indexes.iter().any(|i| {
+            i.table == "knowledge_chunks"
+                && i.name == "idx_knowledge_chunks_dashboard_id"
+                && i.key_signature == ["dashboard_id"]
+        }),
+        "SQLite knowledge_chunks is missing or misdefines `idx_knowledge_chunks_dashboard_id` after the migration chain"
+    );
+
     // Indexes/PKs/FKs are only meaningful to compare for tables that exist
     // on both sides — a table missing entirely from one backend is already
     // reported by diff_schemas, and comparing its indexes/FKs too would
