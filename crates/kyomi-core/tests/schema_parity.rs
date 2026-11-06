@@ -1563,6 +1563,29 @@ async fn migration_chains_produce_matching_schemas() {
         );
     }
 
+    // KYO-960: the live knowledge_chunks table must carry the restored search
+    // indexes after the real chains run. Before this ticket the Postgres table
+    // had only its primary key: 20260412000000's `CREATE INDEX IF NOT EXISTS`
+    // silently skipped because the legacy workspace_knowledge_chunks table
+    // owned the name, so semantic retrieval sequentially scanned.
+    for index in [
+        "idx_knowledge_chunks_embedding",
+        "idx_knowledge_chunks_workspace",
+    ] {
+        assert!(
+            pg_indexes
+                .iter()
+                .any(|i| i.table == "knowledge_chunks" && i.name == index),
+            "Postgres knowledge_chunks is missing `{index}` after the migration chain"
+        );
+    }
+    assert!(
+        sqlite_indexes
+            .iter()
+            .any(|i| i.table == "knowledge_chunks" && i.name == "idx_knowledge_chunks_workspace"),
+        "SQLite knowledge_chunks is missing `idx_knowledge_chunks_workspace` after the migration chain"
+    );
+
     // Indexes/PKs/FKs are only meaningful to compare for tables that exist
     // on both sides — a table missing entirely from one backend is already
     // reported by diff_schemas, and comparing its indexes/FKs too would
