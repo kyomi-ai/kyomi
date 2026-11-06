@@ -844,10 +844,9 @@ mod tests {
         .await;
         pool.close().await;
         revoker.close().await;
-        sqlx::query(&format!("DROP DATABASE {name} WITH (FORCE)"))
-            .execute(&admin)
+        kyomi_core::test_db::drop_test_database(&admin, &name)
             .await
-            .unwrap();
+            .expect("drop conversation_read test database");
         admin.close().await;
         outcome.unwrap();
     }

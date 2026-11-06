@@ -510,20 +510,11 @@ impl IsolatedPostgres {
     }
 }
 
-/// Drop an isolated test database deterministically.
-///
-/// `pool.close()` stops new work, but a session can still be connected when the
-/// drop runs (for example a connection held past close or a background task).
-/// Postgres keeps retrying for up to 5 seconds before raising 55006, which is
-/// why the Clippy job intermittently lost ~5s and then failed. `WITH (FORCE)`
-/// terminates any such session, the same pattern as `kyomi_core::test_db`'s
-/// self-heal drop and `apps/server/src/routes/conversation_read.rs`. Postgres
-/// 13+; CI and the local test service are pg15.
+/// Drop an isolated test database through the shared FORCE helper, keeping the
+/// database name in the panic message. See
+/// [`kyomi_core::test_db::drop_test_database`] for the FORCE rationale.
 async fn drop_isolated_database(admin: &sqlx::PgPool, name: &str) {
-    if let Err(error) = sqlx::query(&format!(r#"DROP DATABASE "{name}" WITH (FORCE)"#))
-        .execute(admin)
-        .await
-    {
+    if let Err(error) = kyomi_core::test_db::drop_test_database(admin, name).await {
         panic!("drop isolated test database `{name}`: {error}");
     }
 }

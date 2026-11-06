@@ -1544,8 +1544,7 @@ async fn migration_chains_produce_matching_schemas() {
 
     // Drop the scratch database before evaluating the diff, so cleanup runs
     // regardless of whether the check below passes or fails.
-    sqlx::query(&format!("DROP DATABASE \"{scratch_db}\""))
-        .execute(&admin_pool)
+    kyomi_core::test_db::drop_test_database(&admin_pool, &scratch_db)
         .await
         .unwrap_or_else(|e| panic!("drop scratch database `{scratch_db}`: {e}"));
 
