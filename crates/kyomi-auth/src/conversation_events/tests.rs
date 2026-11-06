@@ -505,13 +505,79 @@ impl IsolatedPostgres {
     }
     async fn close(self) {
         crate::test_pg::postgres_pool(&self.db).close().await;
-        sqlx::query(&format!("DROP DATABASE {}", self.name))
-            .execute(&self.admin)
-            .await
-            .expect("drop isolated test database");
+        drop_isolated_database(&self.admin, &self.name).await;
         self.admin.close().await;
     }
 }
+
+/// Drop an isolated test database deterministically.
+///
+/// `pool.close()` stops new work, but a session can still be connected when the
+/// drop runs (for example a connection held past close or a background task).
+/// Postgres keeps retrying for up to 5 seconds before raising 55006, which is
+/// why the Clippy job intermittently lost ~5s and then failed. `WITH (FORCE)`
+/// terminates any such session, the same pattern as `kyomi_core::test_db`'s
+/// self-heal drop and `apps/server/src/routes/conversation_read.rs`. Postgres
+/// 13+; CI and the local test service are pg15.
+async fn drop_isolated_database(admin: &sqlx::PgPool, name: &str) {
+    if let Err(error) = sqlx::query(&format!(r#"DROP DATABASE "{name}" WITH (FORCE)"#))
+        .execute(admin)
+        .await
+    {
+        panic!("drop isolated test database `{name}`: {error}");
+    }
+}
+
+/// Regression for KYO-962: a session can still be connected when the isolated
+/// database is dropped; Postgres retries for ~5s and then raises 55006. Holding
+/// a session open makes that condition deterministic and proves the teardown's
+/// FORCE path (not the original timing window): it must terminate the session
+/// and drop the database instead of waiting/failing.
+#[tokio::test]
+async fn postgres_isolated_teardown_forces_lingering_session() {
+    let Some(scratch) =
+        IsolatedPostgres::connect("postgres_isolated_teardown_forces_lingering_session").await
+    else {
+        return;
+    };
+    let url = kyomi_core::test_db::test_database_url();
+    let (server, _) = kyomi_core::test_db::split_database_url(&url);
+    let name = scratch.name.clone();
+
+    // A live session on the isolated DB at drop time is the flake condition.
+    let lingering = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&format!("{server}/{name}"))
+        .await
+        .expect("open lingering session on isolated test database");
+    sqlx::query("SELECT 1")
+        .execute(&lingering)
+        .await
+        .expect("lingering session is live");
+
+    let probe = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&format!("{server}/postgres"))
+        .await
+        .expect("connect teardown probe");
+
+    scratch.close().await;
+
+    let still_there: Option<(String,)> =
+        sqlx::query_as("SELECT datname FROM pg_database WHERE datname = $1")
+            .bind(&name)
+            .fetch_optional(&probe)
+            .await
+            .expect("query pg_database after teardown");
+    assert!(
+        still_there.is_none(),
+        "isolated database `{name}` survived teardown"
+    );
+
+    drop(lingering);
+    probe.close().await;
+}
+
 #[tokio::test]
 async fn postgres_trigger_cleanup_blocks_shared_readers_but_not_isolated_suites() {
     let Some(scratch) = IsolatedPostgres::connect(
@@ -847,11 +913,9 @@ async fn postgres_fresh_and_upgrade_preserve_existing_history() {
         );
         drop(db);
         scratch.close().await;
-        sqlx::query(&format!("DROP DATABASE {name}"))
-            .execute(&admin)
-            .await
-            .unwrap();
+        drop_isolated_database(&admin, &name).await;
     }
+    admin.close().await;
 }
 
 async fn held_commit_order(db: &DbPool, other: &DbPool) {
