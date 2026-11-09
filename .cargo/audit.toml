@@ -195,7 +195,8 @@ ignore = [
     # A fix is unreachable with a released sqlx, verified 2026-11-09:
     #   cargo update -p libsqlite3-sys --precise 0.39.1 --dry-run -> fails
     #     (sqlx-sqlite 0.8.6 requires libsqlite3-sys ^0.30.1)
-    #   sqlx-sqlite 0.9.0 (latest release, crates.io 2026-11-09) declares
+    #   sqlx-sqlite 0.9.0 (latest release, published 2026-05-21; checked
+    #     against crates.io 2026-11-09) declares
     #     libsqlite3-sys ">=0.30.1, <0.38.0", so even the 0.9 major migration
     #     cannot reach a patched 0.39.
     #   Only sqlx's unreleased `main` allows ">=0.30.1, <0.40.0". We do not pin
@@ -213,6 +214,11 @@ ignore = [
     #     datasource type, import or attach path takes a SQLite file.
     #   * Production Postgres deployments never open SQLite; all other uses
     #     are `sqlite::memory:` in tests, which have no files.
+    #   * Operator note: restoring or copying a `kyomi.db` together with a
+    #     foreign `-wal` file (backup restore, shared DATA_DIR or
+    #     DATABASE_URL=sqlite:) is the one realistic way to open a mismatched
+    #     pair; only restore a database and its `-wal` from a trusted source.
+    #     Kyomi has no in-app backup, restore or import feature.
     # Exploitation needs an attacker who can already write into the victim's
     # local data directory, which also hands them the database itself.
     #
