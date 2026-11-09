@@ -16,7 +16,7 @@
 #   3. Re-check the whole list whenever `cargo update` runs. Entries whose
 #      blocker has cleared must be removed in the same PR that clears them.
 #
-# Last full review: 2026-11-05
+# Last full review: 2026-11-09
 # =============================================================================
 
 [advisories]
@@ -174,6 +174,52 @@ ignore = [
     # web-push-native release on p256 0.14 + jwt-simple 0.15, and bumping the
     # workspace p256 dependency to 0.14 (kyomi-auth, kyomi-server, kyomi-ui).
     "RUSTSEC-2026-0387", # timing variability in operations intended to be constant-time
+
+    # -------------------------------------------------------------------------
+    # libsqlite3-sys 0.30.1 — bundled SQLite < 3.54.0 (KYO-966), revisit 2026-12-10
+    # -------------------------------------------------------------------------
+    # RUSTSEC-2026-0459 / CVE-2026-119375: SQLite before 3.54.0 can return
+    # uninitialized page-cache memory when a process opens a database file
+    # together with a sibling `-wal` file whose page size differs from the
+    # database's. The attack vector is local and needs a crafted db+wal pair
+    # written by a less trusted party and opened by the victim process.
+    # Patched in libsqlite3-sys >= 0.39.0 (bundles SQLite 3.54.x); 0.6.0 to
+    # 0.38.2 are affected.
+    #
+    # Path (verified 2026-11-09 with `cargo tree --locked -i
+    # libsqlite3-sys@0.30.1`): libsqlite3-sys 0.30.1 <- sqlx-sqlite 0.8.6
+    # <- sqlx 0.8.6 (workspace dependency, `sqlite` feature, bundled build)
+    # <- kyomi-core, kyomi-auth, kyomi-agent, kyomi-server, kyomi-desktop and
+    # the rest of the workspace. It is the only libsqlite3-sys in the lockfile.
+    #
+    # A fix is unreachable with a released sqlx, verified 2026-11-09:
+    #   cargo update -p libsqlite3-sys --precise 0.39.1 --dry-run -> fails
+    #     (sqlx-sqlite 0.8.6 requires libsqlite3-sys ^0.30.1)
+    #   sqlx-sqlite 0.9.0 (latest release, crates.io 2026-11-09) declares
+    #     libsqlite3-sys ">=0.30.1, <0.38.0", so even the 0.9 major migration
+    #     cannot reach a patched 0.39.
+    #   Only sqlx's unreleased `main` allows ">=0.30.1, <0.40.0". We do not pin
+    #   a production dependency to an unreleased git revision.
+    #
+    # Reachability, checked against the call sites 2026-11-09:
+    #   * The only non-test SQLite open is DbPool::connect
+    #     (crates/kyomi-core/src/db.rs) for the app's own database: standalone
+    #     and desktop mode open `<DATA_DIR>/kyomi.db` created by Kyomi itself
+    #     (crates/kyomi-core/src/config.rs), or the operator-set DATABASE_URL.
+    #     It runs with WAL mode, so a `-wal` sibling exists, but both files sit
+    #     in a directory only the local user/operator controls.
+    #   * No feature opens a user-supplied, uploaded or downloaded SQLite file:
+    #     kyomi-datasource links only sqlx-postgres and sqlx-mysql, and no
+    #     datasource type, import or attach path takes a SQLite file.
+    #   * Production Postgres deployments never open SQLite; all other uses
+    #     are `sqlite::memory:` in tests, which have no files.
+    # Exploitation needs an attacker who can already write into the victim's
+    # local data directory, which also hands them the database itself.
+    #
+    # Remove when: a released sqlx whose sqlx-sqlite allows libsqlite3-sys
+    # >= 0.39 exists (sqlx main already does); then bump the workspace sqlx and
+    # run `cargo audit` without this entry. Expiry: re-check by 2026-12-10.
+    "RUSTSEC-2026-0459", # libsqlite3-sys via C SQLite CVE-2026-119375 (uninitialized memory with mismatched WAL page size)
 
 ]
 
