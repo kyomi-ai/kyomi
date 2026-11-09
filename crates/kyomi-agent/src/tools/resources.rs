@@ -111,6 +111,14 @@ impl AgentTool for ReadResourceTool {
         })
     }
 
+    fn result_domain_outcome(&self, text: &str) -> agent_runtime::DomainOutcome {
+        if text.starts_with("Documentation not found") {
+            agent_runtime::DomainOutcome::Rejected
+        } else {
+            agent_runtime::DomainOutcome::Succeeded
+        }
+    }
+
     async fn execute(
         &self,
         args: serde_json::Value,
@@ -138,5 +146,24 @@ impl AgentTool for ReadResourceTool {
             Some(content) => Ok(content),
             None => Ok(format!("Documentation not found for URI: {uri}. Use browse_resources to see available documents.")),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn read_resource_not_found_is_rejected_not_succeeded() {
+        let text = "Documentation not found for URI: docs://kyomi/nope. Use browse_resources to see available documents.";
+        assert_eq!(
+            ReadResourceTool.result_domain_outcome(text),
+            agent_runtime::DomainOutcome::Rejected,
+            "a not-found docs response must not count as success"
+        );
+        assert_eq!(
+            ReadResourceTool.result_domain_outcome("documentation body"),
+            agent_runtime::DomainOutcome::Succeeded
+        );
     }
 }

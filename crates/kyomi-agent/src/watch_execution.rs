@@ -261,6 +261,79 @@ fn sanitize_json_null_bytes(value: serde_json::Value) -> serde_json::Value {
 // Response validation
 // ---------------------------------------------------------------------------
 
+/// The bounded tool-error guard is a terminal answer, not a malformed watch
+/// response. Return the fallback that carries the message without retrying.
+fn guard_stop_response(raw_response: &str) -> Option<WatchResponseData> {
+    crate::agent::is_tool_failure_guard_message(raw_response).then(|| WatchResponseData {
+        should_alert: false,
+        alert_title: None,
+        summary: None,
+        alert_message: None,
+        reason: Some(raw_response.to_string()),
+    })
+}
+
+/// Map the execution status to the live WebSocket state. A guard stop is an
+/// error even though it does not send a notification.
+fn ws_status_for(
+    status: kyomi_core::WatchExecutionStatus,
+    should_send_notification: bool,
+) -> String {
+    if status == kyomi_core::WatchExecutionStatus::Error {
+        "error".to_string()
+    } else if should_send_notification {
+        "success".to_string()
+    } else {
+        "no_alert".to_string()
+    }
+}
+
+/// Map the validated response to the stored/delivered terminal state. A guard
+/// stop is an Error with the guard text as the response; it never sends an
+/// empty report or alert.
+fn terminal_delivery(
+    mode: WatchMode,
+    guard_stopped: bool,
+    data: &WatchResponseData,
+) -> (bool, String, String, String, kyomi_core::WatchExecutionStatus) {
+    if guard_stopped {
+        return (
+            false,
+            String::new(),
+            String::new(),
+            data.reason.clone().unwrap_or_default(),
+            kyomi_core::WatchExecutionStatus::Error,
+        );
+    }
+    let is_alert = data.should_alert;
+    let should_send_notification = is_alert || mode == WatchMode::Report;
+    let (alert_title, summary, agent_response) = if should_send_notification {
+        (
+            data.alert_title.clone().unwrap_or_default(),
+            data.summary.clone().unwrap_or_default(),
+            data.alert_message.clone().unwrap_or_default(),
+        )
+    } else {
+        (
+            String::new(),
+            String::new(),
+            data.reason.clone().unwrap_or_default(),
+        )
+    };
+    let status = if mode == WatchMode::Report || is_alert {
+        kyomi_core::WatchExecutionStatus::Success
+    } else {
+        kyomi_core::WatchExecutionStatus::NoAlert
+    };
+    (
+        should_send_notification,
+        alert_title,
+        summary,
+        agent_response,
+        status,
+    )
+}
+
 /// Validate and parse the watch agent's JSON response.
 ///
 /// Extracts JSON from the response text, handling:
@@ -1189,6 +1262,7 @@ async fn execute_watch_inner(
 
     // 10. Validate response (with retry loop)
     let mut validated_data: Option<WatchResponseData> = None;
+    let mut guard_stopped = false;
 
     for retry_num in 0..=MAX_VALIDATION_RETRIES {
         match validate_watch_response(&raw_response) {
@@ -1205,6 +1279,18 @@ async fn execute_watch_inner(
                 break;
             }
             Err(error_msg) => {
+                // The bounded tool-error guard is a terminal, human-readable
+                // answer, not a malformed watch response. Deliver it as the
+                // reason and do not re-run the agent.
+                if let Some(response) = guard_stop_response(&raw_response) {
+                    warn!(
+                        watch_id = %watch_id,
+                        "Watch agent stopped after repeated tool failures; not retrying"
+                    );
+                    validated_data = Some(response);
+                    guard_stopped = true;
+                    break;
+                }
                 // Log validation failure for prompt-tuning analysis.
                 let error_type = crate::agent::classify_chartml_error(&error_msg);
                 if let Err(e) = kyomi_core::db_execute!(
@@ -1337,24 +1423,10 @@ async fn execute_watch_inner(
         kyomi_core::Error::Internal("Failed to validate watch response".into())
     })?;
 
-    // 11. Determine alert status
-    let is_alert = validated_data.should_alert;
-    let should_send_notification = is_alert || mode == WatchMode::Report;
-
-    let (alert_title, summary, agent_response) = if should_send_notification {
-        (
-            validated_data.alert_title.clone().unwrap_or_default(),
-            validated_data.summary.clone().unwrap_or_default(),
-            validated_data.alert_message.clone().unwrap_or_default(),
-        )
-    } else {
-        // No notification — store reason in agent_response for no-alert cases
-        (
-            String::new(),
-            String::new(),
-            validated_data.reason.clone().unwrap_or_default(),
-        )
-    };
+    // 11. Determine the stored/delivered terminal state. A guard stop is an
+    // Error with its human message, never an empty successful report.
+    let (should_send_notification, alert_title, summary, agent_response, status) =
+        terminal_delivery(mode, guard_stopped, &validated_data);
 
     // 12. Build execution trace
     let execution_trace = sanitize_json_null_bytes(serde_json::json!({
@@ -1362,15 +1434,6 @@ async fn execute_watch_inner(
         "summary": summary,
         "watch_prompt": watch.prompt,
     }));
-
-    // Determine execution status
-    // Report mode always succeeds (reports are always sent).
-    // Alert mode: "success" if should_alert, "no_alert" otherwise.
-    let status = if mode == WatchMode::Report || is_alert {
-        kyomi_core::WatchExecutionStatus::Success
-    } else {
-        kyomi_core::WatchExecutionStatus::NoAlert
-    };
 
     // Sanitize agent response for null bytes
     let sanitized_response = sanitize_null_bytes(&agent_response);
@@ -1433,11 +1496,7 @@ async fn execute_watch_inner(
     }
 
     // Return status for WS update
-    let ws_status = if should_send_notification {
-        "success".to_string()
-    } else {
-        "no_alert".to_string()
-    };
+    let ws_status = ws_status_for(status, should_send_notification);
 
     Ok((status.to_string(), ws_status))
 }
@@ -1472,6 +1531,64 @@ async fn load_watch(db: &DbPool, watch_id: &str) -> kyomi_core::Result<Option<Wa
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn guard_stop_is_delivered_as_reason_without_retry() {
+        let message = "I stopped after 5 consecutive tool calls failed to avoid looping. The last tool result was:\n\nboom\n\nI did not retry automatically. Please check the error and try a different approach.";
+        let response = guard_stop_response(message).expect("guard message");
+        assert!(!response.should_alert);
+        assert_eq!(response.reason.as_deref(), Some(message));
+        assert!(guard_stop_response(r#"{"should_alert": false, "reason": "ok"}"#).is_none());
+    }
+
+    #[test]
+    fn guard_stop_in_report_mode_is_error_and_does_not_send_an_empty_report() {
+        let data = WatchResponseData {
+            should_alert: false,
+            alert_title: None,
+            summary: None,
+            alert_message: None,
+            reason: Some("guard message".into()),
+        };
+        let (send, title, summary, response, status) =
+            terminal_delivery(WatchMode::Report, true, &data);
+        assert!(!send, "a guard stop must not send a report");
+        assert!(title.is_empty());
+        assert!(summary.is_empty());
+        assert_eq!(response, "guard message");
+        assert_eq!(status, kyomi_core::WatchExecutionStatus::Error);
+    }
+
+    #[test]
+    fn guard_stop_in_alert_mode_is_error_not_noalert() {
+        let data = WatchResponseData {
+            should_alert: false,
+            alert_title: None,
+            summary: None,
+            alert_message: None,
+            reason: Some("guard message".into()),
+        };
+        let (send, _, _, response, status) = terminal_delivery(WatchMode::Alert, true, &data);
+        assert!(!send);
+        assert_eq!(response, "guard message");
+        assert_eq!(status, kyomi_core::WatchExecutionStatus::Error);
+    }
+
+    #[test]
+    fn guard_stop_ws_status_is_error() {
+        assert_eq!(
+            ws_status_for(kyomi_core::WatchExecutionStatus::Error, false),
+            "error"
+        );
+        assert_eq!(
+            ws_status_for(kyomi_core::WatchExecutionStatus::Success, true),
+            "success"
+        );
+        assert_eq!(
+            ws_status_for(kyomi_core::WatchExecutionStatus::NoAlert, false),
+            "no_alert"
+        );
+    }
 
     // -- validate_watch_response: valid alert response --
 
