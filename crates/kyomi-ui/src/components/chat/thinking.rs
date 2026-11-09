@@ -123,6 +123,31 @@ pub fn process_thinking_event(
     updated
 }
 
+/// Number of tool calls represented by `events`, for the "N tools" header.
+///
+/// Counts each tool call once. The durable runtime emits the start and the
+/// outcome of a call as two standalone events with different `event_id`s that
+/// share `data.tool_call_id`; the legacy tracker updates one event in place.
+pub(crate) fn tool_execution_count(events: &[ThinkingEvent]) -> usize {
+    events
+        .iter()
+        .filter(|e| {
+            matches!(
+                e.event_type.as_str(),
+                "tool_execution_start" | "tool_execution_end" | "tool_start" | "tool_end"
+            )
+        })
+        .map(|e| {
+            e.data
+                .as_ref()
+                .and_then(|data| data.get("tool_call_id"))
+                .and_then(|id| id.as_str())
+                .unwrap_or(e.event_id.as_str())
+        })
+        .collect::<std::collections::HashSet<_>>()
+        .len()
+}
+
 pub(crate) fn thinking_event_is_terminal(event: &ThinkingEvent) -> bool {
     event.duration_ms.is_some()
         || event
@@ -405,6 +430,41 @@ mod tests {
             });
             assert_eq!(ids(&events), ["old", "0", "a", "b", "z"]);
         }
+    }
+
+    fn tool_event(id: &str, kind: &str, call: Option<&str>) -> ThinkingEvent {
+        let mut e = event(id, "2026-10-16T05:00:00Z", kind);
+        e.data = call.map(|c| serde_json::json!({ "tool_call_id": c }));
+        e
+    }
+
+    #[test]
+    fn tool_count_counts_a_runtime_call_once_across_start_and_outcome() {
+        let events = [
+            tool_event("s1", "tool_execution_start", Some("call-1")),
+            tool_event("e1", "tool_execution_end", Some("call-1")),
+            tool_event("s2", "tool_execution_start", Some("call-2")),
+            tool_event("e2", "tool_execution_end", Some("call-2")),
+            tool_event("s3", "tool_execution_start", Some("call-3")),
+            event("t", "2026-10-16T05:00:00Z", "agent_thought"),
+        ];
+        assert_eq!(tool_execution_count(&events), 3);
+    }
+
+    #[test]
+    fn tool_count_counts_legacy_events_without_call_ids_once_each() {
+        // The legacy tracker updates a start event in place, so one event per call.
+        let events = [
+            tool_event("a", "tool_execution_start", None),
+            tool_event("b", "tool_execution_start", None),
+        ];
+        assert_eq!(tool_execution_count(&events), 2);
+    }
+
+    #[test]
+    fn tool_count_counts_an_outcome_whose_start_is_missing() {
+        let events = [tool_event("e1", "tool_execution_end", Some("call-1"))];
+        assert_eq!(tool_execution_count(&events), 1);
     }
 
     #[test]

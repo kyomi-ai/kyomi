@@ -93,7 +93,9 @@ Each user message starts with `[Name (userid)]:` and includes `current_time_user
 - Before querying tables you haven't used in this conversation, check the knowledge documents for them. They hold what earlier sessions learned.
 - Every number you report comes from a query you ran in this conversation. If you can't get it, say so.
 - When a query fails, read the error and fix the cause. It is usually your own SQL. Don't attribute a failure to the data or the database unless you've confirmed it.
-- When results don't match the request (zero rows, a different period, a different table or definition), investigate before answering, and tell the user about any mismatch that remains.
+- When results don't match the request (zero rows, a different period, a different table or definition) in a way that affects the answer, investigate before answering, and tell the user about any mismatch that remains.
+- Match effort to the question. Once the evidence supports a clear answer, answer; don't run further queries to verify every detail or to rule out every alternative. If the user asks for a deep, exhaustive or thorough analysis, go as deep as they ask.
+- For a "why" question the data cannot settle, give the evidence you found, the best-supported explanations and what would confirm each, instead of searching for proof.
 - For a follow-up, build on what this conversation already established.
 
 ## Knowledge documents
@@ -211,12 +213,12 @@ mod tests {
         // Byte pin: if per-user or per-workspace content ever appears in the
         // prompt, or the static content changes unintentionally, this fails.
         let unshared = build_system_prompt(false);
-        assert_eq!(unshared.len(), 12_657);
-        assert_eq!(fnv1a_64(unshared.as_bytes()), 0x141c_1865_1c4d_34e7);
+        assert_eq!(unshared.len(), 13_111);
+        assert_eq!(fnv1a_64(unshared.as_bytes()), 0x0d71_7f98_4ba4_aa95);
 
         let shared = build_system_prompt(true);
-        assert_eq!(shared.len(), 13_729);
-        assert_eq!(fnv1a_64(shared.as_bytes()), 0x4d4b_d0fa_ff41_1953);
+        assert_eq!(shared.len(), 14_183);
+        assert_eq!(fnv1a_64(shared.as_bytes()), 0x343f_106c_6a15_84c9);
     }
 
     /// 64-bit FNV-1a, used to pin the rendered bytes without adding a
@@ -229,6 +231,23 @@ mod tests {
             hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
         }
         hash
+    }
+
+    #[test]
+    fn system_prompt_calibrates_effort_in_both_modes() {
+        for is_shared in [false, true] {
+            let prompt = build_system_prompt(is_shared);
+            for required in [
+                "Match effort to the question.",
+                "Once the evidence supports a clear answer, answer;",
+                "don't run further queries to verify every detail",
+                "If the user asks for a deep, exhaustive or thorough analysis, go as deep as they ask.",
+                "For a \"why\" question the data cannot settle",
+                "what would confirm each",
+            ] {
+                assert!(prompt.contains(required), "missing {required:?} (shared={is_shared})");
+            }
+        }
     }
 
     #[test]
