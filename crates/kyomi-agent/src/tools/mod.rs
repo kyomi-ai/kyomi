@@ -217,6 +217,14 @@ pub trait AgentTool: Send + Sync {
         agent_runtime::DomainOutcome::Unknown
     }
 
+    /// Whether `Error::BadRequest` from this tool is a definite pre-effect
+    /// argument rejection. The runtime uses this to avoid telling the model a
+    /// call was rejected when a partial effect may remain. Override to `false`
+    /// only when the tool can return `BadRequest` after a possible effect.
+    fn bad_request_is_pre_effect(&self) -> bool {
+        true
+    }
+
     /// Execute the tool with the given arguments and context.
     ///
     /// Returns a string result that will be sent back to the LLM as
