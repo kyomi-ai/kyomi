@@ -1957,6 +1957,98 @@ fn try_reset_bq_projects_signals(
     set_bq_projects_attempted.try_set(false);
 }
 
+#[cfg(any(target_arch = "wasm32", test))]
+struct ModalOAuthSetters {
+    set_modal_oauth_connected: WriteSignal<bool>,
+    set_modal_oauth_email: WriteSignal<Option<String>>,
+    set_modal_oauth_expired: WriteSignal<bool>,
+    set_modal_oauth_connecting: WriteSignal<bool>,
+    set_test_result: WriteSignal<Option<TestConnectionResult>>,
+    set_discovery_status: WriteSignal<String>,
+}
+
+/// Builds the actual modal callback, resolving selection when each message arrives.
+/// Late popup messages must not write success or start discovery for another mode.
+#[cfg(any(target_arch = "wasm32", test))]
+fn build_modal_oauth_listener(
+    read_selection: impl Fn() -> (String, String),
+    state: ModalOAuthSetters,
+    do_test_and_discover: impl Fn(),
+    on_error: impl Fn(String),
+) -> impl Fn(crate::utils::oauth_popup::OAuthMessage) {
+    use crate::utils::oauth_popup::{translate_google_oauth_error, OAuthMessage};
+    move |msg| {
+        let (provider, mode) = read_selection();
+        let source = match &msg {
+            OAuthMessage::GoogleSuccess { .. } | OAuthMessage::GoogleError { .. } =>
+                Some(OAuthStatusSource::GoogleAccount),
+            OAuthMessage::BigqueryEnterpriseSuccess { .. } | OAuthMessage::BigqueryEnterpriseError { .. } =>
+                Some(OAuthStatusSource::Datasource("bigquery-enterprise")),
+            OAuthMessage::SnowflakeSuccess { .. } | OAuthMessage::SnowflakeError { .. } =>
+                Some(OAuthStatusSource::Datasource("snowflake")),
+            OAuthMessage::DatabricksSuccess { .. } | OAuthMessage::DatabricksError { .. } =>
+                Some(OAuthStatusSource::Datasource("databricks")),
+            OAuthMessage::MicrosoftEnterpriseSuccess { .. } | OAuthMessage::MicrosoftEnterpriseError { .. } =>
+                Some(OAuthStatusSource::Datasource("microsoft-enterprise")),
+            // Account-level Microsoft OAuth is not a datasource authentication mode.
+            OAuthMessage::MicrosoftSuccess { .. } | OAuthMessage::MicrosoftError { .. } => None,
+        };
+        if source.is_some() && source == oauth_source_for_ds_type(&provider, &mode) {
+            match msg {
+                OAuthMessage::GoogleSuccess { email }
+                | OAuthMessage::BigqueryEnterpriseSuccess { email } => {
+                    state.set_modal_oauth_connected.try_set(true);
+                    state.set_modal_oauth_email.try_set(email);
+                    state.set_modal_oauth_expired.try_set(false);
+                    state.set_modal_oauth_connecting.try_set(false);
+                    // Preserve the matching BigQuery OAuth success state.
+                    // Enterprise OAuth Next is independently allowed before save;
+                    // account OAuth can also qualify via its connected status.
+                    state.set_test_result.try_set(Some(TestConnectionResult {
+                        success: true,
+                        message: "Connected to Google".to_string(),
+                    }));
+                    state.set_discovery_status.try_set("success".to_string());
+                }
+                OAuthMessage::SnowflakeSuccess { email }
+                | OAuthMessage::DatabricksSuccess { email } => {
+                    state.set_modal_oauth_connected.try_set(true);
+                    state.set_modal_oauth_email.try_set(email);
+                    state.set_modal_oauth_expired.try_set(false);
+                    state.set_modal_oauth_connecting.try_set(false);
+                    // Auto-run Test & Discover so warehouse/catalog dropdowns
+                    // populate immediately after OAuth completes.
+                    do_test_and_discover();
+                }
+                OAuthMessage::GoogleError { error } => {
+                    state.set_modal_oauth_connecting.try_set(false);
+                    on_error(translate_google_oauth_error(error));
+                }
+                OAuthMessage::SnowflakeError { error }
+                | OAuthMessage::DatabricksError { error }
+                | OAuthMessage::MicrosoftError { error }
+                | OAuthMessage::MicrosoftEnterpriseError { error }
+                | OAuthMessage::BigqueryEnterpriseError { error } => {
+                    state.set_modal_oauth_connecting.try_set(false);
+                    on_error(error);
+                }
+                OAuthMessage::MicrosoftSuccess { .. } => {
+                    state.set_modal_oauth_connecting.try_set(false);
+                }
+                OAuthMessage::MicrosoftEnterpriseSuccess { email } => {
+                    // Microsoft Enterprise OAuth success — used by Synapse enterprise_oauth mode
+                    state.set_modal_oauth_connected.try_set(true);
+                    state.set_modal_oauth_email.try_set(email);
+                    state.set_modal_oauth_expired.try_set(false);
+                    state.set_modal_oauth_connecting.try_set(false);
+                    // Auto-run Test & Discover so schema dropdowns populate
+                    do_test_and_discover();
+                }
+            }
+        }
+    }
+}
+
 /// Modal state for create/edit mode.
 ///
 /// Matches `apps/frontend/src/components/settings/DatasourceModal.jsx`.
@@ -3866,67 +3958,36 @@ pub fn DatasourceModal(
     //
     // Also auto-triggers Test & Discover for Snowflake / Databricks after a
     // successful connection so the warehouse/catalog dropdowns populate.
+    #[cfg(any(target_arch = "wasm32", test))]
+    let modal_oauth_listener = build_modal_oauth_listener(
+        move || {
+            let provider = ds_type.get_untracked();
+            let mode = match provider.as_str() {
+                "bigquery" => bq_auth_mode.get_untracked(),
+                "snowflake" => sf_auth_mode.get_untracked(),
+                "databricks" => db_auth_mode.get_untracked(),
+                "synapse" => synapse_auth_mode.get_untracked(),
+                _ => String::new(),
+            };
+            (provider, mode)
+        },
+        ModalOAuthSetters {
+            set_modal_oauth_connected,
+            set_modal_oauth_email,
+            set_modal_oauth_expired,
+            set_modal_oauth_connecting,
+            set_test_result,
+            set_discovery_status,
+        },
+        do_test_and_discover,
+        toast_error,
+    );
+    #[cfg(all(not(target_arch = "wasm32"), test))]
+    let _ = modal_oauth_listener;
     #[cfg(target_arch = "wasm32")]
     {
-        use crate::utils::oauth_popup::{
-            install_oauth_listener, translate_google_oauth_error, OAuthMessage,
-        };
-        let cleanup = install_oauth_listener(move |msg| {
-            match msg {
-                OAuthMessage::GoogleSuccess { email }
-                | OAuthMessage::BigqueryEnterpriseSuccess { email } => {
-                    set_modal_oauth_connected.try_set(true);
-                    set_modal_oauth_email.try_set(email);
-                    set_modal_oauth_expired.try_set(false);
-                    set_modal_oauth_connecting.try_set(false);
-                    // BigQuery OAuth never runs Test & Discover (the generic
-                    // button is hidden for this type — the remote system is
-                    // verified by the OAuth handshake itself, not a query).
-                    // Without this, `test_result` would stay `None` forever
-                    // and the create-mode "Next" gate below would never
-                    // unlock, since that gate is the only other writer.
-                    set_test_result.try_set(Some(TestConnectionResult {
-                        success: true,
-                        message: "Connected to Google".to_string(),
-                    }));
-                    set_discovery_status.try_set("success".to_string());
-                }
-                OAuthMessage::SnowflakeSuccess { email }
-                | OAuthMessage::DatabricksSuccess { email } => {
-                    set_modal_oauth_connected.try_set(true);
-                    set_modal_oauth_email.try_set(email);
-                    set_modal_oauth_expired.try_set(false);
-                    set_modal_oauth_connecting.try_set(false);
-                    // Auto-run Test & Discover so warehouse/catalog dropdowns
-                    // populate immediately after OAuth completes.
-                    do_test_and_discover();
-                }
-                OAuthMessage::GoogleError { error } => {
-                    set_modal_oauth_connecting.try_set(false);
-                    toast_error(translate_google_oauth_error(error));
-                }
-                OAuthMessage::SnowflakeError { error }
-                | OAuthMessage::DatabricksError { error }
-                | OAuthMessage::MicrosoftError { error }
-                | OAuthMessage::MicrosoftEnterpriseError { error }
-                | OAuthMessage::BigqueryEnterpriseError { error } => {
-                    set_modal_oauth_connecting.try_set(false);
-                    toast_error(error);
-                }
-                OAuthMessage::MicrosoftSuccess { .. } => {
-                    set_modal_oauth_connecting.try_set(false);
-                }
-                OAuthMessage::MicrosoftEnterpriseSuccess { email } => {
-                    // Microsoft Enterprise OAuth success — used by Synapse enterprise_oauth mode
-                    set_modal_oauth_connected.try_set(true);
-                    set_modal_oauth_email.try_set(email);
-                    set_modal_oauth_expired.try_set(false);
-                    set_modal_oauth_connecting.try_set(false);
-                    // Auto-run Test & Discover so schema dropdowns populate
-                    do_test_and_discover();
-                }
-            }
-        });
+        use crate::utils::oauth_popup::install_oauth_listener;
+        let cleanup = install_oauth_listener(modal_oauth_listener);
         let cleanup_cell =
             std::cell::Cell::new(Some(Box::new(cleanup) as Box<dyn FnOnce()>));
         let cleanup_wrapper = send_wrapper::SendWrapper::new(cleanup_cell);
@@ -5883,8 +5944,8 @@ fn synapse_oauth_source(mode: &str) -> Option<OAuthStatusSource> {
 /// mapping every `*AuthModeSection` already wires into
 /// `use_oauth_status_refetch`, rather than hand-rolling a second,
 /// independent (ds_type, auth_mode) → [`OAuthStatusSource`] mapping that
-/// could silently drift from it. Added for KYO-517 —
-/// [`connection_step_satisfied_from`] is its only caller today.
+/// could silently drift from it. Both [`connection_step_satisfied_from`]
+/// and the modal OAuth listener use this mapping.
 fn oauth_source_for_ds_type(ds_type: &str, auth_mode: &str) -> Option<OAuthStatusSource> {
     match ds_type {
         "bigquery" => bigquery_oauth_source(auth_mode),
