@@ -1,0 +1,27 @@
+-- KYO-956: drop the two unreferenced legacy tables.
+--
+-- IRREVERSIBLE ON DEPLOYED DATABASES. Forward-only; the baseline and earlier
+-- migrations are not edited.
+--
+-- Rollout order: the v2.7.6 production image has no code references to either
+-- table (verified at tag v2.7.6). Apply this only after that release is fully
+-- rolled out; an older replica may still reference them.
+--
+-- Data disposition: the tables held legacy workspace knowledge chunks and
+-- episodic conversation-to-entity references. Production row counts and the
+-- explicit authorized deletion are recorded on KYO-956. The corresponding
+-- SQLite migration also runs on self-hosted servers and the desktop app; this
+-- Postgres chain runs on self-hosted Postgres deployments. Back up before
+-- upgrading.
+--
+-- Dropped objects: `workspace_knowledge_chunks` (primary key, IVFFlat/btree
+-- indexes, workspace FK) and `conversation_discussed` (primary key and serial
+-- sequence, indexes). No other table references either table. On Postgres, no
+-- CASCADE means an unexpected dependent object should fail this migration
+-- rather than be silently dropped.
+--
+-- No rollback: rolling back to a pre-956 binary after this migration has
+-- applied fails at startup with `VersionMissing`; recovery is a forward fix or
+-- a database restore.
+DROP TABLE IF EXISTS conversation_discussed;
+DROP TABLE IF EXISTS workspace_knowledge_chunks;

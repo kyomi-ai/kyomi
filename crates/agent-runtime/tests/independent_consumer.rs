@@ -539,7 +539,7 @@ async fn complete_response_failure_prevents_dependent_tools_and_public_notificat
     assert_eq!(sink.notifications.load(Ordering::SeqCst), 0);
 }
 #[tokio::test]
-async fn side_effect_without_receipt_is_uncertain_and_duplicate_start_never_reexecutes() {
+async fn outcome_write_failure_is_persistence_and_duplicate_start_never_reexecutes() {
     let notebook = Notebook::default();
     accepted(&notebook).await;
     let context = turn();
@@ -568,15 +568,104 @@ async fn side_effect_without_receipt_is_uncertain_and_duplicate_start_never_reex
                 serde_json::json!({})
             )
             .await,
-        Err(ExecutionError::Uncertain(_))
+        Err(ExecutionError::Persistence(_))
     ));
     assert!(matches!(
         context
             .tool(&sink, &tool, id, "write".into(), serde_json::json!({}))
             .await,
-        Err(ExecutionError::Uncertain(_))
+        Err(ExecutionError::Persistence(_))
     ));
     assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn duplicate_start_returns_unknown_outcome_without_executing() {
+    let notebook = Notebook::default();
+    accepted(&notebook).await;
+    let context = turn();
+    let sink = TurnSink {
+        notebook: &notebook,
+        notifications: AtomicUsize::new(0),
+        fail_kind: None,
+    };
+    context
+        .complete(&NotebookProvider, &sink, &ModelCallId("model".into()))
+        .await
+        .unwrap();
+    let id = ToolCallId("write-1".into());
+    let start = context.command(
+        "write-1:start",
+        Payload::Public(PublicPayload::ToolStarted {
+            tool_call_id: id.clone(),
+        }),
+        None,
+    );
+    sink.commit(&start).await.unwrap();
+    let calls = AtomicUsize::new(0);
+    let tool = NotebookTool {
+        notebook: &notebook,
+        calls: &calls,
+    };
+    let outcome = context
+        .tool(&sink, &tool, id.clone(), "write".into(), serde_json::json!({}))
+        .await
+        .unwrap();
+    assert_eq!(outcome.transport, TransportOutcome::Unknown);
+    assert_eq!(outcome.domain, DomainOutcome::Unknown);
+    assert!(outcome.text.contains("Outcome unknown:"));
+    assert!(outcome.text.contains("the tool may have executed"));
+    assert!(outcome.text.contains("Verify the result before retrying"));
+    assert!(outcome.text.contains("do not blindly repeat a mutating call"));
+    assert!(outcome.text.contains("did not execute"));
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    {
+        let journal = notebook.journal.lock().unwrap();
+        let persisted: Vec<_> = journal
+            .iter()
+            .filter_map(|row| match &row.payload {
+                Payload::Public(PublicPayload::ToolOutcome { text, .. }) => {
+                    Some(row.detail.clone().unwrap_or_else(|| text.preview.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(persisted.len(), 1, "the synthetic unknown outcome must be persisted");
+        assert!(persisted[0].contains("Outcome unknown:"));
+    }
+    let replay = context
+        .tool(&sink, &tool, id, "write".into(), serde_json::json!({}))
+        .await
+        .unwrap();
+    assert_eq!(replay.domain, DomainOutcome::Unknown);
+    assert_eq!(calls.load(Ordering::SeqCst), 0, "a second attempt must reuse the persisted outcome");
+    assert_eq!(
+        notebook
+            .journal
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|row| matches!(row.payload, Payload::Public(PublicPayload::ToolOutcome { .. })))
+            .count(),
+        1,
+        "a second attempt must not append another outcome"
+    );
+}
+
+#[test]
+fn unknown_guidance_is_idempotent_and_keeps_every_required_instruction() {
+    let mut outcome = ToolOutcome {
+        transport: TransportOutcome::Unknown,
+        domain: DomainOutcome::Unknown,
+        text: "raw tool payload".into(),
+    };
+    outcome.ensure_unknown_guidance();
+    outcome.ensure_unknown_guidance();
+    assert_eq!(outcome.text.matches("Outcome unknown:").count(), 1);
+    assert!(outcome.text.contains("the tool may have executed"));
+    assert!(outcome.text.contains("Verify the result before retrying"));
+    assert!(outcome.text.contains("do not blindly repeat a mutating call"));
+    assert!(outcome.text.ends_with("raw tool payload"));
 }
 
 #[test]
