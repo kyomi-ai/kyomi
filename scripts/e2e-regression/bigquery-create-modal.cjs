@@ -68,6 +68,20 @@ async function pickAuthMode(page, label) {
   const ctx = await browser.newContext({ viewport: { width: 1920, height: 1080 } });
   const page = await ctx.newPage();
 
+  // ── Pre-auth phase flag for the designed-401 allowlist (fail-closed) ──
+  // Defaults to false so an undetermined phase never allowlists anything.
+  // Set to true immediately before navigating to /login and cleared back to
+  // false once the login navigation resolves. Both recording
+  // designed401Urls (response handler below) and matching console errors in
+  // the final check are gated on this flag. The two designed pre-auth-401
+  // sources — a 401 is correct only while this flag is true:
+  // - apps/server/src/routes/auth_token.rs — the POST ${BASE}/api/v1/auth/refresh
+  //   page-load pre-warm; 401 is correct only with no refresh-token cookie.
+  // - crates/kyomi-ui/src/pages/auth/login.rs — the login page's
+  //   already-auth probe served at /leptos-api/get_sidebar_user<hash>;
+  //   401 is correct only while unauthenticated.
+  let preAuthPhase = false;
+
   // ── Console / pageerror collectors for the final "no hydration panics" check ──
   // pageerror (uncaught JS exception, e.g. a hydration panic) and console
   // type=error are tracked SEPARATELY: a pageerror always fails the final
@@ -79,12 +93,15 @@ async function pickAuthMode(page, label) {
   // reports the failed resource's URL (verified empirically: text is
   // "Failed to load resource: the server responded with a status of 401
   // (Unauthorized)", location().url is the subresource's absolute URL).
+  // Each entry is stamped with whether it was captured during the pre-auth
+  // phase (preAuthPhase at capture time), so the final check can require an
+  // explicit pre-auth stamp before allowlisting — fail closed otherwise.
   const consoleErrors = [];
   page.on('console', m => {
     if (m.type() !== 'error') return;
     let url = '';
     try { url = (m.location() && m.location().url) || ''; } catch (_) { /* location unavailable */ }
-    consoleErrors.push({ text: m.text(), url });
+    consoleErrors.push({ text: m.text(), url, preAuth: preAuthPhase === true });
   });
   page.on('pageerror', e => pageErrors.push(e.message));
 
@@ -112,6 +129,10 @@ async function pickAuthMode(page, label) {
   page.on('response', r => {
     if (r.status() >= 400) failedReqs.push(`${r.status()} ${r.url()} @ ${page.url()}`);
     if (r.status() !== 401) return;
+    // Recording is gated on the pre-auth phase: a post-login 401 on one of
+    // these same URLs is a regression and must never enter the allowlist
+    // (see the preAuthPhase declaration above). Shape checks below unchanged.
+    if (preAuthPhase !== true) return;
     if (r.url() === `${BASE}/api/v1/auth/refresh`) {
       designed401Urls.add(r.url());
     } else {
@@ -132,6 +153,7 @@ async function pickAuthMode(page, label) {
   });
 
   try {
+    preAuthPhase = true;
     await page.goto(`${BASE}/login`, { waitUntil: 'domcontentloaded', timeout: 30000 });
     // SSR inputs exist before WASM attaches listeners; wait before filling them.
     await page.locator('body:not([data-ssr]) input[type="email"]').waitFor({ timeout: 120000 });
@@ -141,6 +163,9 @@ async function pickAuthMode(page, label) {
       page.waitForURL(u => !u.toString().includes('/login'), { waitUntil: 'domcontentloaded', timeout: 20000 }),
       page.click('button[type="submit"]', { timeout: 10000 }),
     ]);
+    // Login navigation resolved — leave the pre-auth phase. Everything from
+    // here on is authenticated, so no 401 is allowlistable from here.
+    preAuthPhase = false;
     check('login as workspace admin', true);
 
     await page.goto(`${BASE}/settings/datasources`, { waitUntil: 'domcontentloaded', timeout: 30000 });
@@ -273,13 +298,17 @@ async function pickAuthMode(page, label) {
     // - pageErrors (uncaught JS exceptions / hydration panics) fail
     //   unconditionally and are reported first, so console noise can never
     //   push one out of the detail.
-    // - consoleErrors fail unless the entry is a Chromium
+    // - consoleErrors fail unless the entry was captured during the pre-auth
+    //   phase (e.preAuth === true, stamped from preAuthPhase at capture time;
+    //   a missing stamp never allowlists) AND is a Chromium
     //   failed-subresource-load 401 message whose location().url is an exact
-    //   member of designed401Urls (recorded above from the response layer).
-    //   A real console.error, a 500 subresource, a 401 on any other
-    //   endpoint, and any pageerror still fail.
+    //   member of designed401Urls (recorded above from the response layer,
+    //   also pre-auth only). A post-login 401 on a designed URL is a
+    //   regression and still fails, as do a real console.error, a 500
+    //   subresource, a 401 on any other endpoint, and any pageerror.
     const unexpectedConsole = consoleErrors.filter(e =>
-      !(e.text.startsWith('Failed to load resource') &&
+      !(e.preAuth === true &&
+        e.text.startsWith('Failed to load resource') &&
         e.text.includes('status of 401') &&
         designed401Urls.has(e.url)));
     check('no hydration panics / console errors',

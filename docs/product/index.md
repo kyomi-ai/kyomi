@@ -53,7 +53,7 @@ Human-readable YAML format for defining data visualizations.
 - **[Creating Charts](/docs/#creating-charts)** — AI, Chart Builder, or write ChartML directly
 - **[Dashboard Parameters](/docs/#dashboard-parameters)** — Interactive filters with date, select, text inputs
 - **[SQL Editor](/docs/#sql-editor)** — Syntax highlighting, dry run, history, keyboard shortcuts
-- **[AI Agent Features](/docs/#ai-agent-features)** — Custom knowledge, auto-learnings, token usage
+- **[AI Agent Features](/docs/#ai-agent-features)** — Knowledge documents, token usage
 - **[PDF Export](/docs/#pdf-export)** — Export dashboards as professional PDF documents
 - **[Kyomi Watch](/docs/watches)** — Proactive AI monitoring with scheduled alerts
 - **[Website Analytics](/docs/analytics)** — Privacy-first analytics
@@ -815,24 +815,14 @@ Kyomi charges a flat per-user subscription (AI included)—your data platform co
 
 ## AI Agent Features
 
-### Custom Knowledge
+### Knowledge Documents
 
-Train the AI on your business context:
+Kyomi keeps a shared, persistent memory of your data in knowledge documents: dashboard-style documents that the agent consults as it works and updates as it learns.
 
-**Workspace Knowledge** (Settings → Knowledge → Workspace)
-- Shared across all team members
-- Define metrics, terminology, business rules
-- Admin-only editing
-
-**User Knowledge** (Settings → Knowledge → User)
-- Private to you
-- Personal preferences, common queries
-- Your own reference notes
-
-**Auto-Learnings** (Settings → Knowledge → Learnings)
-- AI automatically learns from conversations
-- Discovered tables and schemas
-- Query patterns and preferences
+- Share documents through collections; each document is edited by its owner
+- Record which table answers which question, field meanings, join keys, date coverage, NULL semantics, metric definitions and corrections
+- Written only from confirmed tool results — not one-off answers or explanations of mistakes
+- Retrieved by the agent with `search_knowledge` when it needs context
 
 ### Token Usage
 
@@ -883,7 +873,7 @@ Monitor AI usage in **Settings → Usage**:
 
 1. **Be specific**: "Line chart of daily revenue for last 30 days" beats "show sales"
 2. **Iterate**: Refine charts by asking follow-up questions
-3. **Add context**: Put important business rules in Workspace Knowledge
+3. **Add context**: Put important business rules in a knowledge document
 4. **Use copilots**: SQL and Chart copilots are faster for quick edits
 
 ---
