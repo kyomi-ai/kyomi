@@ -412,7 +412,8 @@ pub fn resolve_provider_config(
 /// Format a user message with sender attribution.
 ///
 /// If the message has a `user_id` and a matching name is found in `user_names`,
-/// formats as `[Name (last8chars)]: content`. Otherwise returns content as-is.
+/// formats as `[Name (last8chars)]: content`. Otherwise formats as
+/// `[User (last8chars)]: content`.
 pub(crate) fn format_user_message(msg: &Message, user_names: &HashMap<String, String>) -> String {
     let Some(user_id) = &msg.user_id else {
         return msg.content.clone();

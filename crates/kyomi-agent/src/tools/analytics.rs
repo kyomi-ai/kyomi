@@ -156,6 +156,14 @@ impl AgentTool for CreateAnalyticsSiteTool {
         })
     }
 
+    /// `create_site` can fail with `BadRequest` from datasource provisioning
+    /// after the analytics_sites row exists; cleanup is best-effort. Keep the
+    /// outcome Unknown so the model verifies instead of treating it as a
+    /// definite rejection.
+    fn bad_request_is_pre_effect(&self) -> bool {
+        false
+    }
+
     async fn execute(
         &self,
         args: serde_json::Value,
@@ -660,5 +668,15 @@ mod tests {
         assert!(!tool_names.contains(&"create_analytics_site"));
         assert!(!tool_names.contains(&"update_analytics_site"));
         assert!(!tool_names.contains(&"delete_analytics_site"));
+    }
+
+    #[test]
+    fn create_analytics_site_bad_request_is_not_always_pre_effect() {
+        assert!(
+            !CreateAnalyticsSiteTool.bad_request_is_pre_effect(),
+            "provisioning failures can follow the analytics_sites insert"
+        );
+        assert!(UpdateAnalyticsSiteTool.bad_request_is_pre_effect());
+        assert!(DeleteAnalyticsSiteTool.bad_request_is_pre_effect());
     }
 }
