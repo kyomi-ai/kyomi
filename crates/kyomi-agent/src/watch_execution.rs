@@ -7,16 +7,18 @@
 //! The execution flow:
 //! 1. Load watch from DB (skip if disabled/deleted)
 //! 2. Create execution record
-//! 3. Verify creator is active + has workspace membership
-//! 4. Check capability and AI budget
-//! 5. Build enhanced system prompt (mode-specific, with learnings, recent alerts, queries)
-//! 6. Build enhanced user prompt (with workspace learnings)
+//! 3. Verify creator is still active
+//! 4. Verify creator still has active workspace membership
+//! 5. Check capability and AI budget
+//! 6. Build the mode-specific system prompt (recent alerts, queries, ChartML)
 //! 7. Create hidden `watch_execution` session
-//! 8. Run agent via `execute_agent_chat()` with limited tool set
-//! 9. Validate JSON response (with retry loop)
-//! 10. Store execution trace and complete execution
-//! 11. Trigger alert delivery if notification should be sent
-//! 12. Update watch run status
+//! 8. Pre-write the durable user message
+//! 9. Run agent via `execute_agent_chat()` with limited tool set
+//! 10. Validate JSON response (with retry loop)
+//! 11. Determine alert status
+//! 12. Build execution trace
+//! 13. Complete execution
+//! 14. Trigger alert delivery if notification should be sent
 
 use std::sync::Arc;
 
@@ -27,7 +29,7 @@ use tracing::{error, info, warn};
 
 use kyomi_auth::websocket::helpers as ws_helpers;
 use kyomi_auth::websocket::WebSocketManager;
-use kyomi_auth::{chat_service, learning_service, user_service, watch_service};
+use kyomi_auth::{chat_service, user_service, watch_service};
 use kyomi_core::models::Watch;
 use kyomi_core::platform::PlatformRegistry;
 use kyomi_core::{capability, DbPool, KVPool, WatchMode};
@@ -46,13 +48,6 @@ use crate::tools::WATCH_TOOLS;
 #[derive(sqlx::FromRow)]
 struct UserActiveRow {
     active: bool,
-}
-
-#[derive(sqlx::FromRow)]
-struct UserLearningRow {
-    learning_id: String,
-    insight: String,
-    datasource_config_id: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -266,6 +261,79 @@ fn sanitize_json_null_bytes(value: serde_json::Value) -> serde_json::Value {
 // Response validation
 // ---------------------------------------------------------------------------
 
+/// The bounded tool-error guard is a terminal answer, not a malformed watch
+/// response. Return the fallback that carries the message without retrying.
+fn guard_stop_response(raw_response: &str) -> Option<WatchResponseData> {
+    crate::agent::is_tool_failure_guard_message(raw_response).then(|| WatchResponseData {
+        should_alert: false,
+        alert_title: None,
+        summary: None,
+        alert_message: None,
+        reason: Some(raw_response.to_string()),
+    })
+}
+
+/// Map the execution status to the live WebSocket state. A guard stop is an
+/// error even though it does not send a notification.
+fn ws_status_for(
+    status: kyomi_core::WatchExecutionStatus,
+    should_send_notification: bool,
+) -> String {
+    if status == kyomi_core::WatchExecutionStatus::Error {
+        "error".to_string()
+    } else if should_send_notification {
+        "success".to_string()
+    } else {
+        "no_alert".to_string()
+    }
+}
+
+/// Map the validated response to the stored/delivered terminal state. A guard
+/// stop is an Error with the guard text as the response; it never sends an
+/// empty report or alert.
+fn terminal_delivery(
+    mode: WatchMode,
+    guard_stopped: bool,
+    data: &WatchResponseData,
+) -> (bool, String, String, String, kyomi_core::WatchExecutionStatus) {
+    if guard_stopped {
+        return (
+            false,
+            String::new(),
+            String::new(),
+            data.reason.clone().unwrap_or_default(),
+            kyomi_core::WatchExecutionStatus::Error,
+        );
+    }
+    let is_alert = data.should_alert;
+    let should_send_notification = is_alert || mode == WatchMode::Report;
+    let (alert_title, summary, agent_response) = if should_send_notification {
+        (
+            data.alert_title.clone().unwrap_or_default(),
+            data.summary.clone().unwrap_or_default(),
+            data.alert_message.clone().unwrap_or_default(),
+        )
+    } else {
+        (
+            String::new(),
+            String::new(),
+            data.reason.clone().unwrap_or_default(),
+        )
+    };
+    let status = if mode == WatchMode::Report || is_alert {
+        kyomi_core::WatchExecutionStatus::Success
+    } else {
+        kyomi_core::WatchExecutionStatus::NoAlert
+    };
+    (
+        should_send_notification,
+        alert_title,
+        summary,
+        agent_response,
+        status,
+    )
+}
+
 /// Validate and parse the watch agent's JSON response.
 ///
 /// Extracts JSON from the response text, handling:
@@ -422,16 +490,13 @@ fn extract_json_from_response(response_text: &str) -> Result<String, String> {
 /// - Execution context (name, schedule, time)
 /// - Recent alert history (alert mode, to avoid spam)
 /// - Pre-determined queries from watch config
-/// - User learnings (personal preferences)
 /// - ChartML reference
-#[allow(clippy::too_many_arguments)]
 pub fn build_watch_system_prompt(
     watch_name: &str,
     schedule: &str,
     current_time: &DateTime<Utc>,
     queries: Option<&serde_json::Value>,
     mode: WatchMode,
-    user_learnings: &str,
     recent_alerts: &str,
     chartml_ref: &str,
 ) -> String {
@@ -492,12 +557,51 @@ pub fn build_watch_system_prompt(
         parts.push(format!("\n## ChartML Reference\n\n{chartml_ref}"));
     }
 
-    // User learnings (appended at the end like Python does)
-    if !user_learnings.is_empty() {
-        parts.push(user_learnings.to_string());
-    }
-
     parts.join("")
+}
+
+/// Build the retry turn's config after a watch response fails validation.
+///
+/// The retry must keep the watch's own system prompt — the JSON schema, mode
+/// context, recent alerts and queries the first attempt used. Falling back to
+/// the chat prompt (`system_prompt: None`) would drop the schema the retry is
+/// being asked to satisfy and point the agent at tools this subset excludes.
+fn build_watch_retry_config(
+    session_id: &str,
+    user_id: &str,
+    workspace_id: &str,
+    system_prompt: String,
+    creator_workspace_roles: Vec<kyomi_core::enums::WorkspaceRole>,
+    correction_prompt: String,
+) -> AgentExecutionConfig {
+    AgentExecutionConfig {
+        session_id: session_id.to_string(),
+        user_id: user_id.to_string(),
+        workspace_id: workspace_id.to_string(),
+        message: correction_prompt,
+        model_name: None,
+        temperature: 0.7,
+        is_shared_conversation: false,
+        context_type: "kyomi_watch".into(),
+        workspace_user_ids: None,
+        cancel_token: CancellationToken::new(),
+        current_time_user_tz: None,
+        message_source: Some("Kyomi Watch".into()),
+        system_prompt: Some(system_prompt),
+        tools_subset: Some(WATCH_TOOLS.iter().map(|s| s.to_string()).collect()),
+        max_iterations: MAX_WATCH_ITERATIONS,
+        max_duration: Some(MAX_WATCH_DURATION),
+        max_total_tokens: Some(MAX_WATCH_TOTAL_TOKENS),
+        max_tokens: MAX_WATCH_OUTPUT_TOKENS,
+        component: "kyomi_watch".into(),
+        user_message_persistence: UserMessagePersistence::AdapterPersists(None),
+        assistant_message_persistence: AssistantMessagePersistence::AdapterInserts(None),
+        conversation_history: None,
+        user_display_name: "Kyomi Watch".to_string(),
+        context_window: 0,
+        workspace_roles: creator_workspace_roles,
+        document_id: None,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -631,193 +735,6 @@ fn format_relative_time(delta_seconds: i64) -> String {
             format!("{days} days ago")
         }
     }
-}
-
-// ---------------------------------------------------------------------------
-// User learnings injection
-// ---------------------------------------------------------------------------
-
-/// Get user-scoped learnings formatted for the watch system prompt.
-///
-/// Ports `_get_user_learnings_for_watch()` from Python.
-/// Fetches user-scoped learnings and formats them for the system prompt.
-pub async fn get_user_learnings_for_watch(
-    db: &DbPool,
-    workspace_id: &str,
-    user_id: &str,
-) -> String {
-    if workspace_id.is_empty() || user_id.is_empty() {
-        return String::new();
-    }
-
-    // Query user-scoped learnings directly
-    let is_pg = db.is_postgres();
-    let bool_true = kyomi_core::sql_compat::bool_true(is_pg);
-    let learnings_sql = format!(
-        "SELECT learning_id, insight, datasource_config_id \
-         FROM agent_learnings \
-         WHERE workspace_id = $1 \
-           AND enabled = {bool_true} \
-           AND superseded_by IS NULL \
-           AND scope = 'user' \
-           AND learned_from_user = $2 \
-         ORDER BY created_at DESC"
-    );
-    let learnings_result = kyomi_core::db_fetch_all!(
-        db, UserLearningRow,
-        &learnings_sql,
-        workspace_id,
-        user_id
-    );
-
-    let learnings = match learnings_result {
-        Ok(l) => l,
-        Err(e) => {
-            error!(error = %e, "Error loading user learnings for watch");
-            return String::new();
-        }
-    };
-
-    if learnings.is_empty() {
-        return String::new();
-    }
-
-    // Build datasource ID -> slug mapping
-    let ds_id_to_slug = match crate::prompt::load_datasource_slug_map(db, workspace_id).await {
-        Ok(map) => map,
-        Err(e) => {
-            error!(error = %e, "Error loading datasource slug map");
-            std::collections::HashMap::new()
-        }
-    };
-
-    // Increment usage counters
-    for row in &learnings {
-        let _ = learning_service::increment_usage(db, &row.learning_id.to_string()).await;
-    }
-
-    // Format learnings
-    let learning_items: Vec<String> = learnings
-        .iter()
-        .map(|row| {
-            let ds_slug = row
-                .datasource_config_id
-                .as_ref()
-                .and_then(|id| ds_id_to_slug.get(id))
-                .map(|slug| format!(" (datasource: {slug})"));
-            format!(
-                "- [{}]{} {}",
-                row.learning_id,
-                ds_slug.unwrap_or_default(),
-                row.insight,
-            )
-        })
-        .collect();
-
-    let learning_text = learning_items.join("\n");
-
-    info!(
-        count = learnings.len(),
-        "Loaded user learnings for watch execution"
-    );
-
-    format!(
-        "\n\n## Your Knowledge Base (Personal Preferences)\n\n\
-         **Your accumulated knowledge from past investigations:**\n\
-         These personal preferences were learned from previous conversations. \
-         Apply them automatically when relevant.\n\n\
-         {learning_text}\n\n"
-    )
-}
-
-/// Get workspace-scoped learnings relevant to the watch prompt.
-///
-/// Ports `_get_workspace_learnings_for_watch()` from Python.
-/// Uses semantic search to find relevant team knowledge, prepended to user prompt.
-pub async fn get_workspace_learnings_for_watch(
-    db: &DbPool,
-    embedding: &EmbeddingService,
-    workspace_id: &str,
-    watch_prompt: &str,
-) -> String {
-    if workspace_id.is_empty() {
-        return String::new();
-    }
-
-    // Search for workspace-scoped learnings relevant to this prompt
-    let learnings_result = learning_service::get_relevant_learnings_hybrid(
-        learning_service::GetRelevantLearningsParams {
-            db,
-            embedding_svc: embedding,
-            workspace_id,
-            query: watch_prompt,
-            user_id: None, // workspace scope
-            limit: 5,
-            min_similarity: 0.01,
-            semantic_weight: 0.5,
-            keyword_weight: 0.5,
-        },
-    )
-    .await;
-
-    let learnings = match learnings_result {
-        Ok(l) => l,
-        Err(e) => {
-            error!(error = %e, "Error loading workspace learnings for watch");
-            return String::new();
-        }
-    };
-
-    // Filter to workspace-scoped only
-    let workspace_learnings: Vec<_> = learnings
-        .iter()
-        .filter(|l| l.learning.scope == "workspace")
-        .collect();
-
-    if workspace_learnings.is_empty() {
-        return String::new();
-    }
-
-    // Build datasource ID -> slug mapping
-    let ds_id_to_slug = match crate::prompt::load_datasource_slug_map(db, workspace_id).await {
-        Ok(map) => map,
-        Err(e) => {
-            error!(error = %e, "Error loading datasource slug map");
-            std::collections::HashMap::new()
-        }
-    };
-
-    // Increment usage counters
-    for learning_result in &workspace_learnings {
-        let _ = learning_service::increment_usage(db, &learning_result.learning.learning_id).await;
-    }
-
-    // Format learnings
-    let learning_text: String = workspace_learnings
-        .iter()
-        .map(|l| {
-            learning_service::format_learning_with_queries(
-                &l.learning,
-                Some(&ds_id_to_slug),
-                true, // include ID
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-
-    info!(
-        count = workspace_learnings.len(),
-        "Injected workspace learnings for watch execution"
-    );
-
-    format!(
-        "<relevant_workspace_learnings>\n\
-         **Case Notes from Past Team Investigations:**\n\
-         The following insights from previous workspace investigations are relevant. \
-         Apply them when analyzing data.\n\n\
-         {learning_text}\n\n\
-         </relevant_workspace_learnings>\n\n"
-    )
 }
 
 // ChartML reference is embedded at compile time via prompt::CHARTML_QUICK_REFERENCE.
@@ -996,7 +913,7 @@ pub(crate) struct WatchDispatchPrep {
 /// the agent loop with `UserMessagePersistence::AdapterPersists(None)` over
 /// it. `AdapterPersists`'s `caller_persisted_id()` returns `None` regardless
 /// of its inner id, so `should_persist_new_message` never recognised the in-flight
-/// `enhanced_watch_prompt` message (pushed into the agent's message list by
+/// `watch_prompt` message (pushed into the agent's message list by
 /// `CustomAgent::chat()` regardless of persistence variant, since it always
 /// sends `message`) as the same row already on disk — `persist_after_chat`
 /// then wrote it a second time under different text, producing two `user`
@@ -1165,7 +1082,6 @@ async fn execute_watch_inner(
                user_limit, \
                stripe_customer_id, stripe_subscription_id, \
                settings, \
-               business_knowledge, knowledge_updated_at, \
                last_catalog_refresh, \
                catalog_onboarding_completed, \
                catalog_indexed_projects, \
@@ -1212,15 +1128,8 @@ async fn execute_watch_inner(
         return Ok(("no_alert".to_string(), "no_alert".to_string()));
     }
 
-    // 6. Build enhanced system prompt with user learnings, ChartML reference, watch context
+    // 6. Build enhanced system prompt with ChartML reference and watch context
     let current_time = Utc::now();
-
-    let user_learnings = get_user_learnings_for_watch(
-        db,
-        &watch.workspace_id,
-        &watch.created_by,
-    )
-    .await;
 
     let recent_alerts = if mode == WatchMode::Alert {
         get_recent_alerts_for_watch(db, watch_id, &current_time, 5).await
@@ -1234,23 +1143,11 @@ async fn execute_watch_inner(
         &current_time,
         watch.queries.as_ref(),
         mode,
-        &user_learnings,
         &recent_alerts,
         crate::prompt::CHARTML_QUICK_REFERENCE,
     );
 
-    // 7. Build enhanced watch prompt with workspace learnings
-    let workspace_learnings = get_workspace_learnings_for_watch(
-        db,
-        embedding,
-        &watch.workspace_id,
-        &watch.prompt,
-    )
-    .await;
-
-    let enhanced_watch_prompt = format!("{}{}", workspace_learnings, watch.prompt);
-
-    // 8. Create watch_execution session (hidden from chat list)
+    // 7. Create watch_execution session (hidden from chat list)
     let session_id = uuid::Uuid::new_v4().to_string();
     chat_service::create_session_with_id(
         db,
@@ -1269,10 +1166,10 @@ async fn execute_watch_inner(
         "Created session for watch execution"
     );
 
-    // Store the watch prompt as the user message in the session, and build
-    // the persistence value that ties the agent turn below back to that
-    // row — see `prepare_watch_dispatch` for the full KYO-573 contract this
-    // exists to satisfy.
+    // 8. Store the watch prompt as the durable user message in the session,
+    // and build the persistence value that ties the agent turn below back to
+    // that row — see `prepare_watch_dispatch` for the full KYO-573 contract
+    // this exists to satisfy.
     let watch_dispatch = prepare_watch_dispatch(
         db,
         encryption_key,
@@ -1297,7 +1194,7 @@ async fn execute_watch_inner(
         session_id: session_id.clone(),
         user_id: watch.created_by.clone(),
         workspace_id: watch.workspace_id.clone(),
-        message: enhanced_watch_prompt.clone(),
+        message: watch.prompt.clone(),
         model_name: None, // use default model
         temperature: 0.7,
         is_shared_conversation: false,
@@ -1306,7 +1203,7 @@ async fn execute_watch_inner(
         cancel_token: CancellationToken::new(),
         current_time_user_tz: None,
         message_source: Some("Kyomi Watch".into()),
-        system_prompt: Some(enhanced_system_prompt),
+        system_prompt: Some(enhanced_system_prompt.clone()),
         tools_subset: Some(tools_subset),
         max_iterations: MAX_WATCH_ITERATIONS,
         max_duration: Some(MAX_WATCH_DURATION),
@@ -1315,15 +1212,13 @@ async fn execute_watch_inner(
         component: "kyomi_watch".into(),
         // CallerPersisted, not AdapterPersists(None): `prepare_watch_dispatch`
         // above already made the pre-written row durable. The LLM still
-        // receives `enhanced_watch_prompt` (with the workspace-learnings
-        // prefix) for this turn — `CustomAgent::chat()` pushes `message`
-        // into the in-flight message list regardless of the persistence
+        // receives the watch prompt for this turn — `CustomAgent::chat()` pushes
+        // `message` into the in-flight message list regardless of the persistence
         // variant — but `caller_persisted_id()` returns `Some(user_message_id)`
         // for `CallerPersisted` (unlike `AdapterPersists`, which returns `None`
         // regardless of its inner id), so `should_persist_new_message` recognises
         // that in-flight message as the same row already on disk and skips
-        // writing it again. `workspace_learnings` is per-run generated
-        // context, not user content, so it must not become the durable row.
+        // writing it again.
         user_message_persistence: watch_dispatch.user_message_persistence,
         assistant_message_persistence: AssistantMessagePersistence::AdapterInserts(None),
         conversation_history: None,
@@ -1367,6 +1262,7 @@ async fn execute_watch_inner(
 
     // 10. Validate response (with retry loop)
     let mut validated_data: Option<WatchResponseData> = None;
+    let mut guard_stopped = false;
 
     for retry_num in 0..=MAX_VALIDATION_RETRIES {
         match validate_watch_response(&raw_response) {
@@ -1383,6 +1279,18 @@ async fn execute_watch_inner(
                 break;
             }
             Err(error_msg) => {
+                // The bounded tool-error guard is a terminal, human-readable
+                // answer, not a malformed watch response. Deliver it as the
+                // reason and do not re-run the agent.
+                if let Some(response) = guard_stop_response(&raw_response) {
+                    warn!(
+                        watch_id = %watch_id,
+                        "Watch agent stopped after repeated tool failures; not retrying"
+                    );
+                    validated_data = Some(response);
+                    guard_stopped = true;
+                    break;
+                }
                 // Log validation failure for prompt-tuning analysis.
                 let error_type = crate::agent::classify_chartml_error(&error_msg);
                 if let Err(e) = kyomi_core::db_execute!(
@@ -1417,34 +1325,14 @@ async fn execute_watch_inner(
                          {{\"should_alert\": false, \"reason\": \"...\"}}"
                     );
 
-                    let retry_config = AgentExecutionConfig {
-                        session_id: session_id.clone(),
-                        user_id: watch.created_by.clone(),
-                        workspace_id: watch.workspace_id.clone(),
-                        message: correction_prompt,
-                        model_name: None,
-                        temperature: 0.7,
-                        is_shared_conversation: false,
-                        context_type: "kyomi_watch".into(),
-                        workspace_user_ids: None,
-                        cancel_token: CancellationToken::new(),
-                        current_time_user_tz: None,
-                        message_source: Some("Kyomi Watch".into()),
-                        system_prompt: None, // reuse existing context
-                        tools_subset: Some(WATCH_TOOLS.iter().map(|s| s.to_string()).collect()),
-                        max_iterations: MAX_WATCH_ITERATIONS,
-                        max_duration: Some(MAX_WATCH_DURATION),
-                        max_total_tokens: Some(MAX_WATCH_TOTAL_TOKENS),
-                        max_tokens: MAX_WATCH_OUTPUT_TOKENS,
-                        component: "kyomi_watch".into(),
-                        user_message_persistence: UserMessagePersistence::AdapterPersists(None),
-                        assistant_message_persistence: AssistantMessagePersistence::AdapterInserts(None),
-                        conversation_history: None,
-                        user_display_name: "Kyomi Watch".to_string(),
-                        context_window: 0,
-                        workspace_roles: creator_workspace_roles.clone(),
-                        document_id: None,
-                    };
+                    let retry_config = build_watch_retry_config(
+                        &session_id,
+                        &watch.created_by,
+                        &watch.workspace_id,
+                        enhanced_system_prompt.clone(),
+                        creator_workspace_roles.clone(),
+                        correction_prompt,
+                    );
 
                     let lazy_embedding_retry = kyomi_embed::LazyEmbedding::loaded(embedding.clone());
                     match execute_agent_chat(
@@ -1535,24 +1423,10 @@ async fn execute_watch_inner(
         kyomi_core::Error::Internal("Failed to validate watch response".into())
     })?;
 
-    // 11. Determine alert status
-    let is_alert = validated_data.should_alert;
-    let should_send_notification = is_alert || mode == WatchMode::Report;
-
-    let (alert_title, summary, agent_response) = if should_send_notification {
-        (
-            validated_data.alert_title.clone().unwrap_or_default(),
-            validated_data.summary.clone().unwrap_or_default(),
-            validated_data.alert_message.clone().unwrap_or_default(),
-        )
-    } else {
-        // No notification — store reason in agent_response for no-alert cases
-        (
-            String::new(),
-            String::new(),
-            validated_data.reason.clone().unwrap_or_default(),
-        )
-    };
+    // 11. Determine the stored/delivered terminal state. A guard stop is an
+    // Error with its human message, never an empty successful report.
+    let (should_send_notification, alert_title, summary, agent_response, status) =
+        terminal_delivery(mode, guard_stopped, &validated_data);
 
     // 12. Build execution trace
     let execution_trace = sanitize_json_null_bytes(serde_json::json!({
@@ -1560,15 +1434,6 @@ async fn execute_watch_inner(
         "summary": summary,
         "watch_prompt": watch.prompt,
     }));
-
-    // Determine execution status
-    // Report mode always succeeds (reports are always sent).
-    // Alert mode: "success" if should_alert, "no_alert" otherwise.
-    let status = if mode == WatchMode::Report || is_alert {
-        kyomi_core::WatchExecutionStatus::Success
-    } else {
-        kyomi_core::WatchExecutionStatus::NoAlert
-    };
 
     // Sanitize agent response for null bytes
     let sanitized_response = sanitize_null_bytes(&agent_response);
@@ -1631,11 +1496,7 @@ async fn execute_watch_inner(
     }
 
     // Return status for WS update
-    let ws_status = if should_send_notification {
-        "success".to_string()
-    } else {
-        "no_alert".to_string()
-    };
+    let ws_status = ws_status_for(status, should_send_notification);
 
     Ok((status.to_string(), ws_status))
 }
@@ -1670,6 +1531,64 @@ async fn load_watch(db: &DbPool, watch_id: &str) -> kyomi_core::Result<Option<Wa
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn guard_stop_is_delivered_as_reason_without_retry() {
+        let message = "I stopped after 5 consecutive tool calls failed to avoid looping. The last tool result was:\n\nboom\n\nI did not retry automatically. Please check the error and try a different approach.";
+        let response = guard_stop_response(message).expect("guard message");
+        assert!(!response.should_alert);
+        assert_eq!(response.reason.as_deref(), Some(message));
+        assert!(guard_stop_response(r#"{"should_alert": false, "reason": "ok"}"#).is_none());
+    }
+
+    #[test]
+    fn guard_stop_in_report_mode_is_error_and_does_not_send_an_empty_report() {
+        let data = WatchResponseData {
+            should_alert: false,
+            alert_title: None,
+            summary: None,
+            alert_message: None,
+            reason: Some("guard message".into()),
+        };
+        let (send, title, summary, response, status) =
+            terminal_delivery(WatchMode::Report, true, &data);
+        assert!(!send, "a guard stop must not send a report");
+        assert!(title.is_empty());
+        assert!(summary.is_empty());
+        assert_eq!(response, "guard message");
+        assert_eq!(status, kyomi_core::WatchExecutionStatus::Error);
+    }
+
+    #[test]
+    fn guard_stop_in_alert_mode_is_error_not_noalert() {
+        let data = WatchResponseData {
+            should_alert: false,
+            alert_title: None,
+            summary: None,
+            alert_message: None,
+            reason: Some("guard message".into()),
+        };
+        let (send, _, _, response, status) = terminal_delivery(WatchMode::Alert, true, &data);
+        assert!(!send);
+        assert_eq!(response, "guard message");
+        assert_eq!(status, kyomi_core::WatchExecutionStatus::Error);
+    }
+
+    #[test]
+    fn guard_stop_ws_status_is_error() {
+        assert_eq!(
+            ws_status_for(kyomi_core::WatchExecutionStatus::Error, false),
+            "error"
+        );
+        assert_eq!(
+            ws_status_for(kyomi_core::WatchExecutionStatus::Success, true),
+            "success"
+        );
+        assert_eq!(
+            ws_status_for(kyomi_core::WatchExecutionStatus::NoAlert, false),
+            "no_alert"
+        );
+    }
 
     // -- validate_watch_response: valid alert response --
 
@@ -1889,7 +1808,6 @@ mod tests {
             WatchMode::Alert,
             "",
             "",
-            "",
         );
         assert!(prompt.contains("ALERT MODE"));
         assert!(prompt.contains("When to Alert"));
@@ -1906,7 +1824,6 @@ mod tests {
             &now,
             None,
             WatchMode::Report,
-            "",
             "",
             "",
         );
@@ -1931,7 +1848,6 @@ mod tests {
             WatchMode::Alert,
             "",
             "",
-            "",
         );
         assert!(prompt.contains("Pre-determined Queries"));
         assert!(prompt.contains("Revenue query"));
@@ -1951,7 +1867,6 @@ mod tests {
             &now,
             None,
             WatchMode::Alert,
-            "",
             recent_alerts,
             "",
         );
@@ -1982,6 +1897,43 @@ mod tests {
     fn relative_time_days() {
         assert_eq!(format_relative_time(172800), "2 days ago");
         assert_eq!(format_relative_time(86400), "1 day ago");
+    }
+
+    // -- build_watch_retry_config --
+
+    #[test]
+    fn watch_retry_config_keeps_the_watch_system_prompt() {
+        let now = Utc::now();
+        let system_prompt = build_watch_system_prompt(
+            "Revenue Monitor",
+            "0 9 * * *",
+            &now,
+            None,
+            WatchMode::Alert,
+            "",
+            "",
+        );
+
+        let config = build_watch_retry_config(
+            "sess-1",
+            "user-a",
+            "ws-1",
+            system_prompt.clone(),
+            Vec::new(),
+            "fix the JSON".to_string(),
+        );
+
+        assert_eq!(config.system_prompt.as_deref(), Some(system_prompt.as_str()));
+        assert!(
+            config
+                .system_prompt
+                .as_deref()
+                .unwrap()
+                .contains("should_alert"),
+            "the retry must keep the watch JSON schema, not fall back to the chat prompt"
+        );
+        assert_eq!(config.context_type, "kyomi_watch");
+        assert_eq!(config.message, "fix the JSON");
     }
 
     // -- WATCH_TOOLS constant --
@@ -2291,24 +2243,6 @@ That concludes my analysis."#;
     // -- build_watch_system_prompt: additional edge cases --
 
     #[test]
-    fn build_prompt_with_user_learnings() {
-        let now = Utc::now();
-        let learnings = "\n## User Learnings\n- Revenue is in sales.transactions table\n";
-        let prompt = build_watch_system_prompt(
-            "Revenue Monitor",
-            "0 9 * * *",
-            &now,
-            None,
-            WatchMode::Alert,
-            learnings,
-            "",
-            "",
-        );
-        assert!(prompt.contains("User Learnings"));
-        assert!(prompt.contains("sales.transactions"));
-    }
-
-    #[test]
     fn build_prompt_with_chartml_reference() {
         let now = Utc::now();
         let chartml = "type: chart\nversion: 1\n# ChartML Quick Reference";
@@ -2318,7 +2252,6 @@ That concludes my analysis."#;
             &now,
             None,
             WatchMode::Alert,
-            "",
             "",
             chartml,
         );
@@ -2337,7 +2270,6 @@ That concludes my analysis."#;
             WatchMode::Alert,
             "",
             "",
-            "",
         );
         assert!(prompt.contains("Execution Context"));
         assert!(prompt.contains("My Watch"));
@@ -2354,7 +2286,6 @@ That concludes my analysis."#;
             &now,
             Some(&queries),
             WatchMode::Alert,
-            "",
             "",
             "",
         );
@@ -2376,7 +2307,6 @@ That concludes my analysis."#;
             WatchMode::Alert,
             "",
             "",
-            "",
         );
         assert!(prompt.contains("Simple query"));
         assert!(prompt.contains("SELECT COUNT(*) FROM users"));
@@ -2395,7 +2325,6 @@ That concludes my analysis."#;
             WatchMode::Report,
             "",
             "",
-            "",
         );
         // Report mode should NOT include alert decision logic
         assert!(!prompt.contains("When to Alert:"));
@@ -2412,7 +2341,6 @@ That concludes my analysis."#;
             &now,
             None,
             WatchMode::Alert,
-            "",
             "",
             "",
         );
