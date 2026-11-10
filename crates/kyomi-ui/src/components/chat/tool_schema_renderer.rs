@@ -916,6 +916,9 @@ fn render_search_knowledge(schema: &Value) -> impl IntoView {
                                     {source.map(|s| format!(" via {}", s)).unwrap_or_default()}
                                 </div>
                                 {show.into_iter().map(|(typ, id, text, score, matched_cols)| {
+                                    // Legacy `learning`/`metric` kinds are no longer
+                                    // produced by search_knowledge (KYO-952), but stored
+                                    // chat history can still contain them.
                                     let badge_class = match typ.as_str() {
                                         "table" => "bg-primary/10 text-primary",
                                         "learning" => "bg-warning/10 text-warning-foreground",
