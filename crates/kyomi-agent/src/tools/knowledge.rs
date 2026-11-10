@@ -2,8 +2,8 @@
 
 //! Knowledge search tool — unified search across the workspace knowledge base.
 //!
-//! Uses pgvector-based semantic search to find tables and metrics
-//! in a single call.
+//! Uses pgvector-based semantic search to find tables in a single call, plus
+//! the separate knowledge-document chunk index.
 
 use std::collections::{HashMap, HashSet};
 
@@ -82,8 +82,8 @@ async fn workspace_wants_bigquery_public_datasets(
 
 /// Unified search across the workspace knowledge base.
 ///
-/// Searches tables and metrics using pgvector-based semantic
-/// search in PostgreSQL.
+/// Searches tables using pgvector-based semantic search and knowledge
+/// documents via the chunk index.
 pub struct SearchKnowledgeTool;
 
 #[async_trait]
@@ -93,11 +93,18 @@ impl AgentTool for SearchKnowledgeTool {
     }
 
     fn description(&self) -> &str {
-        "Search the workspace's knowledge base for relevant tables, dashboards, \
-         knowledge documents, and metrics using semantic search. \
-         Use this to discover what is available before querying. Pass `doc_type` \
-         to restrict results to only dashboards or only knowledge documents \
-         (omit for everything including tables and metrics)."
+        "Search the workspace's knowledge base for tables, dashboards and \
+         knowledge documents. Use it first when you need to discover which tables can \
+         answer a question, or to find an existing dashboard or note about a topic. \
+         Phrase `query` the way the user asked the question — natural language works; \
+         if you already know the warehouse's table or column names, include them, \
+         because schema vocabulary ranks matches more confidently. If the first search \
+         misses, retry with different wording or table and column names. Returns ranked \
+         matches with `type`, `id`, `text` and `score`; table matches also include any \
+         matched columns and, when known, their datasource slug. Pass `datasource` to \
+         restrict table results to one datasource (the slug must resolve in this \
+         workspace), or `doc_type` to return only dashboards or only knowledge documents \
+         (tables are then excluded)."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -106,16 +113,16 @@ impl AgentTool for SearchKnowledgeTool {
             "properties": {
                 "query": {
                     "type": "string",
-                    "description": "Natural language search query"
+                    "description": "What to search for. Natural language (the user's question) works; add table or column names when you know them to sharpen the ranking. If results are weak, retry with different wording or schema vocabulary."
                 },
                 "datasource": {
                     "type": "string",
-                    "description": "Optional datasource slug to filter"
+                    "description": "Optional datasource slug; it must resolve in this workspace. Restricts table results to that datasource. Documents are not filtered by it, but an unknown slug still fails the call."
                 },
                 "doc_type": {
                     "type": "string",
                     "enum": ["dashboard", "knowledge"],
-                    "description": "Optional document type filter. When set, only returns matching dashboards or knowledge documents (tables and metrics are excluded). Omit to search everything."
+                    "description": "Optional document type filter. When set, only returns matching dashboards or knowledge documents (tables are excluded). Omit to search everything."
                 },
                 "limit": {
                     "type": "integer",
@@ -204,27 +211,22 @@ impl AgentTool for SearchKnowledgeTool {
             &ctx.db, &ctx.workspace_id, &ctx.user_id, &query_embedding, limit, doc_type_filter,
         ).await;
 
-        // When doc_type filter is specified, exclude legacy table/metric entries —
-        // the caller is asking specifically for documents of that type.
-        // Learning entries are always excluded from tool results.
-        let legacy_entries: Vec<_> = if doc_type_filter.is_some() {
+        // When doc_type filter is specified, exclude table entries — the
+        // caller is asking specifically for documents of that type.
+        let table_entries: Vec<_> = if doc_type_filter.is_some() {
             Vec::new()
         } else {
-            result
-                .entries
-                .into_iter()
-                .filter(|e| e.kind != kyomi_knowledge::ContextEntryKind::Learning)
-                .collect()
+            result.entries
         };
 
-        // Format entries as structured JSON
-        let mut results: Vec<serde_json::Value> = legacy_entries
+        // Format entries as structured JSON. Tables are the only retrieval
+        // kind left; dashboards and knowledge documents come from the chunk
+        // index below and carry their own shape.
+        let mut results: Vec<serde_json::Value> = table_entries
             .into_iter()
-            .filter_map(|entry| {
+            .map(|entry| {
                 let entry_type = match entry.kind {
                     kyomi_knowledge::ContextEntryKind::Table => "table",
-                    kyomi_knowledge::ContextEntryKind::Metric => "metric",
-                    kyomi_knowledge::ContextEntryKind::Learning => return None,
                 };
 
                 let mut obj = serde_json::json!({
@@ -249,7 +251,7 @@ impl AgentTool for SearchKnowledgeTool {
                     obj["matched_columns"] = serde_json::json!(cols);
                 }
 
-                Some(obj)
+                obj
             })
             .collect();
 
@@ -322,16 +324,12 @@ impl AgentTool for SearchKnowledgeTool {
                 .filter_map(|r| r.full_name)
                 .collect();
 
+            // Only table entries exist at this point; knowledge-document
+            // results are merged after this filter and are never filtered by
+            // datasource slug.
             results.retain(|entry| {
-                let entry_type = entry["type"].as_str().unwrap_or("");
-                if entry_type == "table" {
-                    let id = entry["id"].as_str().unwrap_or("");
-                    ds_tables.contains(id)
-                } else {
-                    // Keep metrics regardless of datasource; Learning entries
-                    // are already excluded before this point.
-                    entry_type == "metric"
-                }
+                let id = entry["id"].as_str().unwrap_or("");
+                ds_tables.contains(id)
             });
         }
 
@@ -559,8 +557,18 @@ impl AgentTool for WriteDocumentTool {
     }
 
     fn description(&self) -> &str {
-        "Create a new document or overwrite an existing one. Use for creating new markdown \
-         documents in the knowledge base. For updating existing documents, prefer edit_knowledge_file."
+        "Create a knowledge document, or overwrite an existing one by title (prefer \
+         edit_knowledge_file for changes). Knowledge documents are durable workspace \
+         memory: record how to navigate the warehouse (which tables to use, field \
+         meanings, join keys, date coverage, NULL semantics, field encodings), canonical \
+         metric definitions (name, formula, unit), and user corrections. Record only \
+         facts a tool result confirmed — never one-off query results, business insights, \
+         or explanations of your own errors. Pass doc_type=\"knowledge\" (default) for \
+         reference material. doc_type=\"dashboard\" requests a dashboard document, but a \
+         matching title updates the existing document without changing its type and \
+         there is no duplicate check; prefer the dedicated dashboard-creation tool when \
+         a saved dashboard is requested. Pass the content_hash from read_knowledge_file \
+         when overwriting to detect concurrent edits."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -577,7 +585,7 @@ impl AgentTool for WriteDocumentTool {
                 },
                 "content_hash": {
                     "type": "string",
-                    "description": "Hash from a prior read_knowledge_file response. Required when overwriting an existing document."
+                    "description": "Hash from a prior read_knowledge_file response. Pass it when overwriting to detect concurrent edits."
                 },
                 "doc_type": {
                     "type": "string",
@@ -796,8 +804,11 @@ impl AgentTool for ListDocumentsTool {
     }
 
     fn description(&self) -> &str {
-        "List all documents in the workspace. Returns titles, types, and metadata. \
-         Optionally filter by document type (dashboard or knowledge)."
+        "List the workspace's documents, newest first. Returns each document's id, \
+         title, doc_type, updated_at and a content preview. Use it to enumerate \
+         knowledge documents or dashboards when you don't know their titles; filter \
+         with doc_type to return only dashboards or only knowledge documents. For \
+         topic search use search_knowledge instead."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -1069,6 +1080,233 @@ mod tests {
             .await
             .expect_err("an unresolvable datasource slug must error, not silently no-op");
         assert!(matches!(err, kyomi_core::Error::NotFound(_)), "got: {err:?}");
+    }
+
+    /// `search_knowledge` returns both live sources: a semantically matching
+    /// warehouse table and a matching knowledge document.
+    ///
+    /// The table and the document are seeded so their embeddings equal the
+    /// query embedding, so every seeded source scores 1.0 and cannot be hidden
+    /// by a weak similarity. The exact-count assertion fails if either source
+    /// is dropped or an unexpected result kind appears.
+    #[tokio::test]
+    async fn search_knowledge_returns_table_and_document_sources() {
+        let db = test_pool().await;
+        seed_user_and_workspace(&db).await;
+
+        let mut ctx = build_ctx(db);
+        ctx.embedding = loaded_embedding();
+        let embed = ctx.embedding.wait_ready().await.expect("loaded embedding");
+        let query_vec = embed
+            .embed_query_offloaded("revenue")
+            .await
+            .expect("embed query");
+        let embedding = kyomi_core::embedding_compat::embedding_to_bytes(&query_vec);
+
+        let sq = match &ctx.db {
+            kyomi_core::DbPool::Sqlite(sq) => sq,
+            kyomi_core::DbPool::Postgres(_) => unreachable!("test pool is always sqlite"),
+        };
+
+        sqlx::query(
+            "INSERT INTO datasource_configs (id, workspace_id, name, datasource_type, slug) \
+             VALUES ('ds-1', 'ws-1', 'Test DS', 'postgres', 'test-ds')",
+        )
+        .execute(sq)
+        .await
+        .expect("seed datasource_configs");
+
+        sqlx::query(
+            "INSERT INTO datasource_table_cache \
+                (workspace_id, datasource_config_id, project_id, dataset_id, table_id, \
+                 table_metadata, name_embedding) \
+             VALUES ('ws-1', 'ds-1', '', 'public', 'orders', ?, ?)",
+        )
+        .bind(serde_json::json!({"description": "Orders"}).to_string())
+        .bind(&embedding)
+        .execute(sq)
+        .await
+        .expect("seed datasource_table_cache");
+
+        // The live knowledge-document source must keep working too.
+        let doc_id = kyomi_auth::dashboard_service::create_dashboard(
+            &ctx.db,
+            "user-a",
+            "ws-1",
+            "Revenue Notes",
+            "revenue",
+            DocType::Knowledge,
+            None,
+        )
+        .await
+        .expect("seed knowledge document");
+        kyomi_auth::dashboard_service::rechunk_document(
+            &ctx.db,
+            embed,
+            &doc_id,
+            "revenue",
+            "ws-1",
+        )
+        .await
+        .expect("seed knowledge chunk");
+
+        let result = SearchKnowledgeTool
+            .execute(serde_json::json!({"query": "revenue"}), &ctx)
+            .await
+            .expect("search_knowledge execute");
+        let parsed: serde_json::Value = serde_json::from_str(&result).expect("valid json");
+        let results = parsed["results"].as_array().expect("results array");
+
+        assert_eq!(
+            results.len(),
+            2,
+            "exactly the table and the knowledge document may produce results — a \
+             source broke or an unexpected result kind appeared: {result}"
+        );
+        assert_eq!(
+            results
+                .iter()
+                .filter(|row| row["type"] == serde_json::json!("table"))
+                .count(),
+            1,
+            "table results must still work: {result}"
+        );
+        assert_eq!(
+            results
+                .iter()
+                .filter(|row| row["type"] == serde_json::json!("document"))
+                .count(),
+            1,
+            "knowledge-document results must still work: {result}"
+        );
+        assert!(
+            results
+                .iter()
+                .any(|row| row["id"] == serde_json::json!("public.orders")),
+            "the seeded table must be returned: {result}"
+        );
+        assert!(
+            results
+                .iter()
+                .any(|row| row["id"] == serde_json::json!(doc_id)),
+            "the seeded knowledge document must be returned: {result}"
+        );
+    }
+
+    /// KYO-952: the datasource filter's positive path scopes table results to
+    /// the resolved datasource and still leaves knowledge documents
+    /// unfiltered, as the tool description says.
+    #[tokio::test]
+    async fn search_knowledge_datasource_filter_scopes_tables_but_not_documents() {
+        let db = test_pool().await;
+        seed_user_and_workspace(&db).await;
+
+        let mut ctx = build_ctx(db);
+        ctx.embedding = loaded_embedding();
+        let embed = ctx.embedding.wait_ready().await.expect("loaded embedding");
+        let query_vec = embed
+            .embed_query_offloaded("revenue")
+            .await
+            .expect("embed query");
+        let embedding = kyomi_core::embedding_compat::embedding_to_bytes(&query_vec);
+
+        let sq = match &ctx.db {
+            kyomi_core::DbPool::Sqlite(sq) => sq,
+            kyomi_core::DbPool::Postgres(_) => unreachable!("test pool is always sqlite"),
+        };
+
+        for (id, slug) in [("ds-1", "test-ds"), ("ds-2", "other-ds")] {
+            sqlx::query(
+                "INSERT INTO datasource_configs \
+                    (id, workspace_id, name, datasource_type, slug) \
+                 VALUES (?, 'ws-1', ?, 'postgres', ?)",
+            )
+            .bind(id)
+            .bind(format!("Datasource {id}"))
+            .bind(slug)
+            .execute(sq)
+            .await
+            .expect("seed datasource_configs");
+        }
+
+        for (datasource_id, table_id) in [("ds-1", "orders"), ("ds-2", "events")] {
+            sqlx::query(
+                "INSERT INTO datasource_table_cache \
+                    (workspace_id, datasource_config_id, project_id, dataset_id, table_id, \
+                     table_metadata, name_embedding) \
+                 VALUES ('ws-1', ?, '', 'public', ?, '{}', ?)",
+            )
+            .bind(datasource_id)
+            .bind(table_id)
+            .bind(&embedding)
+            .execute(sq)
+            .await
+            .expect("seed datasource_table_cache");
+        }
+
+        let doc_id = kyomi_auth::dashboard_service::create_dashboard(
+            &ctx.db,
+            "user-a",
+            "ws-1",
+            "Revenue Notes",
+            "revenue",
+            DocType::Knowledge,
+            None,
+        )
+        .await
+        .expect("seed knowledge document");
+        kyomi_auth::dashboard_service::rechunk_document(
+            &ctx.db,
+            embed,
+            &doc_id,
+            "revenue",
+            "ws-1",
+        )
+        .await
+        .expect("seed knowledge chunk");
+
+        let result = SearchKnowledgeTool
+            .execute(
+                serde_json::json!({"query": "revenue", "datasource": "test-ds"}),
+                &ctx,
+            )
+            .await
+            .expect("search_knowledge execute");
+        let parsed: serde_json::Value = serde_json::from_str(&result).expect("valid json");
+        let results = parsed["results"].as_array().expect("results array");
+
+        assert_eq!(
+            results.len(),
+            2,
+            "the filtered table plus the unfiltered document must be returned: {result}"
+        );
+        assert_eq!(
+            results
+                .iter()
+                .filter(|row| row["type"] == serde_json::json!("table"))
+                .count(),
+            1,
+            "exactly one table (the resolved datasource's) must survive: {result}"
+        );
+        assert!(
+            results
+                .iter()
+                .any(|row| row["id"] == serde_json::json!("public.orders")),
+            "the matching datasource's table must be returned: {result}"
+        );
+        assert!(
+            results
+                .iter()
+                .all(|row| row["id"] != serde_json::json!("public.events")),
+            "the other datasource's table must be filtered out: {result}"
+        );
+        assert!(
+            results
+                .iter()
+                .any(|row| row["type"] == serde_json::json!("document")
+                    && row["id"] == serde_json::json!(doc_id)),
+            "knowledge documents must not be datasource-filtered: {result}"
+        );
     }
 
     // ---------------------------------------------------------------------

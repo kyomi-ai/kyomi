@@ -303,6 +303,15 @@ fn hidden_value(page: &str, name: &str) -> String {
         .to_owned()
 }
 
+fn consent_callback(response: &reqwest::Response) -> url::Url {
+    assert_eq!(response.status(), 200);
+    assert_eq!(response.headers()["cache-control"], "no-store");
+    assert_eq!(response.headers()["referrer-policy"], "no-referrer");
+    let refresh = response.headers()["refresh"].to_str().expect("refresh header");
+    url::Url::parse(refresh.strip_prefix("0; url=").expect("immediate navigation"))
+        .expect("valid callback URL")
+}
+
 async fn consent_page(ctx: &AuthContext, client_id: &str) -> (String, String, String) {
     let resp = client()
         .get(format!("{}/api/v1/oauth/authorize", ctx.base_url))
@@ -344,7 +353,8 @@ async fn consent_page(ctx: &AuthContext, client_id: &str) -> (String, String, St
 }
 
 async fn oauth_context(suffix: &str) -> Option<(AuthContext, String)> {
-    let ctx = setup_auth_context("OAuth Test User", "oauth", suffix).await?;
+    let suffix = format!("{suffix}-{}", uuid::Uuid::new_v4());
+    let ctx = setup_auth_context("OAuth Test User", "oauth", &suffix).await?;
     let id =
         register_test_client(&ctx.base_url, &["https://example.com/callback?existing=1"]).await;
     Some((ctx, id))
@@ -370,11 +380,7 @@ async fn logged_in_get_requires_post_consent_and_pkce_to_issue_code() {
         .send()
         .await
         .expect("OAuth contract value");
-    assert_eq!(resp.status(), 303);
-    let location = resp.headers()["location"]
-        .to_str()
-        .expect("OAuth contract value");
-    let url = url::Url::parse(location).expect("OAuth contract value");
+    let url = consent_callback(&resp);
     assert_eq!(
         url.query_pairs()
             .find(|(key, _)| key == "existing")
@@ -455,10 +461,7 @@ async fn consent_denial_csrf_and_browser_binding() {
         .send()
         .await
         .expect("OAuth contract value");
-    assert_eq!(denied.status(), 303);
-    let location = denied.headers()["location"]
-        .to_str()
-        .expect("OAuth contract value");
+    let location = consent_callback(&denied).to_string();
     assert!(location.contains("error=access_denied"));
     assert!(!location.contains("code="));
 
@@ -528,7 +531,7 @@ async fn consent_denial_csrf_and_browser_binding() {
         .expect("consent after access refresh");
     assert_eq!(
         refreshed_session.status(),
-        303,
+        200,
         "a refreshed access JWT preserves consent"
     );
     assert!(
@@ -663,13 +666,7 @@ async fn code_exchange_requires_exact_redirect_and_correct_pkce() {
         .send()
         .await
         .expect("OAuth contract value");
-    assert_eq!(approved.status(), 303);
-    let location = url::Url::parse(
-        approved.headers()["location"]
-            .to_str()
-            .expect("OAuth contract value"),
-    )
-    .expect("OAuth contract value");
+    let location = consent_callback(&approved);
     let code = location
         .query_pairs()
         .find(|(key, _)| key == "code")
@@ -894,7 +891,8 @@ async fn different_user_cannot_approve_another_users_transaction() {
     let Some((ctx, id)) = oauth_context("wrong-user-owner").await else {
         return;
     };
-    let Some(other) = setup_auth_context("Other User", "oauth", "wrong-user-other").await else {
+    let suffix = format!("wrong-user-other-{}", uuid::Uuid::new_v4());
+    let Some(other) = setup_auth_context("Other User", "oauth", &suffix).await else {
         return;
     };
     let (transaction, csrf, consent_cookie) = consent_page(&ctx, &id).await;
@@ -918,7 +916,6 @@ async fn different_user_cannot_approve_another_users_transaction() {
 #[tokio::test]
 async fn session_cutoff_logout_all_clears_cookies_and_revokes_browser_oauth_authority() {
     let suffix = format!("cutoff-logout-all-{}", uuid::Uuid::new_v4());
-    let email = format!("oauth-test-{suffix}@contract-test.local");
     let Some((ctx, client_id)) = oauth_context(&suffix).await else {
         assert_ne!(
             std::env::var("KYOMI_REQUIRE_POSTGRES_TESTS").as_deref(),
@@ -1107,7 +1104,7 @@ async fn session_cutoff_logout_all_clears_cookies_and_revokes_browser_oauth_auth
         &ctx.user_id
     )
     .unwrap();
-    kyomi_test_harness::cleanup_test_user(&ctx.db, &email).await;
+    kyomi_test_harness::cleanup_test_user(&ctx.db, &user.email).await;
     assert!(
         kyomi_auth::user_service::get_user_by_id(&ctx.db, &ctx.user_id)
             .await
