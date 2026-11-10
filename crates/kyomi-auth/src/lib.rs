@@ -39,7 +39,6 @@ pub mod encryption;
 pub mod feedback_service;
 pub mod google_oauth;
 pub mod jwt;
-pub mod learning_service;
 pub mod trakkt_service;
 pub mod mcp_session_manager;
 pub mod middleware;

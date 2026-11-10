@@ -55,8 +55,13 @@ impl DocumentEditTool {
     pub(crate) fn description_for(doc_type: DocType) -> &'static str {
         match doc_type {
             DocType::Knowledge => {
-                "Make a targeted edit to an existing document using string replacement. \
-                 Send only the old and new text. Fails if old_text is not found or appears multiple times."
+                "Make a targeted edit to an existing knowledge document by replacing one \
+                 exact string. Use this instead of write_knowledge_file when the document \
+                 already exists: send only old_text and new_text, not the whole document. \
+                 Fails if old_text is not found or appears more than once, so include \
+                 enough surrounding context to make it unique. Read the document first. \
+                 Record only facts a tool result confirmed — never one-off results or \
+                 explanations of your own errors."
             }
             DocType::Dashboard => unimplemented!("see name_for()"),
         }

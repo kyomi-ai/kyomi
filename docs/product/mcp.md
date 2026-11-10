@@ -26,8 +26,8 @@ When you connect Kyomi via MCP, your AI assistant gains access to:
 - **validate_sql** - Check query syntax before executing.
 
 ### Knowledge Base
-- **search_learnings** - Access your team's accumulated knowledge about your data.
-- **save_learning** - Capture new insights about tables, metrics, or business rules.
+- **search_knowledge** - Access your team's knowledge documents and table metadata.
+- **write_knowledge_file** - Create or update a knowledge document with confirmed findings.
 
 ### Dashboards
 - **search_dashboards** - Find existing dashboards by content or title.
