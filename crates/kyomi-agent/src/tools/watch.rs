@@ -1094,10 +1094,11 @@ impl AgentTool for TriggerWatchTool {
             .to_string());
         }
 
-        // Resolve embedding service (required for watch execution).
-        let embedding = ctx.embedding.get().map_err(|e| {
-            kyomi_core::Error::ServiceUnavailable(format!("Embedding model not ready: {e}"))
-        })?.clone();
+        // Resolve embedding service (required for watch execution). Wait for
+        // the model like every other embedding tool and the HTTP run-now
+        // endpoint do; a fail-fast `get()` here would turn a transient model
+        // load into a tool error.
+        let embedding = ctx.embedding.wait_ready().await?.clone();
 
         // Spawn background execution — same as the HTTP trigger endpoint.
         // `execute_watch` creates the execution record internally.

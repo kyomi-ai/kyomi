@@ -5500,7 +5500,7 @@ mod tests {
     // KYO-493: the pre-loop `Err` path (`execute_agent_chat` fails before
     // the agent loop even starts — e.g. resolving workspace AI config) goes
     // through `save_agent_error` directly, never through
-    // `execute_agent_chat`'s own step-15 finalization. Since
+    // `execute_agent_chat`'s own step-14 finalization. Since
     // `prepare_chat_dispatch`'s AI path now always pre-inserts the
     // placeholder, `save_agent_error`'s "try update first" branch is the
     // normal case in production — this pins that it actually finalizes the
