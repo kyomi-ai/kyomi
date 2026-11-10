@@ -910,7 +910,7 @@ pub async fn update_extra_metadata(
 }
 
 // ---------------------------------------------------------------------------
-// ChartML config + knowledge (Phase 4B — user endpoints)
+// ChartML config (Phase 4B — user endpoints)
 // ---------------------------------------------------------------------------
 
 /// Update user's ChartML config JSON.
@@ -984,21 +984,6 @@ pub async fn get_user_palette_name(pool: &DbPool, user_id: &str) -> String {
             DEFAULT_PALETTE.to_string()
         }
     }
-}
-
-/// Update user's knowledge text.
-pub async fn update_knowledge(
-    pool: &DbPool,
-    user_id: &str,
-    knowledge: &str,
-) -> kyomi_core::Result<bool> {
-    let is_pg = pool.is_postgres();
-    let now = sql_compat::now(is_pg);
-    let sql = format!(
-        "UPDATE users SET knowledge = $1, updated_at = {now} WHERE user_id = $2"
-    );
-    let result = kyomi_core::db_execute!(pool, &sql, knowledge, user_id)?;
-    Ok(result.rows_affected() > 0)
 }
 
 // ---------------------------------------------------------------------------

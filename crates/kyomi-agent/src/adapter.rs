@@ -2178,7 +2178,7 @@ mod tests {
     // INSERT would fail these exactly as the collision failed KYO-572's.
     //
     // The last two compose the same finalization steps
-    // `kyomi_agent::execution::execute_agent_chat`'s step 13/15 perform
+    // `kyomi_agent::execution::execute_agent_chat`'s step 12/14 perform
     // (`classify_agent_failure` + `finalize_terminal_write` +
     // `chat_service::update_message`) around a real `adapter.chat()` call —
     // `execute_agent_chat` itself resolves a real, network-calling LLM
@@ -2540,7 +2540,7 @@ mod tests {
             .await;
         let err = result.expect_err("FailingProvider must make chat() return Err");
 
-        // Exactly what execute_agent_chat's step 13/15 do with that Err.
+        // Exactly what execute_agent_chat's step 12/14 do with that Err.
         let (exec_status, response_text) = crate::execution::classify_agent_failure(&err);
         assert_eq!(exec_status, "error");
         let (content, message_status) =
@@ -2700,10 +2700,9 @@ mod tests {
         // Exactly the persistence choice execute_watch_inner configures
         // post-fix: the `UserMessagePersistence::CallerPersisted` value
         // `prepare_watch_dispatch` returned, over the row it already wrote
-        // above. The LLM turn itself still uses the *enhanced* prompt
-        // (workspace-learnings prefix + watch.prompt) — distinct text from
-        // the pre-written row — exactly as the exec config's `message`
-        // field does.
+        // above. The turn deliberately uses text distinct from the durable
+        // row (production differs by the `Monitor: {name}` header) so this
+        // test proves the de-duplication is id-based, not text-based.
         let enhanced_watch_prompt = format!("Workspace learnings: none.\n{watch_prompt}");
         adapter
             .chat(ChatParams {
@@ -3359,6 +3358,7 @@ mod tests {
         index: std::sync::atomic::AtomicUsize,
         invalid_chart: bool,
         query_rejected: bool,
+        query_error_marker: &'static str,
     }
     #[async_trait::async_trait]
     impl crate::provider::LLMProvider for AwaitedProvider {
@@ -3368,8 +3368,7 @@ mod tests {
             let index = self.index.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             if self.query_rejected && index > 0 {
                 assert!(messages.iter().any(|message| message.role == crate::types::MessageRole::Tool
-                    && message.content.contains("UNKNOWN_IDENTIFIER")
-                    && message.content.contains("page_url")), "database rejection must reach the model before it continues");
+                    && message.content.contains(self.query_error_marker)), "database rejection must reach the model before it continues");
                 if index > 1 {
                     assert!(messages.iter().any(|message| message.role == crate::types::MessageRole::Tool
                         && serde_json::from_str::<serde_json::Value>(&message.content).is_ok_and(|value| value["data"]["views"][0] == 42)), "retry results must reach the model before its final answer");
@@ -3394,6 +3393,7 @@ mod tests {
         uncertain_failure: bool,
         uncertain_result: bool,
         query_rejected: bool,
+        query_error: &'static str,
     }
     #[async_trait::async_trait]
     impl crate::tools::AgentTool for AwaitedTool {
@@ -3432,9 +3432,8 @@ mod tests {
                 if index > 0 {
                     return Ok(serde_json::json!({"cols":[{"name":"views","type":"integer"}],"data":{"views":[42]},"rows":1}).to_string());
                 }
-                return Ok(crate::tools::query_utils::query_error_response(
-                    "clickhouse", "kyomi-analytics", "SELECT page_url FROM events",
-                    "Code: 47. DB::Exception: Unknown expression identifier page_url (UNKNOWN_IDENTIFIER)",
+                return Ok(crate::tools::query_utils::query_error_response_with_rejection(
+                    "kyomi-analytics", self.query_error, self.query_rejected,
                 ));
             }
             kyomi_core::db_execute!(&self.db, "UPDATE workspaces SET name='883 side effect committed' WHERE workspace_id='ws-1'").unwrap();
@@ -3453,10 +3452,27 @@ mod tests {
         let (user, assistant)=claim_durable_message(&db,&key,&session,"investigate revenue",chrono::Utc::now().timestamp_millis(),30_000).await;
         let run=assistant.durable_run().unwrap().clone();
         let calls=Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let script=vec![crate::test_support::Reply::ToolCall,crate::test_support::Reply::ToolCall,crate::test_support::Reply::Text("Revenue checked".into())];
-        let provider=AwaitedProvider {inner:crate::test_support::ScriptedProvider {script:std::sync::Mutex::new(script.into()),after_script:crate::test_support::Reply::Text("unexpected".into()),calls:Arc::new(std::sync::Mutex::new(Vec::new()))},index:std::sync::atomic::AtomicUsize::new(0),invalid_chart,query_rejected:fail_writer == "query_rejected"};
+        let uncertain_answer="I could not verify the tool result; please check and retry.";
+        let failure_then_answer=matches!(fail_writer,"uncertain"|"uncertain_result"|"outcome");
+        let script=vec![
+            crate::test_support::Reply::ToolCall,
+            if failure_then_answer { crate::test_support::Reply::Text(uncertain_answer.into()) } else { crate::test_support::Reply::ToolCall },
+            if failure_then_answer { crate::test_support::Reply::Text("unexpected".into()) } else { crate::test_support::Reply::Text("Revenue checked".into()) },
+        ];
+        let (query_error, query_error_marker) = match fail_writer {
+            "query_rejected_184" => (
+                "Code: 184. DB::Exception: Aggregate function any(sw) is found in GROUP BY in query. (ILLEGAL_AGGREGATION)",
+                "ILLEGAL_AGGREGATION",
+            ),
+            _ => (
+                "Code: 47. DB::Exception: Unknown expression identifier page_url (UNKNOWN_IDENTIFIER)",
+                "UNKNOWN_IDENTIFIER",
+            ),
+        };
+        let query_rejected = matches!(fail_writer, "query_rejected" | "query_rejected_184");
+        let provider=AwaitedProvider {inner:crate::test_support::ScriptedProvider {script:std::sync::Mutex::new(script.into()),after_script:crate::test_support::Reply::Text("unexpected".into()),calls:Arc::new(std::sync::Mutex::new(Vec::new()))},index:std::sync::atomic::AtomicUsize::new(0),invalid_chart,query_rejected,query_error_marker};
         let mut registry=crate::tools::ToolRegistry::new();
-        registry.register(Arc::new(AwaitedTool {db:db.clone(),key:key.clone(),run:run.clone(),message:assistant.tag_id().unwrap().into(),calls:calls.clone(),invalid_chart,uncertain_failure:fail_writer == "uncertain",uncertain_result:fail_writer == "uncertain_result",query_rejected:fail_writer == "query_rejected"}));
+        registry.register(Arc::new(AwaitedTool {db:db.clone(),key:key.clone(),run:run.clone(),message:assistant.tag_id().unwrap().into(),calls:calls.clone(),invalid_chart,uncertain_failure:fail_writer == "uncertain",uncertain_result:fail_writer == "uncertain_result",query_rejected,query_error}));
         let mut context=crate::test_support::build_ctx(db.clone());
         context.session_id=Some(session.clone());
         let agent=CustomAgent::new(Box::new(provider),crate::agent::AgentConfig::default(),Arc::new(registry),context,std::collections::HashMap::new());
@@ -3484,20 +3500,39 @@ mod tests {
             assert!(tracker.lock().await.events().is_empty());
             return;
         }
-        if fail_writer == "outcome" || fail_writer == "uncertain" || fail_writer == "uncertain_result" {
-            assert!(result.unwrap_err().to_string().contains("unknown after execution"));
+        if fail_writer == "outcome" {
+            assert!(result.unwrap_err().to_string().contains("could not be saved safely"));
             assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst),1);
             let mutation:(String,)=kyomi_core::db_fetch_one!(&db,(String,),"SELECT name FROM workspaces WHERE workspace_id='ws-1'").unwrap();
             assert_eq!(mutation.0,"883 side effect committed");
-            if fail_writer == "outcome" { kyomi_core::db_execute!(&db,"DROP TRIGGER reject_883_outcome").unwrap(); }
+            kyomi_core::db_execute!(&db,"DROP TRIGGER reject_883_outcome").unwrap();
             let store=kyomi_auth::conversation_events::ConversationStore::new(&db,&key,"user-a","ws-1");
             store.expire(&run.conversation_id,&run.run_id,run.lease.expires_at+1).await.unwrap();
             assert!(store.claim(&run.conversation_id,&run.run_id,"replacement",run.lease.expires_at+2,30_000).await.is_err());
             let replay=store.replay(&run.conversation_id,0,100).await.unwrap();
-            let expected_transport = match fail_writer { "outcome" => agent_runtime::TransportOutcome::Unknown, "uncertain_result" => agent_runtime::TransportOutcome::Completed, _ => agent_runtime::TransportOutcome::Failed };
-            assert!(replay.events.iter().any(|event| matches!(&event.payload,agent_runtime::PublicPayload::ToolOutcome {transport,domain:agent_runtime::DomainOutcome::Unknown,..} if *transport == expected_transport)));
             assert_eq!(replay.events.iter().filter(|event| matches!(event.payload,agent_runtime::PublicPayload::Interrupted {..})).count(),1);
+            assert!(replay.events.iter().any(|event| matches!(&event.payload,agent_runtime::PublicPayload::ToolOutcome {domain:agent_runtime::DomainOutcome::Unknown,text,..} if text.preview.contains("Verify the result before retrying"))),"terminalization must synthesize an Unknown tool outcome with the verify-before-retry guidance");
+            return;
+        }
+        if fail_writer == "uncertain" || fail_writer == "uncertain_result" {
+            assert_eq!(result.unwrap(),uncertain_answer);
             assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst),1);
+            let mutation:(String,)=kyomi_core::db_fetch_one!(&db,(String,),"SELECT name FROM workspaces WHERE workspace_id='ws-1'").unwrap();
+            assert_eq!(mutation.0,"883 side effect committed");
+            let store=kyomi_auth::conversation_events::ConversationStore::new(&db,&key,"user-a","ws-1");
+            let replay=store.replay(&run.conversation_id,0,100).await.unwrap();
+            let outcomes:Vec<_>=replay.events.iter().filter_map(|event| match &event.payload {
+                agent_runtime::PublicPayload::ToolOutcome {transport,domain,text,..} => Some((transport,domain,text)),_=>None,
+            }).collect();
+            assert_eq!(outcomes.len(),1);
+            let expected_transport = if fail_writer == "uncertain_result" { agent_runtime::TransportOutcome::Completed } else { agent_runtime::TransportOutcome::Failed };
+            assert_eq!(*outcomes[0].0,expected_transport);
+            assert_eq!(*outcomes[0].1,agent_runtime::DomainOutcome::Unknown);
+            assert!(outcomes[0].2.preview.contains("Outcome unknown:"),"unknown guidance must be persisted: {:?}",outcomes[0].2);
+            assert!(outcomes[0].2.preview.contains("the tool may have executed"));
+            assert!(outcomes[0].2.preview.contains("Verify the result before retrying"));
+            assert!(outcomes[0].2.preview.contains("do not blindly repeat a mutating call"));
+            assert_eq!(replay.events.iter().filter(|event| matches!(event.payload,agent_runtime::PublicPayload::Interrupted {..})).count(),0,"the turn must continue");
             return;
         }
         assert_eq!(result.unwrap(),"Revenue checked");
@@ -3510,7 +3545,7 @@ mod tests {
         assert_eq!(outcomes.len(),2); assert_ne!(outcomes[0].0,outcomes[1].0);
         let projected=chat_service::get_session_messages(&db,&key,&session,100).await.unwrap();
         let thinking=&projected.iter().find(|message| message.message_id==assistant.tag_id().unwrap()).unwrap().thinking_events;
-        let query_rejected = fail_writer == "query_rejected";
+        let query_rejected = matches!(fail_writer, "query_rejected" | "query_rejected_184");
         assert_eq!(thinking.iter().filter(|event| event.get("data").and_then(|data| data.get("success")).and_then(serde_json::Value::as_bool)==Some(false)).count(),if query_rejected {1} else {2});
         assert!(outcomes.iter().all(|(_,transport,_)| **transport==agent_runtime::TransportOutcome::Completed));
         assert_eq!(*outcomes[0].2,agent_runtime::DomainOutcome::Rejected);
@@ -3528,13 +3563,17 @@ mod tests {
         awaited_adapter_fixture("query_rejected",false).await;
     }
     #[tokio::test]
+    async fn awaited_sink_illegal_aggregation_cte_reaches_model_and_continues() {
+        awaited_adapter_fixture("query_rejected_184",false).await;
+    }
+    #[tokio::test]
     async fn awaited_sink_writer_failure_calls_zero_tools_and_notifies_zero_progress() { awaited_adapter_fixture("response",false).await; }
     #[tokio::test]
     async fn awaited_sink_invalid_chart_candidate_stays_restricted_before_validated_answer() { awaited_adapter_fixture("",true).await; }
     #[tokio::test]
-    async fn awaited_sink_committed_side_effect_without_result_is_interrupted_and_never_reexecuted() { awaited_adapter_fixture("outcome",false).await; }
+    async fn awaited_sink_committed_side_effect_without_result_is_reported_as_persistence_failure_and_never_reexecuted() { awaited_adapter_fixture("outcome",false).await; }
     #[tokio::test]
-    async fn awaited_sink_advisory_read_only_action_with_uncertain_effect_halts_and_never_reruns() {
+    async fn awaited_sink_advisory_read_only_action_with_uncertain_effect_continues_with_guidance_without_rerun() {
         use crate::tools::AgentTool;
         let query = crate::tools::datasource::QueryDatasourceTool;
         assert_eq!(query.annotations().unwrap().read_only_hint,Some(true));
@@ -3542,7 +3581,7 @@ mod tests {
         awaited_adapter_fixture("uncertain",false).await;
     }
     #[tokio::test]
-    async fn awaited_sink_query_error_envelope_after_effect_halts_and_never_reruns() {
+    async fn awaited_sink_query_error_envelope_after_effect_continues_with_guidance_without_rerun() {
         use crate::tools::AgentTool;
         let tools: [&dyn AgentTool;3] = [&crate::tools::datasource::QueryDatasourceTool, &crate::tools::forecast::ForecastDataTool, &crate::tools::chart::RenderChartTool];
         for tool in tools {
@@ -3627,6 +3666,7 @@ mod tests {
         inner: crate::test_support::ScriptedProvider,
         requested: Vec<(&'static str, serde_json::Value)>,
         index: std::sync::atomic::AtomicUsize,
+        truncated: bool,
     }
     #[async_trait::async_trait]
     impl crate::provider::LLMProvider for ActualToolsProvider {
@@ -3635,7 +3675,12 @@ mod tests {
             let mut response = self.inner.complete(messages, tools, temperature, max_tokens, names).await?;
             let index = self.index.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             if let Some((name, arguments)) = self.requested.get(index) {
-                response.tool_calls = Some(vec![crate::types::ToolCall { id: "repeated-provider-call".into(), name: (*name).into(), arguments: arguments.clone(), arguments_error: None }]);
+                let arguments_error = (self.truncated && index == 0)
+                    .then(|| "arguments could not be parsed as JSON (finish_reason=max_tokens): EOF".to_string());
+                if arguments_error.is_some() {
+                    response.finish_reason = "max_tokens".into();
+                }
+                response.tool_calls = Some(vec![crate::types::ToolCall { id: "repeated-provider-call".into(), name: (*name).into(), arguments: arguments.clone(), arguments_error }]);
             }
             Ok(response)
         }
@@ -3649,9 +3694,10 @@ mod tests {
         let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
         let mut script: Vec<_> = (0..requested.len()).map(|_| crate::test_support::Reply::ToolCall).collect();
         script.push(crate::test_support::Reply::Text("Tool corrections complete".into()));
-        let provider = ActualToolsProvider { inner: crate::test_support::ScriptedProvider {script:std::sync::Mutex::new(script.into()),after_script:crate::test_support::Reply::Text("unexpected".into()),calls:calls.clone()}, requested, index:std::sync::atomic::AtomicUsize::new(0) };
+        let provider = ActualToolsProvider { inner: crate::test_support::ScriptedProvider {script:std::sync::Mutex::new(script.into()),after_script:crate::test_support::Reply::Text("unexpected".into()),calls:calls.clone()}, requested, index:std::sync::atomic::AtomicUsize::new(0), truncated: false };
         let mut registry = crate::tools::ToolRegistry::new();
         registry.register(Arc::new(crate::tools::validate_chartml::ValidateChartmlTool));
+        registry.register(Arc::new(crate::tools::datasource::QueryDatasourceTool));
         registry.register(Arc::new(crate::tools::analytics::CreateAnalyticsSiteTool));
         registry.register(Arc::new(crate::tools::analytics::UpdateAnalyticsSiteTool));
         registry.register(Arc::new(crate::tools::analytics::DeleteAnalyticsSiteTool));
@@ -3675,6 +3721,278 @@ mod tests {
         let recorded = std::mem::take(&mut *calls.lock().unwrap());
         (outcomes, recorded)
     }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum FailureKind {
+        BadRequest,
+        ServerError,
+        Timeout,
+        UnknownResult,
+        Panic,
+        ResultPanic,
+        TransportError,
+        NotFound,
+        Forbidden,
+        BadRequestAfterEffect,
+        MutatingUnknown,
+        RejectedResult,
+        Succeeded,
+    }
+
+    struct FailingTool {
+        kind: FailureKind,
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::tools::AgentTool for FailingTool {
+        fn name(&self) -> &str { "failing_tool" }
+        fn description(&self) -> &str { "Failure-class fixture" }
+        fn parameters_schema(&self) -> serde_json::Value { serde_json::json!({"type":"object","properties":{}}) }
+        fn bad_request_is_pre_effect(&self) -> bool {
+            self.kind != FailureKind::BadRequestAfterEffect
+        }
+        fn result_domain_outcome(&self, text: &str) -> agent_runtime::DomainOutcome {
+            if self.kind == FailureKind::ResultPanic {
+                panic!("result classification exploded");
+            }
+            if self.kind == FailureKind::UnknownResult {
+                agent_runtime::DomainOutcome::Unknown
+            } else if text.contains("\"error\"") || text.contains("\"valid\":false") {
+                agent_runtime::DomainOutcome::Rejected
+            } else {
+                agent_runtime::DomainOutcome::Succeeded
+            }
+        }
+        async fn execute(&self, _: serde_json::Value, ctx: &crate::tools::ToolContext) -> kyomi_core::Result<String> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            match self.kind {
+                FailureKind::BadRequest => Err(kyomi_core::Error::BadRequest("Missing required parameter 'x'".into())),
+                FailureKind::ServerError => Err(kyomi_core::Error::ServiceUnavailable("provider server exploded".into())),
+                FailureKind::Timeout => Err(kyomi_core::Error::ServiceUnavailable("timed out waiting for provider".into())),
+                FailureKind::UnknownResult => Ok("{\"error\":\"timeout after commit; unknown_after_commit\"}".into()),
+                FailureKind::Panic => panic!("tool exploded"),
+                FailureKind::ResultPanic => Ok("{\"ok\":true}".into()),
+                FailureKind::TransportError => Err(kyomi_core::Error::DatasourceConnection("connection reset by peer".into())),
+                FailureKind::NotFound => Err(kyomi_core::Error::NotFound("datasource 'missing' not found".into())),
+                FailureKind::Forbidden => Err(kyomi_core::Error::Forbidden("document scope denied".into())),
+                FailureKind::BadRequestAfterEffect => {
+                    kyomi_core::db_execute!(&ctx.db, "UPDATE workspaces SET name='mutated once' WHERE workspace_id = $1", &ctx.workspace_id).unwrap();
+                    Err(kyomi_core::Error::BadRequest("partial effect then validation failed".into()))
+                }
+                FailureKind::MutatingUnknown => {
+                    kyomi_core::db_execute!(&ctx.db, "UPDATE workspaces SET name='mutated once' WHERE workspace_id = $1", &ctx.workspace_id).unwrap();
+                    Err(kyomi_core::Error::ServiceUnavailable("mutated then lost acknowledgement".into()))
+                }
+                FailureKind::RejectedResult => Ok("{\"valid\":false}".into()),
+                FailureKind::Succeeded => Ok("{\"ok\":true}".into()),
+            }
+        }
+    }
+
+    struct SucceedingTool {
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::tools::AgentTool for SucceedingTool {
+        fn name(&self) -> &str { "succeeding_tool" }
+        fn description(&self) -> &str { "Succeeding fixture" }
+        fn parameters_schema(&self) -> serde_json::Value { serde_json::json!({"type":"object","properties":{}}) }
+        async fn execute(&self, _: serde_json::Value, _: &crate::tools::ToolContext) -> kyomi_core::Result<String> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok("{\"ok\":true}".into())
+        }
+    }
+
+    async fn run_tool_script(
+        requested: Vec<(&'static str, serde_json::Value)>,
+        register: impl FnOnce(&mut crate::tools::ToolRegistry),
+        truncated: bool,
+    ) -> (Result<String, kyomi_core::Error>, Vec<agent_runtime::ToolOutcome>, Vec<crate::test_support::RecordedCall>, kyomi_core::DbPool) {
+        let db = crate::test_support::test_pool().await;
+        crate::test_support::seed_user_and_workspace(&db).await;
+        let key = Arc::new([7u8;32]); let session = uuid::Uuid::new_v4().to_string();
+        let (user, assistant) = claim_durable_message(&db,&key,&session,"investigate revenue",chrono::Utc::now().timestamp_millis(),30_000).await;
+        let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut script: Vec<_> = (0..requested.len()).map(|_| crate::test_support::Reply::ToolCall).collect();
+        script.push(crate::test_support::Reply::Text("Handled the tool error".into()));
+        let provider = ActualToolsProvider { inner: crate::test_support::ScriptedProvider {script:std::sync::Mutex::new(script.into()),after_script:crate::test_support::Reply::Text("unexpected".into()),calls:calls.clone()}, requested, index:std::sync::atomic::AtomicUsize::new(0), truncated };
+        let mut registry = crate::tools::ToolRegistry::new();
+        register(&mut registry);
+        let agent = CustomAgent::new(Box::new(provider),crate::agent::AgentConfig::default(),Arc::new(registry),crate::test_support::build_ctx(db.clone()),std::collections::HashMap::new());
+        let mut adapter = ChatAgentAdapter::new(agent,"user-a".into(),"ws-1".into(),Some(session.clone()),"custom_agent".into(),db.clone(),key.clone());
+        let tracker = Arc::new(tokio::sync::Mutex::new(crate::thinking::AgentThinkingTracker::new(crate::thinking::AgentThinkingTrackerConfig {
+            workspace_id: "ws-1".into(),
+            session_id:session.clone(),user_id:"user-a".into(),message_id:assistant.tag_id().unwrap().into(),
+            ws_manager:kyomi_auth::websocket::WebSocketManager::new(None,db.clone()),workspace_user_ids:None,context_type:Some("chat".into()),context_window:0,incremental_flush:None,
+        })));
+        adapter.set_thinking_tracker(tracker);
+        let answer = adapter.chat(ChatParams {message:"correct tool errors",cancel_token:CancellationToken::new(),current_time_user_tz:None,message_source:Some("web"),user_id:Some("user-a"),user_message_persistence:&user,assistant_message_persistence:&assistant}).await;
+        let run = assistant.durable_run().unwrap();
+        let store = kyomi_auth::conversation_events::ConversationStore::new(&db,&key,"user-a","ws-1");
+        let replay = store.replay(&run.conversation_id,0,100).await.unwrap();
+        let outcomes: Vec<_> = replay.events.iter().filter_map(|event| match &event.payload {
+            agent_runtime::PublicPayload::ToolOutcome {transport,domain,text,..} => Some(agent_runtime::ToolOutcome { transport: transport.clone(), domain: domain.clone(), text: text.preview.clone() }),
+            _ => None,
+        }).collect();
+        let recorded = std::mem::take(&mut *calls.lock().unwrap());
+        (answer, outcomes, recorded, db)
+    }
+
+    #[tokio::test]
+    async fn every_tool_error_class_reaches_the_model_and_continues() {
+        struct Case { kind: FailureKind, name: &'static str, args: serde_json::Value, domain: agent_runtime::DomainOutcome, transport: agent_runtime::TransportOutcome, warning: bool, calls: usize, text: &'static str, mutates: bool }
+        let cases = vec![
+            Case { kind: FailureKind::BadRequest, name: "failing_tool", args: serde_json::json!({}), domain: agent_runtime::DomainOutcome::Rejected, transport: agent_runtime::TransportOutcome::Failed, warning: false, calls: 1, text: "Missing required parameter 'x'", mutates: false },
+            Case { kind: FailureKind::BadRequestAfterEffect, name: "failing_tool", args: serde_json::json!({}), domain: agent_runtime::DomainOutcome::Unknown, transport: agent_runtime::TransportOutcome::Failed, warning: true, calls: 1, text: "partial effect then validation failed", mutates: true },
+            Case { kind: FailureKind::ServerError, name: "failing_tool", args: serde_json::json!({}), domain: agent_runtime::DomainOutcome::Unknown, transport: agent_runtime::TransportOutcome::Failed, warning: true, calls: 1, text: "provider server exploded", mutates: false },
+            Case { kind: FailureKind::Timeout, name: "failing_tool", args: serde_json::json!({}), domain: agent_runtime::DomainOutcome::Unknown, transport: agent_runtime::TransportOutcome::Failed, warning: true, calls: 1, text: "timed out", mutates: false },
+            Case { kind: FailureKind::TransportError, name: "failing_tool", args: serde_json::json!({}), domain: agent_runtime::DomainOutcome::Unknown, transport: agent_runtime::TransportOutcome::Failed, warning: true, calls: 1, text: "connection reset by peer", mutates: false },
+            Case { kind: FailureKind::NotFound, name: "failing_tool", args: serde_json::json!({}), domain: agent_runtime::DomainOutcome::Unknown, transport: agent_runtime::TransportOutcome::Failed, warning: true, calls: 1, text: "not found", mutates: false },
+            Case { kind: FailureKind::Forbidden, name: "failing_tool", args: serde_json::json!({}), domain: agent_runtime::DomainOutcome::Unknown, transport: agent_runtime::TransportOutcome::Failed, warning: true, calls: 1, text: "document scope denied", mutates: false },
+            Case { kind: FailureKind::UnknownResult, name: "failing_tool", args: serde_json::json!({}), domain: agent_runtime::DomainOutcome::Unknown, transport: agent_runtime::TransportOutcome::Completed, warning: true, calls: 1, text: "timeout after commit", mutates: false },
+            Case { kind: FailureKind::Panic, name: "failing_tool", args: serde_json::json!({}), domain: agent_runtime::DomainOutcome::Unknown, transport: agent_runtime::TransportOutcome::Failed, warning: true, calls: 1, text: "panicked", mutates: false },
+            Case { kind: FailureKind::ResultPanic, name: "failing_tool", args: serde_json::json!({}), domain: agent_runtime::DomainOutcome::Unknown, transport: agent_runtime::TransportOutcome::Failed, warning: true, calls: 1, text: "result classification exploded", mutates: false },
+            Case { kind: FailureKind::MutatingUnknown, name: "failing_tool", args: serde_json::json!({}), domain: agent_runtime::DomainOutcome::Unknown, transport: agent_runtime::TransportOutcome::Failed, warning: true, calls: 1, text: "mutated then lost acknowledgement", mutates: true },
+            Case { kind: FailureKind::RejectedResult, name: "failing_tool", args: serde_json::json!({}), domain: agent_runtime::DomainOutcome::Rejected, transport: agent_runtime::TransportOutcome::Completed, warning: false, calls: 1, text: "\"valid\":false", mutates: false },
+            Case { kind: FailureKind::Succeeded, name: "failing_tool", args: serde_json::json!({}), domain: agent_runtime::DomainOutcome::Succeeded, transport: agent_runtime::TransportOutcome::Completed, warning: false, calls: 1, text: "\"ok\":true", mutates: false },
+            Case { kind: FailureKind::Succeeded, name: "missing_tool", args: serde_json::json!({}), domain: agent_runtime::DomainOutcome::Rejected, transport: agent_runtime::TransportOutcome::Failed, warning: false, calls: 0, text: "Unknown tool", mutates: false },
+        ];
+        for case in cases {
+            let tool_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let tool = Arc::new(FailingTool { kind: case.kind, calls: tool_calls.clone() });
+            let (result, outcomes, recorded, db) = run_tool_script(
+                vec![(case.name, case.args.clone())],
+                |registry| { registry.register(tool); },
+                false,
+            ).await;
+            assert_eq!(result.unwrap(), "Handled the tool error", "{:?}", case.kind);
+            assert_eq!(outcomes.len(), 1, "{:?}", case.kind);
+            assert_eq!(outcomes[0].domain, case.domain, "{:?}", case.kind);
+            assert_eq!(outcomes[0].transport, case.transport, "{:?}", case.kind);
+            assert_eq!(tool_calls.load(std::sync::atomic::Ordering::SeqCst), case.calls, "{:?}", case.kind);
+            let tool_message = recorded.iter().flat_map(|call| call.messages.iter()).find(|message| message.role == crate::types::MessageRole::Tool).unwrap_or_else(|| panic!("no tool result for {:?}", case.kind));
+            assert!(tool_message.content.contains(case.text), "{:?} missing `{}`: {}", case.kind, case.text, tool_message.content);
+            assert_eq!(tool_message.content.contains("Outcome unknown:"), case.warning, "{:?}: {}", case.kind, tool_message.content);
+            if case.warning {
+                assert!(tool_message.content.contains("the tool may have executed"), "{:?}: {}", case.kind, tool_message.content);
+                assert!(tool_message.content.contains("Verify the result before retrying"), "{:?}: {}", case.kind, tool_message.content);
+                assert!(tool_message.content.contains("do not blindly repeat a mutating call"), "{:?}: {}", case.kind, tool_message.content);
+            }
+            assert!(!tool_message.content.contains("tool outcome is unknown after execution"), "{:?}: {}", case.kind, tool_message.content);
+            if case.mutates {
+                let name: String = kyomi_core::db_fetch_one!(&db, (String,), "SELECT name FROM workspaces WHERE workspace_id = 'ws-1'").unwrap().0;
+                assert_eq!(name, "mutated once", "mutating tool must execute exactly once");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn repeated_identical_failing_tool_call_stops_with_human_message() {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let tool = Arc::new(FailingTool { kind: FailureKind::BadRequest, calls: calls.clone() });
+        let requested = (0..5).map(|_| ("failing_tool", serde_json::json!({}))).collect();
+        let (result, outcomes, _, _) = run_tool_script(requested, |registry| { registry.register(tool); }, false).await;
+        let answer = result.unwrap();
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 3, "same-call guard must stop after three attempts");
+        assert_eq!(outcomes.len(), 3);
+        assert!(answer.contains("the same tool call failed 3 times"), "{answer}");
+        assert!(answer.contains("I did not retry automatically"), "{answer}");
+        assert!(!answer.contains("tool outcome is unknown after execution"), "{answer}");
+    }
+
+    #[tokio::test]
+    async fn consecutive_failing_tool_calls_stop_with_human_message() {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let tool = Arc::new(FailingTool { kind: FailureKind::BadRequest, calls: calls.clone() });
+        let requested = (0..6).map(|n| ("failing_tool", serde_json::json!({"n": n}))).collect();
+        let (result, outcomes, _, _) = run_tool_script(requested, |registry| { registry.register(tool); }, false).await;
+        let answer = result.unwrap();
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 5, "consecutive guard must stop after five attempts");
+        assert_eq!(outcomes.len(), 5);
+        assert!(answer.contains("5 consecutive tool calls failed"), "{answer}");
+        assert!(answer.contains("I did not retry automatically"), "{answer}");
+        assert!(!answer.contains("tool outcome is unknown after execution"), "{answer}");
+    }
+
+    #[tokio::test]
+    async fn same_failing_call_interleaved_with_successes_stops_with_human_message() {
+        let failing_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let succeeding_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let failing = Arc::new(FailingTool { kind: FailureKind::BadRequest, calls: failing_calls.clone() });
+        let succeeding = Arc::new(SucceedingTool { calls: succeeding_calls.clone() });
+        let requested = vec![
+            ("failing_tool", serde_json::json!({})),
+            ("succeeding_tool", serde_json::json!({})),
+            ("failing_tool", serde_json::json!({})),
+            ("succeeding_tool", serde_json::json!({})),
+            ("failing_tool", serde_json::json!({})),
+        ];
+        let (result, outcomes, _, _) = run_tool_script(
+            requested,
+            |registry| { registry.register(failing); registry.register(succeeding); },
+            false,
+        ).await;
+        let answer = result.unwrap();
+        assert_eq!(failing_calls.load(std::sync::atomic::Ordering::SeqCst), 3, "the same failing call must trip the guard even between successes");
+        assert_eq!(succeeding_calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert_eq!(outcomes.len(), 5);
+        assert!(answer.contains("the same tool call failed 3 times"), "{answer}");
+        assert!(answer.contains("I did not retry automatically"), "{answer}");
+    }
+
+    #[tokio::test]
+    async fn alternating_failing_calls_with_successes_stop_at_the_same_call_limit() {
+        let failing_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let succeeding_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let failing = Arc::new(FailingTool { kind: FailureKind::BadRequest, calls: failing_calls.clone() });
+        let succeeding = Arc::new(SucceedingTool { calls: succeeding_calls.clone() });
+        let requested = vec![
+            ("failing_tool", serde_json::json!({"fail": "a"})),
+            ("succeeding_tool", serde_json::json!({})),
+            ("failing_tool", serde_json::json!({"fail": "b"})),
+            ("succeeding_tool", serde_json::json!({})),
+            ("failing_tool", serde_json::json!({"fail": "a"})),
+            ("succeeding_tool", serde_json::json!({})),
+            ("failing_tool", serde_json::json!({"fail": "b"})),
+            ("succeeding_tool", serde_json::json!({})),
+            ("failing_tool", serde_json::json!({"fail": "a"})),
+        ];
+        let (result, outcomes, _, _) = run_tool_script(
+            requested,
+            |registry| { registry.register(failing); registry.register(succeeding); },
+            false,
+        ).await;
+        let answer = result.unwrap();
+        assert_eq!(failing_calls.load(std::sync::atomic::Ordering::SeqCst), 5);
+        assert_eq!(succeeding_calls.load(std::sync::atomic::Ordering::SeqCst), 4);
+        assert_eq!(outcomes.len(), 9);
+        assert!(answer.contains("the same tool call failed 3 times"), "{answer}");
+        assert!(answer.contains("I did not retry automatically"), "{answer}");
+    }
+
+    #[tokio::test]
+    async fn durable_truncated_tool_arguments_are_rejected_and_continue_without_execution() {
+        let tool_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let tool = Arc::new(FailingTool { kind: FailureKind::Succeeded, calls: tool_calls.clone() });
+        let (result, outcomes, recorded, _) = run_tool_script(
+            vec![("failing_tool", serde_json::json!({}))],
+            |registry| { registry.register(tool); },
+            true,
+        ).await;
+        assert_eq!(result.unwrap(), "Handled the tool error");
+        assert_eq!(outcomes.len(), 1);
+        assert_eq!(outcomes[0].transport, agent_runtime::TransportOutcome::Failed);
+        assert_eq!(outcomes[0].domain, agent_runtime::DomainOutcome::Rejected);
+        assert!(outcomes[0].text.contains("arguments were cut off"), "{:?}", outcomes[0].text);
+        assert!(outcomes[0].text.contains("max_tokens"), "{:?}", outcomes[0].text);
+        assert!(!outcomes[0].text.contains("Missing required parameter"), "{:?}", outcomes[0].text);
+        assert_eq!(tool_calls.load(std::sync::atomic::Ordering::SeqCst), 0, "truncated arguments must not execute the tool");
+        assert_eq!(recorded.len(), 2, "the model must get a repair turn");
+        assert!(recorded[1].messages.iter().any(|message| message.role == crate::types::MessageRole::Tool && message.content.contains("arguments were cut off")));
+    }
+
     #[tokio::test]
     async fn awaited_sink_real_validation_argument_rejection_reaches_model_and_allows_correction() {
         let (outcomes, calls) = actual_tool_outcomes(vec![("validate_chartml",serde_json::json!({})),("validate_chartml",serde_json::json!({"blocks":[]}))]).await;
@@ -3682,6 +4000,17 @@ mod tests {
         assert_eq!(calls.len(),3);
         assert!(calls[1].messages.iter().any(|message| message.role == crate::types::MessageRole::Tool && message.content.contains("Missing required parameter 'blocks'")),"known validation error must reach the repair turn");
     }
+    #[tokio::test]
+    async fn awaited_sink_query_datasource_missing_sql_query_is_rejected_and_allows_correction() {
+        let (outcomes, calls) = actual_tool_outcomes(vec![
+            ("query_datasource", serde_json::json!({"datasource":"SELECT * FROM events"})),
+            (crate::test_support::NOOP_TOOL_NAME, serde_json::json!({})),
+        ]).await;
+        assert_eq!(outcomes, vec![agent_runtime::DomainOutcome::Rejected, agent_runtime::DomainOutcome::Succeeded]);
+        assert_eq!(calls.len(), 3);
+        assert!(calls[1].messages.iter().any(|message| message.role == crate::types::MessageRole::Tool && message.content.contains("Missing required parameter 'sql_query'")), "the argument error must reach the repair turn");
+    }
+
     #[tokio::test]
     async fn awaited_sink_real_analytics_text_rejections_are_failed_progress_and_text_success_survives() {
         let (outcomes, calls) = actual_tool_outcomes(vec![("create_analytics_site",serde_json::json!({})),("update_analytics_site",serde_json::json!({})),("delete_analytics_site",serde_json::json!({})),(crate::test_support::NOOP_TOOL_NAME,serde_json::json!({}))]).await;
