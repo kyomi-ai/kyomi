@@ -119,7 +119,7 @@ that rule is about a check that fails and reports success. This check does not f
 succeeds over a payload that omits the field the decision turned on.
 
 See also [../comments-documentation/no-guarantee-stronger-than-code-enforces.md](../comments-documentation/no-guarantee-stronger-than-code-enforces.md)
-and [../error-handling/a-check-in-one-arm-does-not-guard-the-others.md](../error-handling/a-check-in-one-arm-does-not-guard-the-others.md).
+and [../error-handling/a-guard-in-one-branch-does-not-cover-the-others.md](../error-handling/a-guard-in-one-branch-does-not-cover-the-others.md).
 The same review's other 🔴 was the branch-coverage failure that second rule names, and its
 header comment stated the guarantee the code did not keep — three failures of the same
 gate, on three different axes, in one diff. When a change touches a gate, check the payload

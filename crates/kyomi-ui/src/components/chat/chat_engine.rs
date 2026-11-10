@@ -429,8 +429,6 @@ impl ChatEngine {
         // Add optimistic user message.
         let _user_msg_id = self.add_user_message(&message);
 
-        // Build context prefix.
-        let context_prefix = self.build_context_prefix();
 
         let ctx_type = self.context_type.try_get_value().flatten();
         self.chat_state.start_sending(&sid);
@@ -452,10 +450,15 @@ impl ChatEngine {
         let historical_preview = self.historical_preview.is_some_and(|preview| preview.get_untracked());
         let before_send = self.before_send.clone();
 
+        let request = self.build_copilot_request(CopilotMessageRequest {
+            session_id: sid, message, context_type: ctx_type.unwrap_or_default(),
+            content: None, timezone, current_time_user_tz: time_ctx, document_id,
+            historical_preview, view_context,
+        });
+
         // For ephemeral mode, send via copilot server function.
         // The context_type for the server call comes from config.context_type,
         // which matches the session creation context_type.
-        let ctx_type_for_send = ctx_type.unwrap_or_default();
         leptos::task::spawn_local(async move {
             // KYO-536: commit any pending buffer before the copilot ever
             // touches the document, so it always edits the saved content —
@@ -472,17 +475,7 @@ impl ChatEngine {
                 return;
             }
 
-            if let Err(e) = send_copilot_message(CopilotMessageRequest {
-                session_id: sid,
-                message,
-                context_type: ctx_type_for_send,
-                content: context_prefix,
-                timezone,
-                current_time_user_tz: time_ctx,
-                document_id,
-                historical_preview,
-                view_context,
-            })
+            if let Err(e) = send_copilot_message(request)
             .await
             {
                 // Guard: the component may have been disposed while the async
@@ -519,6 +512,15 @@ impl ChatEngine {
         });
 
         user_msg_id
+    }
+
+    /// The server loads authorized document content after the autosave hook.
+    /// Chart and watch copilots have no saved document and still send their context.
+    fn build_copilot_request(&self, mut request: CopilotMessageRequest) -> CopilotMessageRequest {
+        if !matches!(request.context_type.as_str(), "dashboard_copilot" | "knowledge_copilot") {
+            request.content = self.build_context_prefix();
+        }
+        request
     }
 
     /// Build the context prefix for the current message.
@@ -1554,6 +1556,40 @@ mod tests_disposal_safety {
             context_type: None, custom_ws_events: vec![], on_custom_ws_event: None,
             context_content: None, context_label: None, document_id: None, view_context: None, historical_preview: None, before_send: None,
         }).0
+    }
+
+    #[test]
+    fn copilot_request_omits_saved_document_content_and_keeps_chart_watch_context() {
+        let owner = Owner::new();
+        owner.with(|| {
+            provide_context(ChatRunStore::new());
+            for (context_type, label, expected) in [
+                ("dashboard_copilot", "Dashboard Content", None),
+                ("knowledge_copilot", "Document Content", None),
+                ("chart_builder_copilot", "Chart Content", Some("[Chart Content]\nraw body")),
+                ("watch_copilot", "Watch Configuration", Some("[Watch Configuration]\nraw body")),
+            ] {
+                let engine = ChatEngine::create_view(ChatEngineConfig {
+                    session_mode: SessionMode::Ephemeral { context_type: context_type.into(), active: None },
+                    context_type: Some(context_type.into()), custom_ws_events: vec![], on_custom_ws_event: None,
+                    context_content: Some(Signal::stored("raw body".to_string())),
+                    context_label: Some(label.into()), document_id: Some("doc-1".into()),
+                    view_context: None, historical_preview: None, before_send: None,
+                }).0;
+                let request = engine.build_copilot_request(CopilotMessageRequest {
+                    session_id: "session".into(), message: "question".into(), context_type: context_type.into(),
+                    content: None, timezone: None, current_time_user_tz: None,
+                    document_id: Some("doc-1".into()), historical_preview: false, view_context: None,
+                });
+                let payload = serde_json::to_string(&request).expect("serialize request");
+                assert_eq!(request.content.as_deref(), expected);
+                assert_eq!(payload.matches("raw body").count(), usize::from(expected.is_some()));
+                if expected.is_some() {
+                    assert_eq!(engine.build_context_prefix().as_deref(), Some(format!("[{label} has been updated]\nraw body").as_str()));
+                }
+            }
+        });
+        owner.cleanup();
     }
 
     #[test]

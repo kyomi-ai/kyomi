@@ -3,8 +3,8 @@
 //! Feedback context collector — passively captures console errors, failed
 //! requests, and browser/OS information for feedback submissions.
 //!
-//! Port of `apps/frontend/src/lib/feedbackContext.js`. All code is WASM-only
-//! since it relies on browser APIs (console, navigator, window).
+//! Port of `apps/frontend/src/lib/feedbackContext.js`. Browser collection is
+//! WASM-only; the shared JSON builder also compiles in host tests.
 
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::*;
@@ -99,6 +99,15 @@ pub fn get_console_errors() -> String {
 #[cfg(target_arch = "wasm32")]
 pub fn collect_context() -> String {
     let window = web_sys::window().expect("window");
+    collect_context_with_panic(&window, None)
+}
+
+/// Collect browser context for either feedback or a panic report.
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn collect_context_with_panic(
+    window: &web_sys::Window,
+    panic_message: Option<&str>,
+) -> String {
 
     let url = window
         .location()
@@ -127,17 +136,48 @@ pub fn collect_context() -> String {
 
     let console_errors = get_console_errors();
 
-    // Build JSON manually to avoid pulling in serde_json on the WASM side.
-    // The values are either pre-serialised JSON arrays (from JS) or simple
-    // strings that we escape.
+    build_context_json(
+        ContextFields {
+            url: &url,
+            browser: &browser,
+            os: &os,
+            screen_width,
+            screen_height,
+            console_errors: &console_errors,
+        },
+        panic_message,
+    )
+}
+
+/// Browser values shared by ordinary feedback and panic reports. The console
+/// interceptor supplies `console_errors` as a pre-serialised JSON array.
+#[cfg(any(test, target_arch = "wasm32"))]
+struct ContextFields<'a> {
+    url: &'a str,
+    browser: &'a str,
+    os: &'a str,
+    screen_width: u32,
+    screen_height: u32,
+    console_errors: &'a str,
+}
+
+/// One JSON shape for feedback and panic reports. Only plain strings are
+/// escaped; hand-built JSON avoids adding a serialiser to the WASM bundle.
+/// Host tests exercise this builder without a non-WASM browser collector.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn build_context_json(fields: ContextFields<'_>, panic_message: Option<&str>) -> String {
+    let panic_field = panic_message
+        .map(|message| format!(r#","panic_message":"{}""#, escape_json_string(message)))
+        .unwrap_or_default();
     format!(
-        r#"{{"url":"{}","browser":"{}","os":"{}","screen_width":{},"screen_height":{},"console_errors":{}}}"#,
-        escape_json_string(&url),
-        escape_json_string(&browser),
-        escape_json_string(&os),
-        screen_width,
-        screen_height,
-        console_errors,
+        r#"{{"url":"{}","browser":"{}","os":"{}","screen_width":{},"screen_height":{}{},"console_errors":{}}}"#,
+        escape_json_string(fields.url),
+        escape_json_string(fields.browser),
+        escape_json_string(fields.os),
+        fields.screen_width,
+        fields.screen_height,
+        panic_field,
+        fields.console_errors,
     )
 }
 
@@ -222,7 +262,7 @@ pub fn extract_os(ua: &str) -> String {
 }
 
 /// Minimal JSON string escaper (for embedding values in hand-built JSON).
-#[cfg(target_arch = "wasm32")]
+#[cfg(any(test, target_arch = "wasm32"))]
 pub fn escape_json_string(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
@@ -250,9 +290,9 @@ mod tests {
     //! all — a green host run is not weak evidence about it, it is no
     //! evidence (see
     //! `docs/standards/leptos-frontend-patterns/a-green-host-suite-says-nothing-about-wasm32-gated-code.md`).
-    //! What *can* be pinned from the host is the shape of the JSON it emits,
-    //! because that shape is a literal in the source. Same technique, and the
-    //! same reason, as the KYO-436 guards in `utils::oauth_popup`.
+    //! Host tests exercise the shared JSON builder and use source guards to
+    //! pin both WASM-only entry points to that builder (KYO-695). They do not
+    //! execute browser collection or overlay submission.
     //!
     //! The browser-side half of the criterion — panic on dev, submit from the
     //! overlay, read the stack back out of `context::jsonb` — is covered by
@@ -289,46 +329,112 @@ mod tests {
         )
     }
 
-    /// The defect: `console_errors` was a literal `[]` baked into the format
-    /// string, so every panic report shipped an empty array on the one report
-    /// type that most needs the console.
+    /// Keep KYO-682's wiring guard meaningful after moving serialization to the
+    /// shared collector: neither browser entry point may substitute an empty array.
     #[test]
     fn panic_context_interpolates_the_captured_console_errors() {
         let body = build_panic_context_body();
         assert!(
-            !body.contains(r#""console_errors":[]"#),
-            "build_panic_context hardcodes an empty console_errors array in its format \
-             string, so every panic report discards the console the interceptor already \
-             captured — including the panic's own stack (KYO-682)."
+            body.contains("collect_context_with_panic(window, Some(panic_message))"),
+            "panic reports must use the shared browser collector (KYO-695)"
         );
         assert!(
-            body.contains(r#""console_errors":{}"#),
-            "build_panic_context must interpolate console_errors as a format substitution \
-             (KYO-682)."
+            !body.contains("format!("),
+            "panic reports must not duplicate the JSON field list"
+        );
+        let feedback = extract_between(
+            SELF_SRC,
+            "pub fn collect_context()",
+            "pub(crate) fn collect_context_with_panic(",
         );
         assert!(
-            body.contains("get_console_errors()"),
-            "build_panic_context must source console_errors from \
-             feedback_context::get_console_errors(), the same getter collect_context uses, \
-             rather than capturing them a second way (KYO-682)."
+            feedback.contains("collect_context_with_panic(&window, None)"),
+            "feedback must use the shared browser collector (KYO-695)"
+        );
+        let collector = extract_between(
+            SELF_SRC,
+            "pub(crate) fn collect_context_with_panic(",
+            "fn build_context_json(",
+        );
+        assert!(
+            collector.contains("let console_errors = get_console_errors();"),
+            "reports must source the interceptor's captured errors (KYO-682)"
+        );
+        assert!(
+            collector.contains("console_errors: &console_errors"),
+            "reports must pass real console errors to the builder (KYO-682)"
+        );
+        assert!(
+            collector.contains("build_context_json("),
+            "both report types must call the shared builder"
+        );
+        assert!(
+            !collector.contains("format!("),
+            "the collector must not duplicate the JSON field list"
         );
     }
 
-    /// `get_console_errors` returns a pre-serialised JSON array. Escaping it
-    /// would double-encode it into a JSON *string* that looks like an array —
-    /// the failure mode KYO-682 calls out by name, and one that reads as
-    /// fixed while remaining unusable to every consumer of `context::jsonb`.
+    /// Parse the production builder's output, including quotes, backslashes,
+    /// control characters and Unicode. Browser acquisition remains WASM-only.
+    fn assert_context_json(panic_message: Option<&str>) {
+        let errors = r#"[{"level":"error","message":"panic \"stack\"\nline","timestamp":"now"}]"#;
+        let expected: serde_json::Value = serde_json::from_str(errors).unwrap();
+        let fields = super::ContextFields {
+            url: "/\"\\\n\u{0000}🦀",
+            browser: "browser\t",
+            os: "os\r",
+            screen_width: 1280,
+            screen_height: 720,
+            console_errors: errors,
+        };
+        let text = super::build_context_json(fields, panic_message);
+        let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(value["console_errors"], expected);
+        assert!(value["console_errors"].is_array());
+        assert_eq!(value["url"], "/\"\\\n\u{0000}🦀");
+        assert_eq!(value["browser"], "browser\t");
+        assert_eq!(value["os"], "os\r");
+        assert_eq!(value["screen_width"], 1280);
+        assert_eq!(value["screen_height"], 720);
+        match panic_message {
+            Some(message) => assert_eq!(value["panic_message"], message),
+            None => assert!(value.get("panic_message").is_none()),
+        }
+        assert_eq!(
+            value.as_object().unwrap().len(),
+            if panic_message.is_some() { 7 } else { 6 }
+        );
+    }
+
     #[test]
     fn panic_context_does_not_escape_the_console_errors_array() {
-        let body = build_panic_context_body();
-        let escaped = body.matches("escape_json_string(").count();
-        assert_eq!(
-            escaped, 4,
-            "exactly four of build_panic_context's fields are plain strings needing \
-             escaping (url, browser, os, panic_message); found {escaped} calls. \
-             console_errors is already JSON and must be interpolated raw — running it \
-             through escape_json_string double-encodes the array into a string (KYO-682)."
-        );
+        assert_context_json(Some("panic \"message\"\n\t\r\\\u{0001} 🦀"));
+    }
+
+    #[test]
+    fn feedback_context_does_not_escape_the_console_errors_array() {
+        assert_context_json(None);
+    }
+
+    #[test]
+    fn feedback_context_preserves_an_empty_console_array() {
+        for panic_message in [None, Some("")] {
+            let fields = super::ContextFields {
+                url: "",
+                browser: "",
+                os: "",
+                screen_width: 0,
+                screen_height: 0,
+                console_errors: "[]",
+            };
+            let value: serde_json::Value =
+                serde_json::from_str(&super::build_context_json(fields, panic_message)).unwrap();
+            assert_eq!(value["console_errors"], serde_json::json!([]));
+            match panic_message {
+                Some(message) => assert_eq!(value["panic_message"], message),
+                None => assert!(value.get("panic_message").is_none()),
+            }
+        }
     }
 
     /// The invariant that lets both `get_console_errors` and

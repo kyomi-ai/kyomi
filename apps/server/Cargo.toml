@@ -69,6 +69,7 @@ any_spawner = { version = "0.3", features = ["tokio"] }
 tokio-tungstenite = { version = "0.28", default-features = false }
 
 [dev-dependencies]
+kyomi-mcp-client = { workspace = true }
 kyomi-core = { workspace = true, features = ["test-helpers"] }
 kyomi-auth = { workspace = true }
 kyomi-embed = { workspace = true }
