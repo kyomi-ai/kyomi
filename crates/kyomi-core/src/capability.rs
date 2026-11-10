@@ -536,8 +536,6 @@ mod tests {
             stripe_customer_id: None,
             stripe_subscription_id: None,
             settings: None,
-            business_knowledge: None,
-            knowledge_updated_at: None,
             last_catalog_refresh: None,
             catalog_onboarding_completed: false,
             catalog_indexed_projects: None,

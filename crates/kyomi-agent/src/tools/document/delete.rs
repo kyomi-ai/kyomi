@@ -42,7 +42,8 @@ impl DocumentDeleteTool {
     pub(crate) fn description_for(doc_type: DocType) -> &'static str {
         match doc_type {
             DocType::Dashboard => {
-                "Delete a dashboard. You must be the owner to delete. This action cannot be undone."
+                "Delete a dashboard permanently. You must be the owner to delete. Use \
+                 modify_dashboard to change content instead; this cannot be undone."
             }
             DocType::Knowledge => unimplemented!("see name_for()"),
         }
