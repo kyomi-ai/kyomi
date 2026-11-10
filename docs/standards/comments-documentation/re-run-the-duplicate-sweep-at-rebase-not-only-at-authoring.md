@@ -57,7 +57,7 @@ resolved by deleting the file:
   `coding standards: disposal-cfg-test-module docs` entry, which "explicitly swept
   `error-handling/` for topical overlap and found none". Between that signature and the
   rebase, two other PRs mined the identical finding onto `main` under different slugs —
-  `error-handling/a-check-in-one-arm-does-not-guard-the-others.md` (PR #455) and
+  the arm-worded guard-coverage rule (PR #455) and
   `error-handling/a-guard-in-one-branch-does-not-cover-the-others.md` (PR #476) — leaving the
   branch about to add a third. The reviewer's diagnosis is the mechanism in one sentence:
   "undetected because a new-file add against a new filename never surfaces as a git conflict,
@@ -85,10 +85,9 @@ resolved by deleting the file:
   sibling rule's own flagship — a duplicate that was already in the tree, caught by the
   authoring-time sweep working correctly.
 
-The residue is visible in the corpus today: `error-handling/` still carries both files from
-the KYO-558 narrative, and KYO-666 tracks consolidating them. That is what one missed re-check
-costs after the branch merges — a second ticket, and a section where `ls` shows two entries
-for one lesson.
+KYO-666 consolidates the two files from the KYO-558 narrative into
+[one guard-coverage rule](../error-handling/a-guard-in-one-branch-does-not-cover-the-others.md). That is what one
+missed re-check costs after the branch merges — a second ticket to restore one rule per lesson.
 
 The same structural blind spot is documented in a different domain by
 [../security/no-real-world-identifiers-in-a-public-repo.md](../security/no-real-world-identifiers-in-a-public-repo.md),

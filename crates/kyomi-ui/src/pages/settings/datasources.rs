@@ -618,6 +618,20 @@ fn row_is_deleting(datasource_to_delete_id: Option<&str>, row_id: &str, delete_p
     delete_pending && datasource_to_delete_id == Some(row_id)
 }
 
+/// Enable eligibility must not prevent turning off an enabled datasource.
+/// Deletion still blocks both directions, including for retired auth modes.
+/// Read the optimistic local state so turning it off immediately blocks re-enabling.
+fn datasource_switch_disabled(
+    can_enable: bool,
+    local_enabled: ReadSignal<bool>,
+    is_deleting: Signal<bool>,
+) -> Signal<bool> {
+    Signal::derive(move || {
+        is_deleting.try_get().unwrap_or(true)
+            || (!can_enable && !local_enabled.try_get().unwrap_or(false))
+    })
+}
+
 /// Loading skeleton shown while data is being fetched.
 #[component]
 fn DatasourcesLoadingSkeleton() -> impl IntoView {
@@ -1028,22 +1042,14 @@ fn DatasourceRow(
         }
     });
 
-    let switch_disabled = !can_enable;
-    // Reactive disabled state for the Switch itself (KYO-487): true whenever
-    // this datasource can't be enabled at all (`switch_disabled`, static per
-    // row) OR this row is currently being deleted (`is_deleting`, reactive).
-    // `Switch::disabled` is a real `Signal`/`MaybeProp` now, so this is the
-    // control's actual disabled state — not just a handler-side guard — and
-    // subsumes the `on_toggle` bail that used to stand in for it.
-    let switch_disabled_signal = Signal::derive(move || switch_disabled || is_deleting.get());
+    let switch_disabled_signal =
+        datasource_switch_disabled(can_enable, local_enabled, is_deleting);
 
     let on_toggle = Callback::new(move |new_val: bool| {
         if toggle_action.pending().get_untracked() {
             return;
         }
         // Gate: cannot enable a datasource with missing credentials.
-        // The switch is already visually disabled (switch_disabled), but we
-        // add a toast so the user understands why clicking elsewhere doesn't work.
         if new_val && ds_credential_status == "missing" {
             toast_error("Connect your credentials first to enable this datasource");
             return;
@@ -1743,7 +1749,6 @@ fn DatasourceRow(
                         checked=Signal::from(local_enabled)
                         on_change=on_toggle
                         disabled=switch_disabled_signal
-                        class=if !can_enable { "opacity-50 cursor-not-allowed".to_string() } else { String::new() }
                     />
                 </div>
 
@@ -1955,6 +1960,98 @@ fn try_reset_bq_projects_signals(
     set_bq_projects.try_set(vec![]);
     set_bq_projects_error.try_set(None);
     set_bq_projects_attempted.try_set(false);
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+struct ModalOAuthSetters {
+    set_modal_oauth_connected: WriteSignal<bool>,
+    set_modal_oauth_email: WriteSignal<Option<String>>,
+    set_modal_oauth_expired: WriteSignal<bool>,
+    set_modal_oauth_connecting: WriteSignal<bool>,
+    set_test_result: WriteSignal<Option<TestConnectionResult>>,
+    set_discovery_status: WriteSignal<String>,
+}
+
+/// Builds the actual modal callback, resolving selection when each message arrives.
+/// Late popup messages must not write success or start discovery for another mode.
+#[cfg(any(target_arch = "wasm32", test))]
+fn build_modal_oauth_listener(
+    read_selection: impl Fn() -> (String, String),
+    state: ModalOAuthSetters,
+    do_test_and_discover: impl Fn(),
+    on_error: impl Fn(String),
+) -> impl Fn(crate::utils::oauth_popup::OAuthMessage) {
+    use crate::utils::oauth_popup::{translate_google_oauth_error, OAuthMessage};
+    move |msg| {
+        let (provider, mode) = read_selection();
+        let source = match &msg {
+            OAuthMessage::GoogleSuccess { .. } | OAuthMessage::GoogleError { .. } =>
+                Some(OAuthStatusSource::GoogleAccount),
+            OAuthMessage::BigqueryEnterpriseSuccess { .. } | OAuthMessage::BigqueryEnterpriseError { .. } =>
+                Some(OAuthStatusSource::Datasource("bigquery-enterprise")),
+            OAuthMessage::SnowflakeSuccess { .. } | OAuthMessage::SnowflakeError { .. } =>
+                Some(OAuthStatusSource::Datasource("snowflake")),
+            OAuthMessage::DatabricksSuccess { .. } | OAuthMessage::DatabricksError { .. } =>
+                Some(OAuthStatusSource::Datasource("databricks")),
+            OAuthMessage::MicrosoftEnterpriseSuccess { .. } | OAuthMessage::MicrosoftEnterpriseError { .. } =>
+                Some(OAuthStatusSource::Datasource("microsoft-enterprise")),
+            // Account-level Microsoft OAuth is not a datasource authentication mode.
+            OAuthMessage::MicrosoftSuccess { .. } | OAuthMessage::MicrosoftError { .. } => None,
+        };
+        if source.is_some() && source == oauth_source_for_ds_type(&provider, &mode) {
+            match msg {
+                OAuthMessage::GoogleSuccess { email }
+                | OAuthMessage::BigqueryEnterpriseSuccess { email } => {
+                    state.set_modal_oauth_connected.try_set(true);
+                    state.set_modal_oauth_email.try_set(email);
+                    state.set_modal_oauth_expired.try_set(false);
+                    state.set_modal_oauth_connecting.try_set(false);
+                    // Preserve the matching BigQuery OAuth success state.
+                    // Enterprise OAuth Next is independently allowed before save;
+                    // account OAuth can also qualify via its connected status.
+                    state.set_test_result.try_set(Some(TestConnectionResult {
+                        success: true,
+                        message: "Connected to Google".to_string(),
+                    }));
+                    state.set_discovery_status.try_set("success".to_string());
+                }
+                OAuthMessage::SnowflakeSuccess { email }
+                | OAuthMessage::DatabricksSuccess { email } => {
+                    state.set_modal_oauth_connected.try_set(true);
+                    state.set_modal_oauth_email.try_set(email);
+                    state.set_modal_oauth_expired.try_set(false);
+                    state.set_modal_oauth_connecting.try_set(false);
+                    // Auto-run Test & Discover so warehouse/catalog dropdowns
+                    // populate immediately after OAuth completes.
+                    do_test_and_discover();
+                }
+                OAuthMessage::GoogleError { error } => {
+                    state.set_modal_oauth_connecting.try_set(false);
+                    on_error(translate_google_oauth_error(error));
+                }
+                OAuthMessage::SnowflakeError { error }
+                | OAuthMessage::DatabricksError { error }
+                | OAuthMessage::MicrosoftError { error }
+                | OAuthMessage::MicrosoftEnterpriseError { error }
+                | OAuthMessage::BigqueryEnterpriseError { error } => {
+                    state.set_modal_oauth_connecting.try_set(false);
+                    on_error(error);
+                }
+                OAuthMessage::MicrosoftSuccess { .. } => {
+                    state.set_modal_oauth_connecting.try_set(false);
+                }
+                OAuthMessage::MicrosoftEnterpriseSuccess { email } => {
+                    // Microsoft Enterprise OAuth success — used by Synapse enterprise_oauth mode
+                    state.set_modal_oauth_connected.try_set(true);
+                    state.set_modal_oauth_email.try_set(email);
+                    state.set_modal_oauth_expired.try_set(false);
+                    state.set_modal_oauth_connecting.try_set(false);
+                    // Auto-run Test & Discover so schema dropdowns populate
+                    do_test_and_discover();
+                }
+            }
+        }
+    }
 }
 
 /// Modal state for create/edit mode.
@@ -3866,69 +3963,36 @@ pub fn DatasourceModal(
     //
     // Also auto-triggers Test & Discover for Snowflake / Databricks after a
     // successful connection so the warehouse/catalog dropdowns populate.
+    #[cfg(any(target_arch = "wasm32", test))]
+    let modal_oauth_listener = build_modal_oauth_listener(
+        move || {
+            let provider = ds_type.get_untracked();
+            let mode = match provider.as_str() {
+                "bigquery" => bq_auth_mode.get_untracked(),
+                "snowflake" => sf_auth_mode.get_untracked(),
+                "databricks" => db_auth_mode.get_untracked(),
+                "synapse" => synapse_auth_mode.get_untracked(),
+                _ => String::new(),
+            };
+            (provider, mode)
+        },
+        ModalOAuthSetters {
+            set_modal_oauth_connected,
+            set_modal_oauth_email,
+            set_modal_oauth_expired,
+            set_modal_oauth_connecting,
+            set_test_result,
+            set_discovery_status,
+        },
+        do_test_and_discover,
+        toast_error,
+    );
+    #[cfg(all(not(target_arch = "wasm32"), test))]
+    let _ = modal_oauth_listener;
     #[cfg(target_arch = "wasm32")]
     {
-        use crate::utils::oauth_popup::{
-            install_oauth_listener, translate_google_oauth_error, OAuthMessage,
-        };
-        let cleanup = install_oauth_listener(move |msg| {
-            match msg {
-                OAuthMessage::GoogleSuccess { email }
-                | OAuthMessage::BigqueryEnterpriseSuccess { email } => {
-                    set_modal_oauth_connected.try_set(true);
-                    set_modal_oauth_email.try_set(email);
-                    set_modal_oauth_expired.try_set(false);
-                    set_modal_oauth_connecting.try_set(false);
-                    // Record OAuth completion as a successful connection result
-                    // and discovery status without running Test & Discover.
-                    // This write is not required to unlock the current create-mode
-                    // gate: Datasource(_) OAuth modes pass before save, and the
-                    // retired GoogleAccount/kyomi_oauth path accepts the connected
-                    // signal set above. None/service_account uses test success;
-                    // reaching that mode from this OAuth arm is the cross-mode
-                    // defect tracked by KYO-921.
-                    set_test_result.try_set(Some(TestConnectionResult {
-                        success: true,
-                        message: "Connected to Google".to_string(),
-                    }));
-                    set_discovery_status.try_set("success".to_string());
-                }
-                OAuthMessage::SnowflakeSuccess { email }
-                | OAuthMessage::DatabricksSuccess { email } => {
-                    set_modal_oauth_connected.try_set(true);
-                    set_modal_oauth_email.try_set(email);
-                    set_modal_oauth_expired.try_set(false);
-                    set_modal_oauth_connecting.try_set(false);
-                    // Auto-run Test & Discover so warehouse/catalog dropdowns
-                    // populate immediately after OAuth completes.
-                    do_test_and_discover();
-                }
-                OAuthMessage::GoogleError { error } => {
-                    set_modal_oauth_connecting.try_set(false);
-                    toast_error(translate_google_oauth_error(error));
-                }
-                OAuthMessage::SnowflakeError { error }
-                | OAuthMessage::DatabricksError { error }
-                | OAuthMessage::MicrosoftError { error }
-                | OAuthMessage::MicrosoftEnterpriseError { error }
-                | OAuthMessage::BigqueryEnterpriseError { error } => {
-                    set_modal_oauth_connecting.try_set(false);
-                    toast_error(error);
-                }
-                OAuthMessage::MicrosoftSuccess { .. } => {
-                    set_modal_oauth_connecting.try_set(false);
-                }
-                OAuthMessage::MicrosoftEnterpriseSuccess { email } => {
-                    // Microsoft Enterprise OAuth success — used by Synapse enterprise_oauth mode
-                    set_modal_oauth_connected.try_set(true);
-                    set_modal_oauth_email.try_set(email);
-                    set_modal_oauth_expired.try_set(false);
-                    set_modal_oauth_connecting.try_set(false);
-                    // Auto-run Test & Discover so schema dropdowns populate
-                    do_test_and_discover();
-                }
-            }
-        });
+        use crate::utils::oauth_popup::install_oauth_listener;
+        let cleanup = install_oauth_listener(modal_oauth_listener);
         let cleanup_cell =
             std::cell::Cell::new(Some(Box::new(cleanup) as Box<dyn FnOnce()>));
         let cleanup_wrapper = send_wrapper::SendWrapper::new(cleanup_cell);
@@ -5304,6 +5368,12 @@ fn ConnectCreateSuccessView(
     }
 }
 
+// Only a successful capability response establishes a restriction. The server
+// remains the correctness boundary when this hint is unavailable or stale.
+fn google_disconnect_blocked_by_sign_in(result: Option<Result<bool, ServerFnError>>) -> bool {
+    matches!(result, Some(Ok(true)))
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Modal OAuth Status Panel (shared 4-state UI)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -5349,6 +5419,9 @@ fn ModalOAuthStatusPanel(
     on_disconnect: Callback<()>,
     /// Whether the disconnect action is currently pending.
     disconnect_pending: Signal<bool>,
+    /// Only the global Google account panel supplies this sign-in restriction.
+    #[prop(default = Signal::stored(false))]
+    disconnect_blocked: Signal<bool>,
     /// Called when the popup-monitor (KYO-437) detects a connect attempt
     /// resolved without an OAuth `postMessage` ever arriving — the popup
     /// was closed, or the attempt timed out. Built by
@@ -5462,9 +5535,9 @@ fn ModalOAuthStatusPanel(
                         <Button
                             variant=ButtonVariant::Outline
                             size=ButtonSize::Sm
-                            disabled=Signal::derive(move || disconnect_pending.get())
+                            disabled=Signal::derive(move || disconnect_pending.try_get().unwrap_or(false) || disconnect_blocked.try_get().unwrap_or(false))
                             on:click=move |_| {
-                                if !disconnect_pending.get_untracked() {
+                                if !disconnect_pending.get_untracked() && !disconnect_blocked.get_untracked() {
                                     on_disconnect.run(());
                                 }
                             }
@@ -5481,6 +5554,13 @@ fn ModalOAuthStatusPanel(
                             }}
                         </Button>
                     </div>
+                    <Show when=move || disconnect_blocked.get()>
+                        <p class="text-sm text-muted-foreground mt-2">
+                            "Google is your only sign-in method. Add a password or passkey in "
+                            <a href="/settings/security" class="text-primary underline">"Settings → Security"</a>
+                            " before disconnecting."
+                        </p>
+                    </Show>
                 }.into_any();
             }
 
@@ -5885,8 +5965,8 @@ fn synapse_oauth_source(mode: &str) -> Option<OAuthStatusSource> {
 /// mapping every `*AuthModeSection` already wires into
 /// `use_oauth_status_refetch`, rather than hand-rolling a second,
 /// independent (ds_type, auth_mode) → [`OAuthStatusSource`] mapping that
-/// could silently drift from it. Added for KYO-517 —
-/// [`connection_step_satisfied_from`] is its only caller today.
+/// could silently drift from it. Both [`connection_step_satisfied_from`]
+/// and the modal OAuth listener use this mapping.
 fn oauth_source_for_ds_type(ds_type: &str, auth_mode: &str) -> Option<OAuthStatusSource> {
     match ds_type {
         "bigquery" => bigquery_oauth_source(auth_mode),
@@ -6248,6 +6328,13 @@ fn BigQueryAuthModeSection(
         oauth_config_missing(&cfg_oauth_client_id.get(), &cfg_oauth_client_secret.get())
     });
 
+    // Unknown/loading/error remains enabled; only a successful server answer
+    // establishes that Google is the sole sign-in method.
+    let google_only = Resource::new(|| (), |_| crate::server_fns::security::google_is_only_sign_in_method());
+    let google_disconnect_blocked = Signal::derive(move || {
+        google_disconnect_blocked_by_sign_in(google_only.try_get().flatten())
+    });
+
     // ── Disconnect callbacks — wraps the Action dispatch in a Callback<()>.
     let on_google_disconnect = Callback::new(move |()| {
         if !google_disconnect_action.pending().get_untracked() {
@@ -6383,6 +6470,7 @@ fn BigQueryAuthModeSection(
                         cfg_missing=Signal::stored(false)
                         on_disconnect=on_google_disconnect
                         disconnect_pending=google_disconnect_pending
+                        disconnect_blocked=google_disconnect_blocked
                         on_recover=on_oauth_recover
                     />
                     <Show when=move || !oauth_connected.get()>
@@ -9433,33 +9521,11 @@ fn EditModeCatalogTab(
                                     {
                                         stats_action.dispatch(id);
                                     }
-                                    // KYO-327: an "idle" status can still mean
-                                    // some containers/schemas were denied
-                                    // during discovery — `resolve_final_status`
-                                    // folds a partial run down to "idle" as
-                                    // long as at least one table was found
-                                    // elsewhere. `progress.warnings` (the same
-                                    // structured array `get_catalog_stats`
-                                    // reads into `CatalogStatsResult`) carries
-                                    // those denials; read directly, never
-                                    // parsed out of the "failed" arm's
-                                    // collapsed `error` string below.
-                                    let warning_count = resp
-                                        .progress
-                                        .as_ref()
-                                        .and_then(|p| p.get("warnings"))
-                                        .and_then(|w| w.as_array())
-                                        .map(Vec::len)
-                                        .unwrap_or(0);
-                                    if warning_count > 0 {
-                                        let container_word = if warning_count == 1 {
-                                            "container"
-                                        } else {
-                                            "containers"
-                                        };
+                                    let warnings = extract_refresh_warnings(resp.progress.as_ref());
+                                    if !warnings.is_empty() {
                                         toast_info(format!(
-                                            "Catalog refresh completed with warnings — \
-                                             {warning_count} {container_word} could not be read"
+                                            "Catalog refresh completed with warnings: {}",
+                                            warnings.join("; ")
                                         ));
                                     } else {
                                         toast_success("Catalog refresh complete".to_string());
@@ -9477,6 +9543,10 @@ fn EditModeCatalogTab(
                                     .map(|s| s.to_string())
                                     .unwrap_or_else(|| "Catalog refresh failed".to_string());
                                 toast_error(detail);
+                                let warnings = extract_refresh_warnings(resp.progress.as_ref());
+                                if !warnings.is_empty() {
+                                    toast_info(format!("Catalog refresh warnings: {}", warnings.join("; ")));
+                                }
                             }
                             _ => {}
                         }
@@ -9840,40 +9910,22 @@ fn EditModeCatalogTab(
                             })
                     }}
 
-                    // Persistent partial-refresh-warnings notice (KYO-327).
-                    // Companion to the failed-refresh notice above: the last
-                    // refresh completed (`catalog_refresh_status == "idle"`)
-                    // but one or more containers/schemas could not be read —
-                    // e.g. a permission-denied schema alongside otherwise-
-                    // successful discovery. Renders from `CatalogStatsResult`
-                    // any time the page loads, same as the failed-refresh
-                    // notice, so a background/initial refresh with warnings
-                    // (nobody was watching the poller) still leaves a visible
-                    // trace. Mutually exclusive with the failed notice above:
-                    // `get_catalog_stats` only populates `refresh_warnings`
-                    // when `refresh_failed` is false, so the two can never
-                    // both render for the same stats snapshot — no extra
-                    // guard needed here beyond the same transient-error
-                    // suppression the failed notice uses.
+                    // Warnings carry additional details for successful and failed
+                    // refreshes, independently of the failure reason above.
                     {move || {
                         if refresh_action.value().get().and_then(|r| r.err()).is_some() {
                             return None;
                         }
                         stats
                             .get()
-                            .filter(|s| !s.refresh_failed && !s.refresh_warnings.is_empty())
+                            .filter(|s| !s.refresh_warnings.is_empty())
                             .map(|s| {
-                                let count = s.refresh_warnings.len();
-                                let container_word = if count == 1 { "container" } else { "containers" };
                                 let detail = s.refresh_warnings.join("; ");
                                 view! {
                                     <Alert variant=AlertVariant::Warning class="mt-3">
-                                        <AlertTitle>"Catalog refresh completed with warnings"</AlertTitle>
+                                        <AlertTitle>"Catalog refresh warnings"</AlertTitle>
                                         <AlertDescription>
-                                            {format!(
-                                                "{count} {container_word} could not be read during the \
-                                                 last refresh: {detail}"
-                                            )}
+                                            {detail}
                                         </AlertDescription>
                                     </Alert>
                                 }

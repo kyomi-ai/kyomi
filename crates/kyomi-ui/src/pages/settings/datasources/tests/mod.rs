@@ -87,3 +87,5 @@ mod list_connect_gate;
 mod retired_auth_mode_default;
 
 mod shared_credentials;
+
+mod google_disconnect_affordance;

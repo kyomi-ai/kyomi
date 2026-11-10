@@ -133,3 +133,4 @@ pub struct CreatedBy {
 }
 
 pub mod personal_mcp;
+pub mod personal_mcp_oauth;
