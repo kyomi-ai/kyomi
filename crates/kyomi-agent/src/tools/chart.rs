@@ -53,10 +53,12 @@ impl AgentTool for RenderChartTool {
     }
 
     fn description(&self) -> &str {
-        "Render a ChartML visualization as an interactive chart or PNG image. \
-         Accepts a ChartML specification as YAML or JSON string. Resolves data \
-         queries and produces the final visualization. Use get_chartml_spec first \
-         to understand ChartML syntax."
+        "Render a ChartML visualization. Returns an interactive chart when the client \
+         supports MCP Apps, otherwise a PNG image. Accepts a ChartML specification as a \
+         YAML or JSON string, resolves its data queries, and produces the final \
+         visualization. Call get_chartml_spec with mode=\"essential\" first if you don't \
+         already have ChartML reference material, and use validate_chartml to check the \
+         spec before rendering."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {

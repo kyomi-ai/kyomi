@@ -11,7 +11,7 @@
 use std::collections::HashMap;
 use leptos::prelude::*;
 use phosphor_leptos::Icon;
-use super::thinking::{ThinkingEvent, TokenUsage};
+use super::thinking::{ThinkingEvent, TokenUsage, tool_execution_count};
 use super::tool_schema_renderer;
 use crate::server_fns::chat::get_thinking_event_detail;
 
@@ -260,12 +260,9 @@ pub fn AgentThinking(
     let latest_event = Signal::derive(move || thinking_events.get().last().cloned());
 
     let tool_executions_count = Signal::derive(move || {
-        thinking_events.get().iter().filter(|e| {
-            e.event_type == "tool_execution_start"
-                || e.event_type == "tool_execution_end"
-                || e.event_type == "tool_start"
-                || e.event_type == "tool_end"
-        }).count()
+        thinking_events
+            .try_get()
+            .map_or(0, |events| tool_execution_count(&events))
     });
 
     let total_duration = Signal::derive(move || {

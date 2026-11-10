@@ -22,6 +22,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
+use futures_util::FutureExt;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
@@ -140,6 +141,16 @@ pub(crate) const WRAP_UP_FAILED_MESSAGE: &str =
 /// Ascending order is required: the crossing count in `chat()` treats the last
 /// entry as the most urgent one.
 const BUDGET_NOTICE_TENTHS: [u32; 2] = [7, 9];
+
+/// Stop a turn after this many consecutive failed tool calls. Tool failures
+/// (including rejected arguments and unknown outcomes) are returned to the
+/// model so it can repair; this bound prevents an unbounded error loop.
+const MAX_CONSECUTIVE_TOOL_FAILURES: usize = 5;
+
+/// Stop a turn when the same tool call (name + arguments) fails this many times,
+/// even when other successful calls reset the general failure count. A success
+/// of the same call clears its count.
+const MAX_SAME_FAILING_TOOL_CALLS: usize = 3;
 
 /// Zero-based iteration indices at which the graduated budget notices fire.
 ///
@@ -587,6 +598,12 @@ impl CustomAgent {
         // guard fires; left at `Iterations` if the loop runs to completion.
         let mut stop_reason = StopReason::Iterations;
 
+        // Bounded error-loop guard: tool failures are returned to the model,
+        // but repeated failures must not run forever.
+        let mut consecutive_tool_failures = 0usize;
+        let mut same_call_failures: HashMap<String, (usize, String)> = HashMap::new();
+        let mut last_tool_error = String::new();
+
         // Iteration loop.
         for iteration in 0..self.config.max_iterations {
             // Check cancellation.
@@ -814,16 +831,18 @@ impl CustomAgent {
                 // not malformed; send less), and `continue` the `for` loop
                 // exactly like a normal tool result — the outer `while` loop
                 // then gives the model another iteration to retry smaller.
-                let result = if let Some((context, sink)) = &self.runtime {
+                let outcome = if let Some((context, sink)) = &self.runtime {
                     let tool = RuntimeTool { agent: self, call: tool_call, finish_reason: &response.finish_reason };
                     context.tool(sink.as_ref(), &tool,
                         agent_runtime::ToolCallId(context.identity("tool", &format!("call-{}-{}", self.state.global_iteration, tool_call.id))),
-                        tool_call.name.clone(), tool_call.arguments.clone()).await.map_err(runtime_error)?.text
+                        tool_call.name.clone(), tool_call.arguments.clone()).await.map_err(runtime_error)?
                 } else if tool_call.arguments_error.is_some() {
-                    truncated_arguments_message(tool_call, &response.finish_reason)
+                    tool_outcome(self, tool_call, &response.finish_reason).await
                 } else {
                     self.execute_tool(tool_call).await
                 };
+                let succeeded = outcome.succeeded();
+                let result = outcome.text;
                 self.state.messages.push(Message::tool_result(
                     &tool_call.id,
                     &tool_call.name,
@@ -831,6 +850,21 @@ impl CustomAgent {
                 ));
                 if self.runtime.is_some() && let Some(callback) = &self.callbacks.on_iteration_boundary {
                     callback(&self.state.messages).await;
+                }
+                if succeeded {
+                    consecutive_tool_failures = 0;
+                    // A success clears this call's repeat count; other calls'
+                    // counts survive so alternating failures cannot evade the
+                    // same-call guard.
+                    same_call_failures.remove(&tool_call_fingerprint(tool_call));
+                } else {
+                    consecutive_tool_failures += 1;
+                    last_tool_error = result.clone();
+                    let entry = same_call_failures
+                        .entry(tool_call_fingerprint(tool_call))
+                        .or_insert_with(|| (0, String::new()));
+                    entry.0 += 1;
+                    entry.1 = result.clone();
                 }
             }
 
@@ -845,9 +879,38 @@ impl CustomAgent {
             // the ChartML check below, which can return early with a
             // terminal assistant message of its own — that message must
             // never be visible to this callback (it isn't durable yet;
-            // `persist_after_chat`/`execute_agent_chat`'s step 15 own it).
+            // `persist_after_chat`/`execute_agent_chat`'s step 14 own it).
             if let Some(ref cb) = self.callbacks.on_iteration_boundary {
                 cb(&self.state.messages).await;
+            }
+
+            // Bounded error-loop guard: checked after the whole tool batch so
+            // every assistant tool call in this response has a matching tool
+            // result, even when the guard ends the turn.
+            let (repeated_call_failures, repeated_call_error) = same_call_failures
+                .values()
+                .max_by_key(|(count, _)| *count)
+                .map(|(count, error)| (*count, error.as_str()))
+                .unwrap_or((0, ""));
+            if consecutive_tool_failures >= MAX_CONSECUTIVE_TOOL_FAILURES
+                || repeated_call_failures >= MAX_SAME_FAILING_TOOL_CALLS
+            {
+                let guard_error = if repeated_call_failures >= MAX_SAME_FAILING_TOOL_CALLS {
+                    repeated_call_error
+                } else {
+                    last_tool_error.as_str()
+                };
+                let message = tool_failure_guard_message(
+                    consecutive_tool_failures,
+                    repeated_call_failures,
+                    guard_error,
+                );
+                if let Some(ref cb) = self.callbacks.on_preparing_response {
+                    cb();
+                }
+                self.preparing().await?;
+                self.state.messages.push(Message::assistant(&message));
+                return Ok(message);
             }
 
             // Check if assistant content has ChartML blocks -> validate (YAML + SQL) -> return if valid.
@@ -1055,44 +1118,28 @@ impl CustomAgent {
     // Internal: Tool execution
     // -----------------------------------------------------------------------
 
-    /// Execute a single tool call and return the result string.
-    async fn execute_tool(&self, tool_call: &ToolCall) -> String {
-        let Some(tool) = self.registry.get_tool(&tool_call.name) else {
-            let available = self.registry.tool_names().join(", ");
-            warn!(tool = %tool_call.name, available = %available, "unknown tool requested by LLM");
-            return format!(
-                "Error: Unknown tool '{}'. Available tools: {}",
-                tool_call.name, available
-            );
-        };
-
+    /// Execute a single tool call and return its classified outcome. Tool
+    /// failures are model-facing results, never turn-ending errors.
+    async fn execute_tool(&self, tool_call: &ToolCall) -> agent_runtime::ToolOutcome {
+        if self.registry.get_tool(&tool_call.name).is_none() {
+            let outcome = tool_outcome(self, tool_call, "").await;
+            warn!(tool = %tool_call.name, error = %outcome.text, "unknown tool requested by LLM");
+            return outcome;
+        }
         self.progress(AgentProgress::ToolStart(tool_call.name.clone(), tool_call.arguments.clone())).await;
         if let Some(ref cb) = self.callbacks.on_tool_start {
             cb(&tool_call.name, &tool_call.arguments);
         }
-
-        match tool
-            .execute(tool_call.arguments.clone(), &self.tool_context)
-            .await
-        {
-            Ok(result) => {
-                let success = tool.result_domain_outcome(&result) == agent_runtime::DomainOutcome::Succeeded;
-                self.progress(AgentProgress::ToolEnd(tool_call.name.clone(), result.clone(), success)).await;
-                if let Some(ref cb) = self.callbacks.on_tool_end {
-                    cb(&tool_call.name, &result, success);
-                }
-                result
-            }
-            Err(e) => {
-                let error_msg = format!("Tool '{}' failed: {}", tool_call.name, e);
-                warn!(tool = %tool_call.name, error = %e, "tool execution failed");
-                self.progress(AgentProgress::ToolEnd(tool_call.name.clone(), error_msg.clone(), false)).await;
-                if let Some(ref cb) = self.callbacks.on_tool_end {
-                    cb(&tool_call.name, &error_msg, false);
-                }
-                error_msg
-            }
+        let outcome = tool_outcome(self, tool_call, "").await;
+        let success = outcome.succeeded();
+        if !success {
+            warn!(tool = %tool_call.name, error = %outcome.text, "tool execution failed");
         }
+        self.progress(AgentProgress::ToolEnd(tool_call.name.clone(), outcome.text.clone(), success)).await;
+        if let Some(ref cb) = self.callbacks.on_tool_end {
+            cb(&tool_call.name, &outcome.text, success);
+        }
+        outcome
     }
 
     // -----------------------------------------------------------------------
@@ -1444,27 +1491,124 @@ struct RuntimeTool<'a> {
 #[async_trait::async_trait]
 impl agent_runtime::ToolExecution for RuntimeTool<'_> {
     async fn execute(&self) -> agent_runtime::ToolOutcome {
-        use agent_runtime::{DomainOutcome, ToolOutcome, TransportOutcome};
-        if self.call.arguments_error.is_some() {
-            return ToolOutcome { transport: TransportOutcome::Failed, domain: DomainOutcome::Rejected,
-                text: truncated_arguments_message(self.call, self.finish_reason) };
-        }
-        let Some(tool) = self.agent.registry.get_tool(&self.call.name) else {
-            return ToolOutcome { transport: TransportOutcome::Failed, domain: DomainOutcome::Rejected,
-                text: format!("Error: Unknown tool '{}'. Available tools: {}", self.call.name, self.agent.registry.tool_names().join(", ")) };
-        };
-        match tool.execute(self.call.arguments.clone(), &self.agent.tool_context).await {
+        tool_outcome(self.agent, self.call, self.finish_reason).await
+    }
+}
+
+/// Execute one tool call and classify every failure into a model-facing
+/// `ToolOutcome`. A panic inside the tool is caught and becomes an Unknown
+/// outcome with verify-before-retry guidance; it never escapes the turn.
+async fn tool_outcome(
+    agent: &CustomAgent,
+    call: &ToolCall,
+    finish_reason: &str,
+) -> agent_runtime::ToolOutcome {
+    use agent_runtime::{DomainOutcome, ToolOutcome, TransportOutcome};
+    if call.arguments_error.is_some() {
+        return ToolOutcome { transport: TransportOutcome::Failed, domain: DomainOutcome::Rejected,
+            text: truncated_arguments_message(call, finish_reason) };
+    }
+    let Some(tool) = agent.registry.get_tool(&call.name) else {
+        return ToolOutcome { transport: TransportOutcome::Failed, domain: DomainOutcome::Rejected,
+            text: format!("Error: Unknown tool '{}'. Available tools: {}", call.name, agent.registry.tool_names().join(", ")) };
+    };
+    // The panic boundary covers the whole tool call, including the tool's own
+    // result classification: a buggy tool must never escape the turn.
+    let executed = std::panic::AssertUnwindSafe(async {
+        match tool.execute(call.arguments.clone(), &agent.tool_context).await {
             Ok(text) => ToolOutcome { transport: TransportOutcome::Completed,
                 domain: tool.result_domain_outcome(&text), text },
-            Err(error) => ToolOutcome { transport: TransportOutcome::Failed, domain: tool.failure_domain_outcome(),
-                text: format!("Tool '{}' failed: {}", self.call.name, error) },
+            Err(error) => ToolOutcome { transport: TransportOutcome::Failed,
+                domain: if matches!(&error, kyomi_core::Error::BadRequest(_))
+                    && tool.bad_request_is_pre_effect()
+                {
+                    DomainOutcome::Rejected
+                } else {
+                    tool.failure_domain_outcome()
+                },
+                text: format!("Tool '{}' failed: {}", call.name, error) },
         }
+    })
+    .catch_unwind()
+    .await;
+    let mut outcome = match executed {
+        Ok(outcome) => outcome,
+        Err(panic) => ToolOutcome { transport: TransportOutcome::Failed, domain: DomainOutcome::Unknown,
+            text: format!("Tool '{}' panicked: {}", call.name, panic_message(panic)) },
+    };
+    outcome.ensure_unknown_guidance();
+    outcome
+}
+
+fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
+    if let Some(message) = payload.downcast_ref::<&str>() {
+        (*message).to_string()
+    } else if let Some(message) = payload.downcast_ref::<String>() {
+        message.clone()
+    } else {
+        "unknown panic".to_string()
     }
+}
+
+fn tool_call_fingerprint(call: &ToolCall) -> String {
+    format!("{}:{}", call.name, serde_json::to_string(&call.arguments).unwrap_or_default())
+}
+
+/// Prefix of the bounded-loop-guard terminal message. Consumers that expect a
+/// structured response (watch) use this to avoid retrying the whole agent.
+pub(crate) const TOOL_FAILURE_GUARD_PREFIX: &str = "I stopped after ";
+
+pub(crate) fn is_tool_failure_guard_message(text: &str) -> bool {
+    text.starts_with(TOOL_FAILURE_GUARD_PREFIX)
+        && text.contains("to avoid looping")
+        && text.contains("I did not retry automatically")
+}
+
+fn tool_failure_guard_message(consecutive: usize, same_call: usize, error: &str) -> String {
+    let reason = if same_call >= MAX_SAME_FAILING_TOOL_CALLS {
+        format!("the same tool call failed {same_call} times")
+    } else {
+        format!("{consecutive} consecutive tool calls failed")
+    };
+    let preview: String = error.chars().take(800).collect();
+    format!(
+        "I stopped after {reason} to avoid looping. The last tool result was:\n\n{preview}\n\nI did not retry automatically. Please check the error and try a different approach."
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn release_and_dev_server_profiles_unwind_so_tool_panics_are_contained() {
+        let manifest = include_str!("../../../Cargo.toml");
+        let block = |name: &str| {
+            manifest
+                .split(&format!("[profile.{name}]"))
+                .nth(1)
+                .and_then(|rest| rest.split("\n[").next())
+                .unwrap_or("")
+        };
+        for name in ["release", "dev-server"] {
+            let profile = block(name);
+            assert!(
+                !profile.contains("panic = \"abort\""),
+                "the shipping {name} profile must unwind or the agent's catch_unwind boundary is inert: {profile}"
+            );
+        }
+        assert!(
+            block("release").contains("panic = \"unwind\""),
+            "the release profile must set panic = \"unwind\" explicitly"
+        );
+    }
+
+    #[test]
+    fn tool_failure_guard_message_is_recognizable_without_matching_normal_answers() {
+        let message = tool_failure_guard_message(5, 1, "boom");
+        assert!(is_tool_failure_guard_message(&message));
+        assert!(!is_tool_failure_guard_message("Revenue grew 12% last quarter."));
+    }
 
     // -- Metadata prefix tests -----------------------------------------------
 
