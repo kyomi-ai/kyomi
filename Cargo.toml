@@ -178,9 +178,6 @@ arborium = { version = "2.16", default-features = false, features = [
 ] }
 arborium-theme = "2.16"
 
-# SQL parser (extract table/column references from agent-generated SQL)
-sqlparser = { version = "0.55", features = ["visitor"] }
-
 # Tokio utilities
 tokio-util = { version = "0.7", features = ["compat"] }
 
@@ -249,7 +246,10 @@ opt-level = "z"
 lto = true
 codegen-units = 1
 strip = true
-panic = "abort"
+# Tool panics must be contained by kyomi-agent's catch_unwind boundary, so the
+# shipping profile must unwind. WASM targets keep their target-default abort
+# strategy; Cargo does not force this setting onto them.
+panic = "unwind"
 
 # Fast incremental builds for local development: release optimizations without LTO.
 [profile.dev-server]

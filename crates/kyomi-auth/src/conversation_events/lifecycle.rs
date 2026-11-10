@@ -151,7 +151,7 @@ macro_rules! write_terminal {
                     if saved.is_none() {
                         let mut unknown = event($submission, PublicPayload::ToolOutcome {
                             tool_call_id: tool_call_id.clone(),
-                            text: Text { preview: "Action outcome unknown: execution stopped before a committed result. This action will not be retried automatically.".into(), detail: None },
+                            text: Text { preview: format!("{} Execution stopped before a committed result; this action will not be retried automatically.", agent_runtime::UNKNOWN_GUIDANCE), detail: None },
                             transport: agent_runtime::TransportOutcome::Unknown,
                             domain: agent_runtime::DomainOutcome::Unknown,
                         }, &format!("unknown:{}", tool_call_id.as_str()));

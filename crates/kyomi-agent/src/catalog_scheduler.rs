@@ -6,7 +6,7 @@
 //!
 //! # Architecture
 //!
-//! Five periodic tasks run as `tokio::spawn` background tasks inside the API server:
+//! Four periodic tasks run as `tokio::spawn` background tasks inside the API server:
 //!
 //! 1. **Hourly catalog refresh** — Iterates all workspaces and their active datasources,
 //!    checks if last refresh was >24h ago, and triggers re-indexing. Uses a Redis
@@ -15,11 +15,9 @@
 //! 2. **Daily token cleanup** — Deletes expired refresh tokens and verification tokens.
 //!    Also uses a Redis distributed lock.
 //!
-//! 3. **Daily knowledge maintenance** — Contradiction + staleness detection across workspace knowledge.
+//! 3. **Daily query history cleanup** — Deletes unstarred queries older than retention period.
 //!
-//! 4. **Daily query history cleanup** — Deletes unstarred queries older than retention period.
-//!
-//! 5. **Daily public dataset refresh** — Indexes curated BigQuery public datasets
+//! 4. **Daily public dataset refresh** — Indexes curated BigQuery public datasets
 //!    (bigquery-public-data) into a sentinel workspace. Requires a BigQuery datasource
 //!    with `auth_mode=service_account` for GCP token.
 //!
@@ -31,8 +29,8 @@
 //!
 //! # Multi-replica Safety
 //!
-//! Both tasks use Redis SETNX with TTL for distributed locking. Only one replica
-//! runs the refresh or cleanup at a time.
+//! All tasks use Redis SETNX with TTL for distributed locking. Only one replica
+//! runs a given task at a time.
 //!
 //! # Graceful Shutdown
 //!
@@ -73,20 +71,12 @@ const CLEANUP_INTERVAL_SECONDS: u64 = 86400;
 /// No rush to clean up expired tokens — they are harmless until cleaned.
 const CLEANUP_INITIAL_DELAY_SECONDS: u64 = 43200;
 
-/// How often knowledge maintenance runs (24 hours).
-const KNOWLEDGE_MAINTENANCE_INTERVAL_SECONDS: u64 = 86400;
-
-/// Initial delay before the first knowledge maintenance run (6 hours).
-///
-/// Stagger with existing tasks for load distribution.
-const KNOWLEDGE_MAINTENANCE_INITIAL_DELAY_SECONDS: u64 = 21600;
-
 /// How often query history cleanup runs (24 hours).
 const QUERY_HISTORY_CLEANUP_INTERVAL_SECONDS: u64 = 86400;
 
 /// Initial delay before the first query history cleanup run (3 hours).
 ///
-/// Stagger with token cleanup (12h) and knowledge maintenance (6h) for load distribution.
+/// Stagger with token cleanup (12h) for load distribution.
 const QUERY_HISTORY_CLEANUP_INITIAL_DELAY_SECONDS: u64 = 10800;
 
 /// Redis lock key for query history cleanup.
@@ -97,12 +87,6 @@ const QUERY_HISTORY_CLEANUP_LOCK_TTL: u64 = 3600;
 
 /// Default retention period in days for query history entries.
 const DEFAULT_QUERY_HISTORY_RETENTION_DAYS: i64 = 30;
-
-/// Redis lock key for knowledge maintenance.
-const KNOWLEDGE_MAINTENANCE_LOCK_KEY: &str = "knowledge_maintenance_lock";
-
-/// Redis lock TTL for knowledge maintenance (1 hour).
-const KNOWLEDGE_MAINTENANCE_LOCK_TTL: u64 = 3600;
 
 /// Redis lock key for catalog refresh. Only one replica runs at a time.
 const CATALOG_REFRESH_LOCK_KEY: &str = "catalog_refresh_lock";
@@ -140,11 +124,13 @@ const REFRESH_HOURS_THRESHOLD: i64 = 24;
 
 /// Background scheduler for catalog re-indexing and housekeeping.
 ///
-/// Spawns two periodic tasks:
+/// Spawns four periodic tasks:
 /// 1. Hourly catalog refresh check (iterates workspaces, checks staleness, triggers re-index)
 /// 2. Daily token cleanup (expired refresh tokens + verification tokens)
+/// 3. Daily query history cleanup (unstarred queries older than retention)
+/// 4. Daily public dataset refresh (curated BigQuery public datasets)
 ///
-/// Both tasks use Redis distributed locks for multi-replica safety and respect
+/// All tasks use Redis distributed locks for multi-replica safety and respect
 /// a shared `CancellationToken` for graceful shutdown.
 pub struct CatalogRefreshScheduler {
     db: DbPool,
@@ -184,7 +170,7 @@ impl CatalogRefreshScheduler {
     /// Returns `JoinHandle`s for all tasks. The tasks run until the cancel
     /// token is triggered.
     #[allow(clippy::type_complexity)]
-    pub fn start(self: Arc<Self>) -> (JoinHandle<()>, JoinHandle<()>, JoinHandle<()>, JoinHandle<()>, JoinHandle<()>) {
+    pub fn start(self: Arc<Self>) -> (JoinHandle<()>, JoinHandle<()>, JoinHandle<()>, JoinHandle<()>) {
         let refresh_handle = {
             let this = self.clone();
             tokio::spawn(async move {
@@ -196,13 +182,6 @@ impl CatalogRefreshScheduler {
             let this = self.clone();
             tokio::spawn(async move {
                 this.cleanup_loop().await;
-            })
-        };
-
-        let maintenance_handle = {
-            let this = self.clone();
-            tokio::spawn(async move {
-                this.knowledge_maintenance_loop().await;
             })
         };
 
@@ -220,7 +199,7 @@ impl CatalogRefreshScheduler {
             })
         };
 
-        (refresh_handle, cleanup_handle, maintenance_handle, query_history_cleanup_handle, public_dataset_handle)
+        (refresh_handle, cleanup_handle, query_history_cleanup_handle, public_dataset_handle)
     }
 
     // -----------------------------------------------------------------------
@@ -275,10 +254,8 @@ impl CatalogRefreshScheduler {
     }
 
     /// Whether `workspace_id`'s billing gate blocks scheduled background
-    /// work (KYO-805) — shared by `refresh_all_workspaces` (hourly catalog
-    /// re-indexing) and `run_knowledge_maintenance` (daily learning
-    /// reference backfill, which calls out to an LLM), so neither can drift
-    /// from the other.
+    /// work (KYO-805) — used by `refresh_all_workspaces` (hourly catalog
+    /// re-indexing).
     ///
     /// A thin wrapper around `kyomi_auth::billing_gate::check_workspace_billing_gate`
     /// — the single "load workspace, apply the gate, fail closed"
@@ -871,95 +848,6 @@ impl CatalogRefreshScheduler {
     // Token cleanup loop
     // -----------------------------------------------------------------------
 
-    // -----------------------------------------------------------------------
-    // Graph maintenance loop
-    // -----------------------------------------------------------------------
-
-    /// Daily graph maintenance loop.
-    ///
-    /// After an initial delay (6 hours), runs every 24 hours until cancelled.
-    /// Each iteration acquires a Redis lock, then for each workspace:
-    /// - Backfills learning references (ensures pre-migration learnings have reference rows)
-    ///
-    /// Failures are logged as warnings — they never block the scheduler.
-    async fn knowledge_maintenance_loop(self: &Arc<Self>) {
-        // Initial delay — stagger with existing tasks
-        tokio::select! {
-            _ = self.cancel.cancelled() => {
-                info!("Knowledge maintenance scheduler cancelled during initial delay");
-                return;
-            }
-            _ = tokio::time::sleep(Duration::from_secs(KNOWLEDGE_MAINTENANCE_INITIAL_DELAY_SECONDS)) => {}
-        }
-
-        info!("Knowledge maintenance scheduler started (daily)");
-
-        loop {
-            if try_acquire_lock(&self.kv, KNOWLEDGE_MAINTENANCE_LOCK_KEY, KNOWLEDGE_MAINTENANCE_LOCK_TTL)
-                .await
-            {
-                info!("Starting daily knowledge maintenance");
-
-                self.run_knowledge_maintenance().await;
-
-                release_lock(&self.kv, KNOWLEDGE_MAINTENANCE_LOCK_KEY).await;
-            } else {
-                debug!("Knowledge maintenance lock held by another replica, skipping");
-            }
-
-            tokio::select! {
-                _ = self.cancel.cancelled() => {
-                    info!("Knowledge maintenance scheduler received cancel signal");
-                    break;
-                }
-                _ = tokio::time::sleep(Duration::from_secs(KNOWLEDGE_MAINTENANCE_INTERVAL_SECONDS)) => {}
-            }
-        }
-
-        info!("Knowledge maintenance scheduler exited");
-    }
-
-    /// Backfill learning references across all workspaces.
-    async fn run_knowledge_maintenance(&self) {
-        #[derive(sqlx::FromRow)]
-        struct WsRow { workspace_id: String }
-
-        let workspaces = match kyomi_core::db_fetch_all!(
-            self.db, WsRow,
-            "SELECT workspace_id FROM workspaces"
-        ) {
-            Ok(ws) => ws,
-            Err(e) => {
-                warn!(error = %e, "Failed to list workspaces for knowledge maintenance");
-                return;
-            }
-        };
-
-        for ws_row in &workspaces {
-            let workspace_id = &ws_row.workspace_id;
-
-            if self.workspace_billing_gate_blocks(workspace_id).await {
-                debug!(workspace_id, "Skipping knowledge maintenance — workspace billing is lapsed");
-                continue;
-            }
-
-            // Backfill learning references (ensures pre-migration learnings get reference rows)
-            if let Err(e) = kyomi_knowledge::references::backfill_all_references(&self.db, workspace_id).await {
-                warn!(
-                    workspace_id,
-                    error = %e,
-                    "Learning references backfill failed"
-                );
-            }
-        }
-
-        info!("Knowledge maintenance completed");
-    }
-
-    // -----------------------------------------------------------------------
-    // Token cleanup loop
-    // -----------------------------------------------------------------------
-
     /// Daily token cleanup loop.
     ///
     /// After an initial delay (12 hours), runs every 24 hours until cancelled.
@@ -1302,6 +1190,24 @@ async fn cleanup_query_history(db: &DbPool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Shared constructor for scheduler tests that do not need custom config.
+    fn test_scheduler(
+        db: DbPool,
+        self_hosted: bool,
+        cancel: CancellationToken,
+    ) -> Arc<CatalogRefreshScheduler> {
+        let mut config = kyomi_core::Config::test_config();
+        config.self_hosted = self_hosted;
+        Arc::new(CatalogRefreshScheduler::new(
+            db,
+            kyomi_core::kv_store_memory::InMemoryKVStore::new_pool(),
+            std::sync::Arc::new([0u8; 32]),
+            LazyEmbedding::new(),
+            cancel,
+            std::sync::Arc::new(config),
+        ))
+    }
 
     #[test]
     fn refresh_interval_is_1_hour() {
@@ -1697,19 +1603,6 @@ mod tests {
         use super::*;
         use crate::test_support::{seed_user_and_workspace, test_pool};
 
-        fn test_scheduler(db: DbPool, self_hosted: bool) -> CatalogRefreshScheduler {
-            let mut config = kyomi_core::Config::test_config();
-            config.self_hosted = self_hosted;
-            CatalogRefreshScheduler::new(
-                db,
-                kyomi_core::kv_store_memory::InMemoryKVStore::new_pool(),
-                std::sync::Arc::new([0u8; 32]),
-                LazyEmbedding::new(),
-                CancellationToken::new(),
-                std::sync::Arc::new(config),
-            )
-        }
-
         async fn set_subscription_status(db: &DbPool, workspace_id: &str, status: &str) {
             let sq = match db {
                 DbPool::Sqlite(sq) => sq,
@@ -1727,7 +1620,7 @@ mod tests {
         async fn active_workspace_is_not_blocked() {
             let db = test_pool().await;
             seed_user_and_workspace(&db).await;
-            let scheduler = test_scheduler(db, false);
+            let scheduler = test_scheduler(db, false, CancellationToken::new());
             assert!(!scheduler.workspace_billing_gate_blocks("ws-1").await);
         }
 
@@ -1736,7 +1629,7 @@ mod tests {
             let db = test_pool().await;
             seed_user_and_workspace(&db).await;
             set_subscription_status(&db, "ws-1", "past_due").await;
-            let scheduler = test_scheduler(db, false);
+            let scheduler = test_scheduler(db, false, CancellationToken::new());
             assert!(scheduler.workspace_billing_gate_blocks("ws-1").await);
         }
 
@@ -1745,12 +1638,53 @@ mod tests {
             let db = test_pool().await;
             seed_user_and_workspace(&db).await;
             set_subscription_status(&db, "ws-1", "past_due").await;
-            let scheduler = test_scheduler(db, true);
+            let scheduler = test_scheduler(db, true, CancellationToken::new());
             assert!(
                 !scheduler.workspace_billing_gate_blocks("ws-1").await,
                 "self-hosted/personal mode must never block scheduled work on billing status"
             );
         }
 
+    }
+
+    // -- start() wiring (KYO-953) -------------------------------------------
+    //
+    // The knowledge-maintenance loop was removed together with the legacy
+    // learning-reference backfill. This pins the remaining wiring: `start()`
+    // spawns four tasks, each is polled and stays live until cancellation, and
+    // each exits cleanly on the shared token rather than being dropped or
+    // panicking.
+    #[tokio::test]
+    async fn start_spawns_four_cancellable_tasks() {
+        use crate::test_support::test_pool;
+
+        let cancel = CancellationToken::new();
+        let scheduler = test_scheduler(test_pool().await, false, cancel.clone());
+
+        // The destructuring arity is itself the compile-time assertion that the
+        // removed knowledge-maintenance task is no longer part of `start()`.
+        let (refresh, cleanup, query_history, public_dataset) = scheduler.start();
+        let handles = [refresh, cleanup, query_history, public_dataset];
+
+        // Let the runtime poll each spawned task once. Without this yield the
+        // aliveness assertion below would be unfalsifiable on the default
+        // current-thread test runtime: freshly spawned tasks have not run yet.
+        tokio::task::yield_now().await;
+
+        for handle in &handles {
+            assert!(
+                !handle.is_finished(),
+                "scheduler task exited before cancellation"
+            );
+        }
+
+        cancel.cancel();
+
+        for handle in handles {
+            tokio::time::timeout(Duration::from_secs(5), handle)
+                .await
+                .expect("scheduler task did not stop within 5s of cancellation")
+                .expect("scheduler task panicked");
+        }
     }
 }
