@@ -156,9 +156,9 @@ fn classify_postgres_type(data_type: &str) -> Option<TypeClass> {
         | "timestamp without time zone" | "date" | "json" | "jsonb" => Some(TypeClass::Text),
         "smallint" | "integer" | "bigint" | "boolean" => Some(TypeClass::Integer),
         "double precision" | "real" | "numeric" => Some(TypeClass::Real),
-        // ARRAY (e.g. text[]) and USER-DEFINED (pgvector's `vector(384)`,
-        // enum types like `learning_scope`) have no unambiguous SQLite
-        // counterpart — left unclassified rather than guessed at.
+        // ARRAY (e.g. text[]) and USER-DEFINED (e.g. pgvector's `vector(384)`)
+        // have no unambiguous SQLite counterpart — left unclassified rather
+        // than guessed at.
         _ => None,
     }
 }
@@ -1544,10 +1544,66 @@ async fn migration_chains_produce_matching_schemas() {
 
     // Drop the scratch database before evaluating the diff, so cleanup runs
     // regardless of whether the check below passes or fails.
-    sqlx::query(&format!("DROP DATABASE \"{scratch_db}\""))
-        .execute(&admin_pool)
+    kyomi_core::test_db::drop_test_database(&admin_pool, &scratch_db)
         .await
         .unwrap_or_else(|e| panic!("drop scratch database `{scratch_db}`: {e}"));
+
+    // KYO-956: both legacy tables are intentionally dropped by the forward-only
+    // migration in each chain. A future migration that recreates either table
+    // must fail this check rather than silently restoring the dead schema.
+    for removed in ["conversation_discussed", "workspace_knowledge_chunks"] {
+        assert!(
+            !pg_schema.contains_key(removed),
+            "Postgres schema still contains `{removed}` after the migration chain"
+        );
+        assert!(
+            !sqlite_schema.contains_key(removed),
+            "SQLite schema still contains `{removed}` after the migration chain"
+        );
+    }
+
+    // KYO-960: the live knowledge_chunks table must carry the restored search
+    // indexes after the real chains run. Before this ticket the Postgres table
+    // had only its primary key: 20260412000000's `CREATE INDEX IF NOT EXISTS`
+    // silently skipped because the legacy workspace_knowledge_chunks table
+    // owned the name, so semantic retrieval sequentially scanned.
+    for index in [
+        "idx_knowledge_chunks_embedding",
+        "idx_knowledge_chunks_workspace",
+    ] {
+        assert!(
+            pg_indexes
+                .iter()
+                .any(|i| i.table == "knowledge_chunks" && i.name == index),
+            "Postgres knowledge_chunks is missing `{index}` after the migration chain"
+        );
+    }
+    assert!(
+        sqlite_indexes
+            .iter()
+            .any(|i| i.table == "knowledge_chunks" && i.name == "idx_knowledge_chunks_workspace"),
+        "SQLite knowledge_chunks is missing `idx_knowledge_chunks_workspace` after the migration chain"
+    );
+
+    // KYO-961: the dashboard_id delete/cascade paths need this index on both
+    // chains. It is non-unique, so schema parity itself does not compare it;
+    // assert its name, table and indexed column explicitly.
+    assert!(
+        pg_indexes.iter().any(|i| {
+            i.table == "knowledge_chunks"
+                && i.name == "idx_knowledge_chunks_dashboard_id"
+                && i.key_signature == ["dashboard_id"]
+        }),
+        "Postgres knowledge_chunks is missing or misdefines `idx_knowledge_chunks_dashboard_id` after the migration chain"
+    );
+    assert!(
+        sqlite_indexes.iter().any(|i| {
+            i.table == "knowledge_chunks"
+                && i.name == "idx_knowledge_chunks_dashboard_id"
+                && i.key_signature == ["dashboard_id"]
+        }),
+        "SQLite knowledge_chunks is missing or misdefines `idx_knowledge_chunks_dashboard_id` after the migration chain"
+    );
 
     // Indexes/PKs/FKs are only meaningful to compare for tables that exist
     // on both sides — a table missing entirely from one backend is already
