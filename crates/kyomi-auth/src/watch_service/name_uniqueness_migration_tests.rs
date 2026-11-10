@@ -246,8 +246,7 @@ async fn postgres_watch_name_forward_migration_preserves_rows_and_indexes() {
     let db = DbPool::Postgres(pool.clone());
     assert_migration_preserves_rows_and_indexes(&db).await;
     pool.close().await;
-    sqlx::query(&format!("DROP DATABASE \"{name}\""))
-        .execute(&admin)
+    kyomi_core::test_db::drop_test_database(&admin, &name)
         .await
         .expect("drop upgraded scratch database");
     sqlx::query(&format!("CREATE DATABASE \"{name}\""))
@@ -269,8 +268,7 @@ async fn postgres_watch_name_forward_migration_preserves_rows_and_indexes() {
         "fresh Postgres migration chain must remove name uniqueness"
     );
     fresh_pool.close().await;
-    sqlx::query(&format!("DROP DATABASE \"{name}\""))
-        .execute(&admin)
+    kyomi_core::test_db::drop_test_database(&admin, &name)
         .await
         .expect("drop scratch database");
 }
