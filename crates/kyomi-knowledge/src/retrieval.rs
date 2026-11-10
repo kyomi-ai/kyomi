@@ -1,18 +1,16 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-//! Retrieval pipeline -- vector search + SQL anchor expansion
-//! + column-to-table propagation.
+//! Retrieval pipeline -- vector search + column-to-table propagation.
 //!
 //! Entry point: `retrieve(vsearch, embed, workspace_id, query, already_injected, token_budget)`
 //!
 //! Pipeline:
 //! 1. Embed query using `embed_query()` (BGE asymmetric)
-//! 2. Search all vector indexes in parallel via VectorSearch trait
-//! 3. SQL anchor expansion from previously injected nodes
-//! 4. Merge results: deduplicate by node ID, best score wins per node
-//! 5. Column->Table score propagation (BEFORE score floor)
-//! 6. Quality gates: MIN_SIMILARITY floor, then budget ceiling
-//! 7. Return ranked results
+//! 2. Search the table and column indexes in parallel via VectorSearch trait
+//! 3. Merge results: deduplicate by node ID, best score wins per node
+//! 4. Column->Table score propagation (BEFORE score floor)
+//! 5. Quality gates: MIN_SIMILARITY floor, then budget ceiling
+//! 6. Return ranked results
 
 use crate::models::{
     ContextEntry, ContextEntryKind, MatchedColumn, RetrievalResult, RetrievalSource,
@@ -28,7 +26,7 @@ const MAX_RESULTS_PER_INDEX: usize = 10;
 /// Below this, results are noise -- not relevant to the query.
 const MIN_SIMILARITY: f64 = 0.25;
 
-/// Per-turn token budget for new context injection.
+/// Per-turn token budget for retrieval results.
 pub const PER_TURN_TOKEN_BUDGET: usize = 512;
 
 /// Approximate characters per token (conservative for English text).
@@ -36,25 +34,6 @@ pub(crate) const CHARS_PER_TOKEN: f64 = 4.0;
 
 /// Maximum number of matched columns to include per table entry.
 const MAX_COLUMNS_PER_TABLE: usize = 10;
-
-/// Compute a recency weight for a metric based on its age.
-///
-/// - < 7 days old: 1.0 (full weight)
-/// - < 30 days old: 0.8
-/// - < 90 days old: 0.5
-/// - >= 90 days old: 0.3
-fn recency_weight(created_at: &chrono::DateTime<chrono::Utc>) -> f64 {
-    let days = (chrono::Utc::now() - *created_at).num_days().max(0);
-    if days < 7 {
-        1.0
-    } else if days < 30 {
-        0.8
-    } else if days < 90 {
-        0.5
-    } else {
-        0.3
-    }
-}
 
 /// A table candidate being assembled from multiple index hits.
 #[derive(Debug)]
@@ -100,20 +79,16 @@ pub async fn retrieve(
         .map_err(|e| kyomi_core::Error::Internal(format!("embedding failed: {e}")))?;
     tracing::debug!(elapsed_ms = embed_start.elapsed().as_millis(), "Query embedding");
 
-    // 2. Search all vector indexes in parallel
+    // 2. Search the table and column indexes in parallel
     let search_start = std::time::Instant::now();
-    let (table_result, column_result, learning_result, metric_result) = tokio::join!(
+    let (table_result, column_result) = tokio::join!(
         vsearch.search_tables(workspace_id, &query_vec, MAX_RESULTS_PER_INDEX),
         vsearch.search_columns(workspace_id, &query_vec, MAX_RESULTS_PER_INDEX),
-        vsearch.search_learnings(workspace_id, &query_vec, MAX_RESULTS_PER_INDEX),
-        vsearch.search_metrics(workspace_id, &query_vec, MAX_RESULTS_PER_INDEX),
     );
-    tracing::debug!(elapsed_ms = search_start.elapsed().as_millis(), "Vector search (4 indexes)");
+    tracing::debug!(elapsed_ms = search_start.elapsed().as_millis(), "Vector search (2 indexes)");
 
     let table_hits = table_result.unwrap_or_default();
     let column_hits = column_result.unwrap_or_default();
-    let learning_hits = learning_result.unwrap_or_default();
-    let metric_hits = metric_result.unwrap_or_default();
 
     // 3. Merge table hits from vector search (best score wins per node)
     let propagation_start = std::time::Instant::now();
@@ -264,46 +239,7 @@ pub async fn retrieve(
         });
     }
 
-    // Learnings (no recency penalty -- human-curated knowledge is always relevant)
-    for row in &learning_hits {
-        if row.score < MIN_SIMILARITY {
-            continue;
-        }
-        if already_injected.contains(&row.learning_id) {
-            continue;
-        }
-        entries.push(ContextEntry {
-            kind: ContextEntryKind::Learning,
-            id: row.learning_id.clone(),
-            text: row.insight.clone(),
-            score: row.score,
-            source: RetrievalSource::VectorSearch,
-            matched_columns: Vec::new(),
-        });
-    }
-
-    // Metrics -- apply recency weighting
-    for row in &metric_hits {
-        let weighted_score = row.score * recency_weight(&row.created_at);
-        if weighted_score < MIN_SIMILARITY {
-            continue;
-        }
-        let id = row.learning_id.clone();
-        if already_injected.contains(&id) {
-            continue;
-        }
-        let name = row.title.as_deref().unwrap_or("Metric");
-        entries.push(ContextEntry {
-            kind: ContextEntryKind::Metric,
-            id,
-            text: format!("{name}: {}", row.insight),
-            score: weighted_score,
-            source: RetrievalSource::VectorSearch,
-            matched_columns: Vec::new(),
-        });
-    }
-
-    // Sort by score descending (across all kinds) for budget allocation
+    // Sort by score descending for budget allocation
     entries.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
 
     // Apply token budget ceiling
@@ -378,8 +314,8 @@ pub(crate) fn assemble_context_block(entries: &[ContextEntry], token_budget: usi
 
     let char_budget = (token_budget as f64 * CHARS_PER_TOKEN) as usize;
 
-    // Select entries by score (highest first, regardless of kind) until budget is filled.
-    // This ensures high-relevance learnings aren't starved by lower-relevance tables.
+    // Select entries by score (highest first) until budget is filled.
+    // This ensures a high-relevance entry isn't starved by lower-relevance ones.
     let mut by_score: Vec<&ContextEntry> = entries.iter().collect();
     by_score.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
 
@@ -426,34 +362,6 @@ pub(crate) fn assemble_context_block(entries: &[ContextEntry], token_budget: usi
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_recency_weight_recent() {
-        // 1-day-old metric: full weight
-        let yesterday = chrono::Utc::now() - chrono::Duration::days(1);
-        assert!((recency_weight(&yesterday) - 1.0).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn test_recency_weight_two_weeks() {
-        // 15-day-old metric: 0.8
-        let dt = chrono::Utc::now() - chrono::Duration::days(15);
-        assert!((recency_weight(&dt) - 0.8).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn test_recency_weight_two_months() {
-        // 60-day-old metric: 0.5
-        let dt = chrono::Utc::now() - chrono::Duration::days(60);
-        assert!((recency_weight(&dt) - 0.5).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn test_recency_weight_old() {
-        // 120-day-old metric: 0.3
-        let dt = chrono::Utc::now() - chrono::Duration::days(120);
-        assert!((recency_weight(&dt) - 0.3).abs() < f64::EPSILON);
-    }
 
     #[test]
     fn test_format_table_entry_with_columns() {
@@ -513,17 +421,9 @@ mod tests {
                 matched_columns: vec![],
             },
             ContextEntry {
-                kind: ContextEntryKind::Learning,
-                id: "learn-123".to_string(),
-                text: "Exclude cancelled subs from MRR".to_string(),
-                score: 0.85,
-                source: RetrievalSource::VectorSearch,
-                matched_columns: vec![],
-            },
-            ContextEntry {
-                kind: ContextEntryKind::Metric,
-                id: "MRR".to_string(),
-                text: "MRR: Monthly Recurring Revenue".to_string(),
+                kind: ContextEntryKind::Table,
+                id: "public.orders".to_string(),
+                text: "prod / public.orders: total (NUMERIC)".to_string(),
                 score: 0.95,
                 source: RetrievalSource::VectorSearch,
                 matched_columns: vec![],
@@ -534,11 +434,8 @@ mod tests {
         assert!(block.contains("<knowledge_context>"));
         assert!(block.contains("</knowledge_context>"));
         assert!(block.contains("## Tables"));
-        assert!(block.contains("## Metrics"));
-        assert!(block.contains("## Learnings"));
         assert!(block.contains("prod / public.users"));
-        assert!(block.contains("MRR: Monthly Recurring Revenue"));
-        assert!(block.contains("Exclude cancelled subs from MRR"));
+        assert!(block.contains("prod / public.orders"));
     }
 
     #[test]
@@ -551,16 +448,16 @@ mod tests {
     fn test_assemble_context_block_respects_budget() {
         let entries = vec![
             ContextEntry {
-                kind: ContextEntryKind::Learning,
-                id: "a".to_string(),
+                kind: ContextEntryKind::Table,
+                id: "table_a".to_string(),
                 text: "A".repeat(1000),
                 score: 0.9,
                 source: RetrievalSource::VectorSearch,
                 matched_columns: vec![],
             },
             ContextEntry {
-                kind: ContextEntryKind::Learning,
-                id: "b".to_string(),
+                kind: ContextEntryKind::Table,
+                id: "table_b".to_string(),
                 text: "B".repeat(1000),
                 score: 0.8,
                 source: RetrievalSource::VectorSearch,
@@ -575,12 +472,12 @@ mod tests {
     }
 
     #[test]
-    fn test_assemble_high_score_learning_not_starved_by_tables() {
+    fn test_assemble_high_score_entry_not_starved_by_lower_score_entries() {
         let entries = vec![
             ContextEntry {
                 kind: ContextEntryKind::Table,
                 id: "table1".to_string(),
-                text: "T".repeat(400),
+                text: "T".repeat(100),
                 score: 0.50,
                 source: RetrievalSource::VectorSearch,
                 matched_columns: vec![],
@@ -588,24 +485,33 @@ mod tests {
             ContextEntry {
                 kind: ContextEntryKind::Table,
                 id: "table2".to_string(),
-                text: "U".repeat(400),
+                text: "U".repeat(100),
                 score: 0.45,
                 source: RetrievalSource::VectorSearch,
                 matched_columns: vec![],
             },
             ContextEntry {
-                kind: ContextEntryKind::Learning,
-                id: "learning1".to_string(),
-                text: "Important learning".to_string(),
+                kind: ContextEntryKind::Table,
+                id: "table3".to_string(),
+                text: format!("Important entry {}", "V".repeat(84)),
                 score: 0.90,
                 source: RetrievalSource::VectorSearch,
                 matched_columns: vec![],
             },
         ];
 
-        let block = assemble_context_block(&entries, 300);
-        assert!(block.contains("Important learning"), "High-score learning must be included");
-        assert!(block.contains(&"T".repeat(100)), "Highest-score table must be included");
+        // 60 tokens ~ 240 chars fits the block overhead plus only one
+        // 100-char entry. Score-first selection must keep the 0.90 entry;
+        // insertion order would keep table1 and drop it.
+        let block = assemble_context_block(&entries, 60);
+        assert!(
+            block.contains("Important entry"),
+            "High-score entry must be included: {block}"
+        );
+        assert!(
+            !block.contains(&"T".repeat(100)) && !block.contains(&"U".repeat(100)),
+            "budget must not be spent on lower-score entries first: {block}"
+        );
     }
 
     #[test]

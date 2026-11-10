@@ -24,9 +24,10 @@ impl AgentTool for BrowseResourcesTool {
     }
 
     fn description(&self) -> &str {
-        "List available Kyomi documentation resources. Returns a catalog of \
-         docs:// URIs with titles and descriptions. Use this to discover what \
-         documentation is available, then use read_resource to read specific docs."
+        "List Kyomi's product documentation resources. Use it for questions about Kyomi \
+         itself — setup, datasources, features, configuration, or how a Kyomi capability \
+         works. Returns docs:// URIs with titles and descriptions; pass one to \
+         read_resource."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -84,9 +85,10 @@ impl AgentTool for ReadResourceTool {
     }
 
     fn description(&self) -> &str {
-        "Read a specific Kyomi documentation resource by its docs:// URI. \
-         Returns the full markdown content of the document. Use browse_resources \
-         first to discover available URIs."
+        "Read one Kyomi product documentation document by its docs:// URI. Use it for \
+         questions about Kyomi itself — setup, features, configuration, or how a Kyomi \
+         capability works. Call browse_resources first if you don't know the URI. Returns \
+         the full markdown content."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -107,6 +109,14 @@ impl AgentTool for ReadResourceTool {
             read_only_hint: Some(true),
             ..Default::default()
         })
+    }
+
+    fn result_domain_outcome(&self, text: &str) -> agent_runtime::DomainOutcome {
+        if text.starts_with("Documentation not found") {
+            agent_runtime::DomainOutcome::Rejected
+        } else {
+            agent_runtime::DomainOutcome::Succeeded
+        }
     }
 
     async fn execute(
@@ -136,5 +146,24 @@ impl AgentTool for ReadResourceTool {
             Some(content) => Ok(content),
             None => Ok(format!("Documentation not found for URI: {uri}. Use browse_resources to see available documents.")),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn read_resource_not_found_is_rejected_not_succeeded() {
+        let text = "Documentation not found for URI: docs://kyomi/nope. Use browse_resources to see available documents.";
+        assert_eq!(
+            ReadResourceTool.result_domain_outcome(text),
+            agent_runtime::DomainOutcome::Rejected,
+            "a not-found docs response must not count as success"
+        );
+        assert_eq!(
+            ReadResourceTool.result_domain_outcome("documentation body"),
+            agent_runtime::DomainOutcome::Succeeded
+        );
     }
 }

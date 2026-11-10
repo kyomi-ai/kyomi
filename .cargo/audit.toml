@@ -16,7 +16,7 @@
 #   3. Re-check the whole list whenever `cargo update` runs. Entries whose
 #      blocker has cleared must be removed in the same PR that clears them.
 #
-# Last full review: 2026-09-24
+# Last full review: 2026-11-09
 # =============================================================================
 
 [advisories]
@@ -41,35 +41,44 @@ ignore = [
     "RUSTSEC-2026-0195", # unbounded namespace-declaration allocation in NsReader (memory-exhaustion DoS)
 
     # -------------------------------------------------------------------------
-    # rsa 0.9.10 — no patched version exists, at all
+    # rsa 0.9.10 and 0.10.0-rc.19 — the advisory has no patched version
     # -------------------------------------------------------------------------
     # Marvin Attack: potential key recovery through timing sidechannels.
-    # The advisory lists NO patched versions; the RustCrypto fix landed only in
-    # the 0.10.0-rc line, which is still pre-release.
+    # The advisory's `patched` list is intentionally empty: the crypto-bigint
+    # migration (RustCrypto/RSA#394) did not close it, and the advisory still
+    # lists rsa 0.9.10 (latest stable) and 0.10.0-rc.18 (latest rc) as
+    # affected as of 2026-09-12. The lockfile has 0.9.10 plus 0.10.0-rc.19 via
+    # crypto-glue 0.2.2, so this ID-level ignore covers both.
     #
-    # Reaches us through five independent paths, none of which we control:
-    #   sqlx-mysql, jsonwebtoken, crypto-glue (webauthn-rs / passkeys),
-    #   superboring (web-push-native), and ssh-key (russh).
+    # Reaches us through six direct dependents; none can move to a patched
+    # release until the advisory has one:
+    #   sqlx-mysql, jsonwebtoken, russh and internal-russh-forked-ssh-key,
+    #   kyomi-datasource (via kyomi-connect) and superboring (web-push-native).
     #
-    # Remove when: rsa 0.10 ships stable AND the crates above adopt it.
+    # Remove when: the advisory lists a patched version and every rsa copy in
+    # Cargo.lock (0.9.10 and crypto-glue's 0.10.0-rc.x) moves to it; confirm
+    # with `cargo audit` without this ignore.
     "RUSTSEC-2023-0071", # Marvin Attack: potential key recovery through timing sidechannels
 
     # -------------------------------------------------------------------------
     # russh 0.54.5 / russh-cryptovec 0.52.0 — deliberate pin, see KYO-212
     # -------------------------------------------------------------------------
-    # Path: kyomi-datasource 1.6.0 (`ssh` feature) <- SSH tunnel support.
+    # Path: kyomi-datasource 1.6.2 (`ssh` feature) <- SSH tunnel support.
     #
     # Patched in russh >= 0.60.3, but ~/repos/kyomi-connect pins `russh = "0.54"`
     # on purpose (see the comment above the dependency in that repo's root
-    # Cargo.toml). russh >= 0.55 moved to the pre-release RustCrypto generation
-    # (`generic-array ^1.3.3`, `rsa =0.10.0-rc.18`), while `crypto-glue 0.1.17`
-    # — which webauthn-rs pulls in for passkeys — still requires
-    # `generic-array =0.14.7` and `rsa ^0.9.10`. Both verified against
-    # crates.io on 2026-07-25.
+    # Cargo.toml). KYO-212's 2026-07-25 comment records the empirical failure:
+    # russh >= 0.60.3 needs stable `hmac ^0.13` / `sha2 ^0.11`, while the
+    # then-locked `crypto-glue 0.1.17` required the matching pre-releases.
+    # This lockfile now has `crypto-glue 0.2.2` (via webauthn-rs 0.6.2), which
+    # declares stable `hmac ^0.13.0` / `sha2 ^0.11` / `rsa ^0.10.0-rc.18`
+    # (verified against crates.io 2026-11-05), so that specific conflict may
+    # have cleared. The isolation test has not been re-run and the pin is
+    # unchanged; see KYO-212.
     #
-    # This is the one entry in this file that is OURS to fix rather than
-    # upstream's. It needs a kyomi-connect change plus a republish, and the
-    # coexistence question has to be settled empirically first.
+    # This is the only entry whose sole blocker is a pin we control. It needs
+    # a kyomi-connect change plus a republish, and the coexistence question
+    # has to be settled empirically first.
     #
     # Remove when: KYO-212 lands (russh bumped in kyomi-connect,
     # kyomi-datasource republished, `cargo update -p kyomi-datasource` here).
@@ -77,59 +86,147 @@ ignore = [
     "RUSTSEC-2026-0153", # russh-cryptovec: unchecked CryptoVec allocation and growth handling
 
     # -------------------------------------------------------------------------
-    # rustls-webpki 0.101.7 — upstream dead end
+    # crypto-bigint 0.5.5 — held by the RustCrypto 0.13 ECC generation (KYO-955)
     # -------------------------------------------------------------------------
-    # Path: rustls 0.21.12 <- tokio-rustls 0.24.1 <- tiberius 0.12.3
-    #       <- kyomi-datasource (SQL Server driver).
+    # Path (verified 2026-11-05 with `cargo tree --locked -i
+    # crypto-bigint@0.5.5 --target all`; the audit tree prints only the first
+    # path):
+    #   crypto-bigint 0.5.5 <- elliptic-curve 0.13.8
+    #     <- ecdsa 0.16.9 <- internal-russh-forked-ssh-key 0.6.11
+    #        <- russh 0.54.5 <- kyomi-datasource 1.6.2 (SSH tunnel)
+    #     <- p256 0.13.2 / p384 0.13.1 / p521 0.13.3 / k256 0.13.4
+    #        <- russh 0.54.5, jsonwebtoken 10.4.0 (kyomi-auth),
+    #           web-push-native 0.4.0 -> jwt-simple 0.12.15 (kyomi-agent),
+    #           kyomi-auth, kyomi-server and kyomi-ui (direct p256 0.13;
+    #           kyomi-ui's is a dev-dependency)
+    #        (primeorder 0.13.6 is a further intermediate under the nistp curves)
     #
-    # Patched in rustls-webpki >= 0.103.12/0.103.13, which requires rustls
-    # >= 0.23. tiberius 0.12.3 is its latest release (verified 2026-07-25) and
-    # still declares `tokio-rustls = "^0.24.0"`, pinning rustls to 0.21.
+    # Patched in crypto-bigint >= 0.7.6; 0.7.6 itself is yanked and 0.7.10 is
+    # already in this lockfile via crypto-glue 0.2.2. The 0.13-generation
+    # RustCrypto crates require crypto-bigint ^0.5, so the fix is a
+    # semver-incompatible major change, not something `cargo update` can take.
     #
-    # Note this is the *SQL Server* TLS stack only. Kyomi's own HTTP/TLS paths
-    # use a current rustls (rustls-webpki 0.103.13 is also in the tree).
+    # A fix is unreachable today, verified 2026-11-05:
+    #   cargo update -p crypto-bigint@0.5.5 --precise 0.7.6 --dry-run -> fails
+    #     (0.7.6 is yanked); --precise 0.7.10 --dry-run -> fails
+    #     (elliptic-curve 0.13.8 requires crypto-bigint ^0.5)
+    #   cargo update -p elliptic-curve@0.13.8 --precise 0.14.3 --dry-run
+    #     -> fails (p256 0.13.2 requires ^0.13.1)
+    #   cargo update -p ecdsa@0.16.9 --precise 0.17.0 --dry-run -> fails (^0.16)
+    #   cargo update -p p256@0.13.2 --precise 0.14.0 --dry-run -> fails
+    #     (kyomi-auth ^0.13)
+    #   cargo update -p p384@0.13.1 --precise 0.14.0 --dry-run -> fails
+    #     (jsonwebtoken ^0.13)
+    #   cargo update -p p521@0.13.3 --precise 0.14.0 --dry-run -> fails
+    #     (ssh-key ^0.13.3; russh and internal-russh-forked-ssh-key too)
+    #   cargo update -p internal-russh-forked-ssh-key@0.6.11 --precise
+    #     0.6.18+upstream-0.6.7 --dry-run -> fails (russh pins =0.6.11)
+    #   cargo update -p jwt-simple@0.12.15 --precise 0.15.0 --dry-run -> fails
+    #     (web-push-native requires ^0.12.6)
+    #   plain `cargo update -p <crate>` for each of the above locks 0 packages,
+    #   except jwt-simple: it moves 0.12.15 -> 0.12.17 (plus supporting
+    #   crates) but stays on p256 0.13, so the conclusion is unchanged.
+    # The newest upstream releases still keep the old generation (crates.io
+    # API, 2026-11-05): jsonwebtoken 11.1.0 requires p256 ^0.13.2 and
+    # p384 ^0.13.0; web-push-native 0.5.0 requires p256 ^0.13.2 and
+    # jwt-simple ^0.12.17 (jwt-simple 0.15.0 is on 0.14, but is unreachable
+    # through web-push-native). Kyomi's own direct p256 0.13 uses could be
+    # bumped to 0.14 (a code change), but cannot clear the graph alone.
     #
-    # Remove when: tiberius releases against tokio-rustls >= 0.26 / rustls
-    # >= 0.23, or kyomi-connect switches its SQL Server driver off tiberius.
-    "RUSTSEC-2026-0098", # name constraints for URI names were incorrectly accepted
-    "RUSTSEC-2026-0099", # name constraints were accepted for certificates asserting a wildcard name
-    "RUSTSEC-2026-0104", # reachable panic in certificate revocation list parsing
+    # The decisive holder is russh 0.54.5: it requires ecdsa ^0.16,
+    # elliptic-curve ^0.13 and p256/p384/p521 ^0.13 itself, so even if every
+    # other holder moved, crypto-bigint 0.5.5 would remain. russh is the
+    # deliberate pin tracked by KYO-212 (kyomi-connect + republish), out of
+    # scope for this ticket. Clearing that pin alone is also not sufficient:
+    # jsonwebtoken and web-push-native would then be the blockers.
+    #
+    # Impact — checked against the call sites, 2026-11-05. crypto-bigint
+    # 0.5.5 backs scalar/field arithmetic for the 0.13-generation ECC crates,
+    # and secret-key operations are reachable:
+    #   * ES256 signing of Kyomi Connect tokens with a long-lived P-256 key
+    #     (crates/kyomi-auth/src/connect_token.rs, jsonwebtoken rust_crypto).
+    #   * VAPID ES256 signing with the long-lived VAPID key plus P-256 ECE
+    #     key agreement for Web Push (crates/kyomi-agent/src/web_push.rs,
+    #     web-push-native + jwt-simple, whose ES256 path uses p256; k256 is
+    #     only in the graph via jwt-simple's ES256K support). apps/server/src/
+    #     routes/push.rs also derives the VAPID public key from the raw
+    #     secret scalar.
+    #   * SSH tunnel client: ECDSA host-key verification (public inputs) and
+    #     ECDSA user-key signing when a user supplies an ECDSA key
+    #     (kyomi-connect ssh_tunnel.rs, russh). Kyomi-generated tunnel keys
+    #     are Ed25519 and russh's default KEX list has no nistp ECDH, so the
+    #     ECDH paths are not exercised by the default tunnel configuration.
+    #   * ES256 verification of Connect tokens (public inputs only).
+    # Exploitation requires an attacker able to observe operation timing or
+    # microarchitectural state (co-located process/VM, shared CPU, or a timing
+    # oracle against the authenticated signing/derivation endpoints); the
+    # advisory's branches are compiler/target dependent and request content
+    # alone does not expose them. We cannot show the affected operations are
+    # unreachable, so this is accepted residual risk, not a false positive.
+    #
+    # Remove when: `cargo audit` no longer reports RUSTSEC-2026-0387 with this
+    # entry removed (currently it does; 0.5.5 is still in the graph). Confirm
+    # the 0.13 generation is gone with `cargo tree --locked -i
+    # crypto-bigint@0.5 --target all`, which fails with "did not match any
+    # packages" once no 0.5.x remains (today it shows 0.5.5 under
+    # elliptic-curve 0.13.8). Blocked on KYO-212 (russh), a jsonwebtoken
+    # release on p256/p384 0.14 (or dropping its rust_crypto backend), a
+    # web-push-native release on p256 0.14 + jwt-simple 0.15, and bumping the
+    # workspace p256 dependency to 0.14 (kyomi-auth, kyomi-server, kyomi-ui).
+    "RUSTSEC-2026-0387", # timing variability in operations intended to be constant-time
 
     # -------------------------------------------------------------------------
-    # rkyv 0.7.46 — never compiled: unactivated optional dependency (KYO-317)
+    # libsqlite3-sys 0.30.1 — bundled SQLite < 3.54.0 (KYO-966), revisit 2026-12-10
     # -------------------------------------------------------------------------
-    # Path: rkyv 0.7.46 <- optional dep of rust_decimal 1.42.1 (behind
-    #       rust_decimal's own `rkyv` feature) <- kyomi-datasource 1.6.0 and
-    #       sqlx-core 0.8.6.
+    # RUSTSEC-2026-0459 / CVE-2026-119375: SQLite before 3.54.0 can return
+    # uninitialized page-cache memory when a process opens a database file
+    # together with a sibling `-wal` file whose page size differs from the
+    # database's. The attack vector is local and needs a crafted db+wal pair
+    # written by a less trusted party and opened by the victim process.
+    # Patched in libsqlite3-sys >= 0.39.0 (bundles SQLite 3.54.x); 0.6.0 to
+    # 0.38.2 are affected.
     #
-    # Unlike every other entry in this file, the problem here isn't that no
-    # fix exists — it's that the vulnerable code is never compiled into any
-    # Kyomi artifact in the first place. rust_decimal's `rkyv` feature is not
-    # part of its `default = ["serde", "std"]` set, and nothing in this
-    # workspace enables it. `cargo tree -i rkyv --target all --all-features`
-    # (verified 2026-08-06) prints only:
+    # Path (verified 2026-11-09 with `cargo tree --locked -i
+    # libsqlite3-sys@0.30.1`): libsqlite3-sys 0.30.1 <- sqlx-sqlite 0.8.6
+    # <- sqlx 0.8.6 (workspace dependency, `sqlite` feature, bundled build)
+    # <- kyomi-core, kyomi-auth, kyomi-agent, kyomi-server, kyomi-desktop and
+    # the rest of the workspace. It is the only libsqlite3-sys in the lockfile.
     #
-    #   warning: nothing to print.
+    # A fix is unreachable with a released sqlx, verified 2026-11-09:
+    #   cargo update -p libsqlite3-sys --precise 0.39.1 --dry-run -> fails
+    #     (sqlx-sqlite 0.8.6 requires libsqlite3-sys ^0.30.1)
+    #   sqlx-sqlite 0.9.0 (latest release, published 2026-05-21; checked
+    #     against crates.io 2026-11-09) declares
+    #     libsqlite3-sys ">=0.30.1, <0.38.0", so even the 0.9 major migration
+    #     cannot reach a patched 0.39.
+    #   Only sqlx's unreleased `main` allows ">=0.30.1, <0.40.0". We do not pin
+    #   a production dependency to an unreleased git revision.
     #
-    # rkyv shows up in Cargo.lock anyway because cargo records the full
-    # resolution graph, including optional dependencies that no enabled
-    # feature activates, and `cargo-audit` scans that lockfile with no
-    # feature awareness — it cannot tell an activated dependency from a
-    # merely-resolvable one.
+    # Reachability, checked against the call sites 2026-11-09:
+    #   * The only non-test SQLite open is DbPool::connect
+    #     (crates/kyomi-core/src/db.rs) for the app's own database: standalone
+    #     and desktop mode open `<DATA_DIR>/kyomi.db` created by Kyomi itself
+    #     (crates/kyomi-core/src/config.rs), or the operator-set DATABASE_URL.
+    #     It runs with WAL mode, so a `-wal` sibling exists, but both files sit
+    #     in a directory only the local user/operator controls.
+    #   * No feature opens a user-supplied, uploaded or downloaded SQLite file:
+    #     kyomi-datasource links only sqlx-postgres and sqlx-mysql, and no
+    #     datasource type, import or attach path takes a SQLite file.
+    #   * Production Postgres deployments never open SQLite; all other uses
+    #     are `sqlite::memory:` in tests, which have no files.
+    #   * Operator note: restoring or copying a `kyomi.db` together with a
+    #     foreign `-wal` file (backup restore, shared DATA_DIR or
+    #     DATABASE_URL=sqlite:) is the one realistic way to open a mismatched
+    #     pair; only restore a database and its `-wal` from a trusted source.
+    #     Kyomi has no in-app backup, restore or import feature.
+    # Exploitation needs an attacker who can already write into the victim's
+    # local data directory, which also hands them the database itself.
     #
-    # Neither available fix applies. rust_decimal 1.42.1 is the newest
-    # release (`cargo update -p rust_decimal --dry-run` -> `Locking 0
-    # packages`, verified 2026-08-06); its `rkyv` feature still requires
-    # `rkyv = "^0.7.46"` per rust_decimal's own Cargo.toml — no release has
-    # moved that feature to rkyv 0.8. Forcing the bump directly is also
-    # rejected: `cargo update -p rkyv --precise 0.8.17` fails with "candidate
-    # versions found which didn't match: 0.8.17 ... required by package
-    # rust_decimal v1.42.1" (verified 2026-08-06).
-    #
-    # Remove when: rust_decimal publishes a release whose `rkyv` feature
-    # depends on `rkyv >= 0.8.17`, at which point a plain `cargo update -p
-    # rust_decimal` clears it.
-    "RUSTSEC-2026-0235", # Insufficient archive validation can cause out-of-bounds reads in archives containing Rc/Arc
+    # Remove when: a released sqlx whose sqlx-sqlite allows libsqlite3-sys
+    # >= 0.39 exists (sqlx main already does); then bump the workspace sqlx and
+    # run `cargo audit` without this entry. Expiry: re-check by 2026-12-10.
+    "RUSTSEC-2026-0459", # libsqlite3-sys via C SQLite CVE-2026-119375 (uninitialized memory with mismatched WAL page size)
+
 ]
 
 # Informational advisories (unmaintained / unsound / yanked) are reported but do

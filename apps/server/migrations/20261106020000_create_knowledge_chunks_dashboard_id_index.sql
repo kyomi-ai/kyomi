@@ -1,0 +1,25 @@
+-- no-transaction
+-- KYO-961: add the live knowledge_chunks dashboard_id index.
+--
+-- Every dashboard content save deletes the old chunks by dashboard_id
+-- (crates/kyomi-auth/src/dashboard_service.rs), and dashboards cascade to
+-- knowledge_chunks by dashboard_id. Without this index those delete paths
+-- sequentially scan.
+--
+-- CONCURRENTLY avoids blocking reads/writes on the live table: it takes only a
+-- SHARE UPDATE EXCLUSIVE lock, so existing pods keep serving. The build runs
+-- inside DbPool::connect before the HTTP listener binds, so the pod's startup
+-- probe budget must cover it. sqlx runs a file whose first line is
+-- `-- no-transaction` outside a transaction (sqlx-core's no_tx path); inside
+-- the normal migration transaction PostgreSQL rejects CONCURRENTLY. Keep this
+-- file to one statement: a multi-statement simple query is an implicit
+-- transaction block and would also reject CONCURRENTLY.
+--
+-- This index is non-unique, so schema parity does not compare it; the parity
+-- test asserts it explicitly. If the build is interrupted it can leave an
+-- INVALID index behind; 20261106020100_verify_knowledge_chunks_dashboard_id_index.sql
+-- fails loudly in that case instead of letting IF NOT EXISTS mask it on the
+-- next startup. These versions are recorded, so a pre-KYO-961 binary fails at
+-- startup with `VersionMissing` once they apply.
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_knowledge_chunks_dashboard_id
+    ON knowledge_chunks (dashboard_id);

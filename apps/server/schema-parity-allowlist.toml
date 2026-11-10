@@ -56,21 +56,13 @@
 # ---------------------------------------------------------------------------
 # Postgres full-text search columns (tsvector) — no SQLite analogue.
 #
-# SQLite has no tsvector/GIN equivalent. Full-text search on self-hosted
-# SQLite is implemented per-table via FTS5 virtual tables (see
-# `agent_learnings_fts` below) kept in sync by triggers, or (for tables
-# without an FTS5 mirror) simply not offered on SQLite. These columns are
-# populated by Postgres triggers (agent_learnings_search_vector_update,
-# dashboards_search_vector_update, chat_messages_content_tsv_trigger) defined
+# SQLite has no tsvector/GIN equivalent, so these columns have no SQLite
+# counterpart. They are populated by Postgres triggers
+# (dashboards_search_vector_update, chat_messages_content_tsv_trigger) defined
 # in apps/server/migrations/20260215000000_baseline.sql and have no SQLite
 # counterpart by design — SQLite migrations explicitly document this via
 # inline "skip ... tsvector column" comments.
 # ---------------------------------------------------------------------------
-
-[[entry]]
-table = "agent_learnings"
-column = "search_vector"
-reason = "Postgres tsvector column populated by agent_learnings_search_vector_update() trigger. SQLite full-text search for agent_learnings is implemented separately via the agent_learnings_fts FTS5 virtual table (see below), not a mirrored column."
 
 [[entry]]
 table = "dashboards"
@@ -81,38 +73,6 @@ reason = "Postgres tsvector column populated by dashboards_search_vector_update(
 table = "chat_messages"
 column = "content_tsv"
 reason = "Postgres tsvector column populated by chat_messages_content_tsv_trigger() trigger. No SQLite analogue — apps/server/migrations-sqlite/00001_baseline.sql explicitly documents 'skip content_tsv tsvector column'."
-
-# ---------------------------------------------------------------------------
-# SQLite FTS5 virtual table replacing Postgres tsvector/GIN search for
-# agent_learnings — no Postgres analogue.
-# ---------------------------------------------------------------------------
-
-[[entry]]
-table = "agent_learnings_fts"
-reason = "SQLite FTS5 virtual table (apps/server/migrations-sqlite/00001_baseline.sql) that mirrors agent_learnings.insight/context for full-text search, replacing the Postgres tsvector + GIN index approach (agent_learnings.search_vector). No Postgres analogue by design."
-
-# FTS5 shadow tables. SQLite auto-creates these alongside the virtual table
-# above (external-content mode: content='agent_learnings') to store the
-# inverted index, per-row size accounting, and module config. They are an
-# implementation detail of agent_learnings_fts, not something anyone
-# declared explicitly, and have no Postgres analogue for the same reason
-# agent_learnings_fts itself doesn't.
-
-[[entry]]
-table = "agent_learnings_fts_data"
-reason = "FTS5 shadow table auto-created by SQLite for the agent_learnings_fts virtual table (stores the inverted index segments). No Postgres analogue."
-
-[[entry]]
-table = "agent_learnings_fts_idx"
-reason = "FTS5 shadow table auto-created by SQLite for the agent_learnings_fts virtual table (segment index). No Postgres analogue."
-
-[[entry]]
-table = "agent_learnings_fts_docsize"
-reason = "FTS5 shadow table auto-created by SQLite for the agent_learnings_fts virtual table (per-row size accounting, external-content mode). No Postgres analogue."
-
-[[entry]]
-table = "agent_learnings_fts_config"
-reason = "FTS5 shadow table auto-created by SQLite for the agent_learnings_fts virtual table (module configuration). No Postgres analogue."
 
 # ---------------------------------------------------------------------------
 # Postgres SERIAL/BIGSERIAL integer primary keys vs SQLite
@@ -154,11 +114,6 @@ column = "id"
 reason = "Postgres SERIAL vs SQLite INTEGER PRIMARY KEY AUTOINCREMENT — see the SERIAL/AUTOINCREMENT note above this section."
 
 [[entry]]
-table = "conversation_discussed"
-column = "id"
-reason = "Postgres SERIAL vs SQLite INTEGER PRIMARY KEY AUTOINCREMENT — see the SERIAL/AUTOINCREMENT note above this section."
-
-[[entry]]
 table = "conversation_read_status"
 column = "id"
 reason = "Postgres SERIAL vs SQLite INTEGER PRIMARY KEY AUTOINCREMENT — see the SERIAL/AUTOINCREMENT note above this section."
@@ -185,11 +140,6 @@ reason = "Postgres SERIAL vs SQLite INTEGER PRIMARY KEY AUTOINCREMENT — see th
 
 [[entry]]
 table = "email_subscribers"
-column = "id"
-reason = "Postgres SERIAL vs SQLite INTEGER PRIMARY KEY AUTOINCREMENT — see the SERIAL/AUTOINCREMENT note above this section."
-
-[[entry]]
-table = "learning_references"
 column = "id"
 reason = "Postgres SERIAL vs SQLite INTEGER PRIMARY KEY AUTOINCREMENT — see the SERIAL/AUTOINCREMENT note above this section."
 
@@ -252,11 +202,6 @@ reason = "Postgres SERIAL vs SQLite INTEGER PRIMARY KEY AUTOINCREMENT — see th
 table = "datasource_configs"
 column = "id"
 reason = "Postgres default `('ds-' || SUBSTRING(md5(random()::text), 1, 24))` is a redundant safety net — kyomi_core/kyomi_auth always generate and supply the id explicitly on insert (SQLite has no such default and works the same way). See apps/server/migrations/20260215000000_baseline.sql."
-
-[[entry]]
-table = "workspace_knowledge_chunks"
-column = "chunk_id"
-reason = "Postgres `chunk_id uuid DEFAULT gen_random_uuid()` was not touched by 20260315000000_uuid_columns_to_text.sql (that migration only covered agent_learnings, charts, collections, oauth_clients, analytics_sites). The column still classifies as Text on both backends (uuid folds into the Text class) and the application always supplies chunk_id explicitly on insert, so the Postgres default is redundant/dead code exactly like datasource_configs.id above — not a live divergence."
 
 [[entry]]
 table = "ownership_transfers"
