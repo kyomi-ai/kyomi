@@ -15,7 +15,7 @@
 //!    Concrete backends: [`anthropic`], [`openai`], [`gemini`].
 //! 3. **Tool Framework** ([`tools`]) -- `AgentTool` trait and `ToolRegistry`.
 //! 4. **Agent Loop** ([`agent`]) -- `CustomAgent` with iteration-based tool execution.
-//! 5. **Prompt** ([`prompt`]) -- System prompt building and learning injection.
+//! 5. **Prompt** ([`prompt`]) -- Static system prompt building.
 //! 6. **Adapter** ([`adapter`]) -- `ChatAgentAdapter` with DB persistence and context loading.
 //! 7. **Execution** ([`execution`]) -- `AgentExecutionService` entry point for chat.
 //! 8. **Watch Execution** ([`watch_execution`]) -- Watch-specific agent execution engine.

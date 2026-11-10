@@ -511,7 +511,27 @@ async fn oauth_consent_decision(
             .query_pairs_mut()
             .append_pair("state", original_state);
     }
-    Ok(Redirect::to(callback.as_str()).into_response())
+    Ok(consent_callback_response(&callback))
+}
+
+/// A redirect directly from a form POST is checked against the consent page's
+/// `form-action 'self'` policy, including the cross-origin OAuth callback.
+/// Finish the POST first, then navigate from a scriptless intermediate page.
+fn consent_callback_response(callback: &Url) -> Response {
+    let target = callback.as_str().to_owned();
+    let owner = Owner::new();
+    let body = owner.with(|| {
+        view! { <p>"Returning to the application. "<a href=target.clone()>"Continue"</a></p> }.to_html()
+    });
+    let mut response = Html(body).into_response();
+    response.headers_mut().insert(
+        "refresh",
+        HeaderValue::from_str(&format!("0; url={callback}"))
+            .expect("validated callback URL is a valid header value"),
+    );
+    response.headers_mut().insert("cache-control", HeaderValue::from_static("no-store"));
+    response.headers_mut().insert("referrer-policy", HeaderValue::from_static("no-referrer"));
+    response
 }
 
 fn internal_oauth_error(error: kyomi_core::Error) -> RouteError {

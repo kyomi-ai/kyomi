@@ -102,9 +102,8 @@ impl AnthropicClient {
     /// `user_names` map (user_id -> display name). **The caller is responsible for
     /// populating this map** by looking up user records from the database. The Python
     /// implementation does this lookup inline, but Rust separates the concern to avoid
-    /// passing `DbPool` into message conversion. In Phase 9A-5, the
-    /// `ChatAgentAdapter::load_context` method populates this map when loading
-    /// conversation history.
+    /// passing `DbPool` into message conversion. `execute_agent_chat` populates the
+    /// map from `users.name` before constructing the agent.
     pub fn convert_messages_to_anthropic(
         messages: &[Message],
         user_names: &HashMap<String, String>,
