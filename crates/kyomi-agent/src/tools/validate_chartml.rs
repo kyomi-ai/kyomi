@@ -21,10 +21,15 @@ impl AgentTool for ValidateChartmlTool {
     }
 
     fn description(&self) -> &str {
-        "Validate ChartML YAML blocks before including them in your response. \
-         Call this tool with the full chartml YAML content (without the ```chartml fences). \
-         The tool validates the complete authoritative JSON Schema and every SQL source \
-         against the datasource via dry-run."
+        "Validate ChartML YAML blocks before they are used anywhere. Every ChartML \
+         block must pass validation before it is included in a final answer or saved to \
+         a dashboard: send the YAML content without the ```chartml fences. Validation \
+         checks each component against the authoritative JSON Schema and dry-runs every \
+         SQL source against its datasource; an unavailable or skipped dry-run counts as \
+         a failure. On failure, fix the reported errors and validate again, and include \
+         only blocks that pass. Don't narrate validation — it should be invisible. For \
+         chart orientation, columns are categories (x-axis) and rows are values \
+         (y-axis) — never reverse them — and use the exact column names from the SELECT."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
