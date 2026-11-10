@@ -54,23 +54,6 @@ pub struct ColumnSearchResult {
     pub score: f64,
 }
 
-/// A learning hit from vector search.
-///
-/// Not a duplicate of `kyomi_auth::learning_service::LearningSearchResult`:
-/// that flattens a whole `LearningRecord` plus four hybrid-search scores;
-/// this is a minimal id/insight/title/score hit.
-#[derive(Debug, Clone)]
-pub struct LearningSearchResult {
-    pub learning_id: String,
-    pub insight: String,
-    pub title: Option<String>,
-    pub created_at: chrono::DateTime<chrono::Utc>,
-    pub score: f64,
-}
-
-/// A metric hit from vector search (same shape as learning but filtered differently).
-pub type MetricSearchResult = LearningSearchResult;
-
 /// A query history hit from vector search.
 #[derive(Debug, Clone)]
 pub struct QueryHistorySearchResult {
@@ -111,20 +94,6 @@ pub trait VectorSearch: Send + Sync {
         query_embedding: &[f32],
         limit: usize,
     ) -> kyomi_core::Result<Vec<ColumnSearchResult>>;
-
-    async fn search_learnings(
-        &self,
-        workspace_id: &str,
-        query_embedding: &[f32],
-        limit: usize,
-    ) -> kyomi_core::Result<Vec<LearningSearchResult>>;
-
-    async fn search_metrics(
-        &self,
-        workspace_id: &str,
-        query_embedding: &[f32],
-        limit: usize,
-    ) -> kyomi_core::Result<Vec<MetricSearchResult>>;
 
     async fn search_query_history(
         &self,
@@ -176,16 +145,6 @@ struct PgColumnSearchRow {
     project_id: String,
     dataset_id: String,
     table_id: String,
-    score: f64,
-}
-
-/// Row type for learning/metric vector searches (pgvector).
-#[derive(sqlx::FromRow)]
-struct PgLearningSearchRow {
-    learning_id: String,
-    insight: String,
-    title: Option<String>,
-    created_at: chrono::DateTime<chrono::Utc>,
     score: f64,
 }
 
@@ -321,88 +280,6 @@ impl VectorSearch for PgVectorSearch {
         Ok(results)
     }
 
-    async fn search_learnings(
-        &self,
-        workspace_id: &str,
-        query_embedding: &[f32],
-        limit: usize,
-    ) -> kyomi_core::Result<Vec<LearningSearchResult>> {
-        let query_vector = pgvector::Vector::from(query_embedding.to_vec());
-
-        let rows = sqlx::query_as::<_, PgLearningSearchRow>(
-            "SELECT learning_id::text, insight, NULL::text AS title, created_at, \
-                    1 - (embedding <=> $1::vector) AS score \
-             FROM agent_learnings \
-             WHERE workspace_id = $2 AND embedding IS NOT NULL \
-               AND learning_type != 'metric' AND enabled = true AND superseded_by IS NULL \
-             ORDER BY embedding <=> $1::vector \
-             LIMIT $3",
-        )
-        .bind(&query_vector)
-        .bind(workspace_id)
-        .bind(limit as i64)
-        .fetch_all(&self.pool)
-        .await;
-
-        match rows {
-            Ok(rows) => Ok(rows
-                .into_iter()
-                .map(|r| LearningSearchResult {
-                    learning_id: r.learning_id,
-                    insight: r.insight,
-                    title: r.title,
-                    created_at: r.created_at,
-                    score: r.score,
-                })
-                .collect()),
-            Err(e) => {
-                tracing::error!(error = %e, "Vector search: learning query failed");
-                Ok(vec![])
-            }
-        }
-    }
-
-    async fn search_metrics(
-        &self,
-        workspace_id: &str,
-        query_embedding: &[f32],
-        limit: usize,
-    ) -> kyomi_core::Result<Vec<MetricSearchResult>> {
-        let query_vector = pgvector::Vector::from(query_embedding.to_vec());
-
-        let rows = sqlx::query_as::<_, PgLearningSearchRow>(
-            "SELECT learning_id::text, insight, NULL::text AS title, created_at, \
-                    1 - (embedding <=> $1::vector) AS score \
-             FROM agent_learnings \
-             WHERE workspace_id = $2 AND embedding IS NOT NULL \
-               AND learning_type = 'metric' AND enabled = true AND superseded_by IS NULL \
-             ORDER BY embedding <=> $1::vector \
-             LIMIT $3",
-        )
-        .bind(&query_vector)
-        .bind(workspace_id)
-        .bind(limit as i64)
-        .fetch_all(&self.pool)
-        .await;
-
-        match rows {
-            Ok(rows) => Ok(rows
-                .into_iter()
-                .map(|r| MetricSearchResult {
-                    learning_id: r.learning_id,
-                    insight: r.insight,
-                    title: r.title,
-                    created_at: r.created_at,
-                    score: r.score,
-                })
-                .collect()),
-            Err(e) => {
-                tracing::error!(error = %e, "Vector search: metric query failed");
-                Ok(vec![])
-            }
-        }
-    }
-
     async fn search_query_history(
         &self,
         _workspace_id: &str,
@@ -491,15 +368,6 @@ struct SqliteColumnRow {
     table_id: String,
     name_embedding: Option<Vec<u8>>,
     desc_embedding: Option<Vec<u8>>,
-}
-
-#[derive(sqlx::FromRow)]
-struct SqliteLearningRow {
-    learning_id: String,
-    insight: String,
-    title: Option<String>,
-    created_at: String,
-    embedding: Option<Vec<u8>>,
 }
 
 /// Score + index pair for sorting.
@@ -636,62 +504,6 @@ impl VectorSearch for InMemoryVectorSearch {
             .collect())
     }
 
-    async fn search_learnings(
-        &self,
-        workspace_id: &str,
-        query_embedding: &[f32],
-        limit: usize,
-    ) -> kyomi_core::Result<Vec<LearningSearchResult>> {
-        let bool_true = kyomi_core::sql_compat::bool_true(false);
-        let sql = format!(
-            "SELECT learning_id, insight, NULL AS title, created_at, embedding \
-             FROM agent_learnings \
-             WHERE workspace_id = $1 AND embedding IS NOT NULL \
-               AND learning_type != 'metric' AND enabled = {bool_true} AND superseded_by IS NULL"
-        );
-        let rows = match sqlx::query_as::<_, SqliteLearningRow>(&sql)
-            .bind(workspace_id)
-            .fetch_all(&self.pool)
-            .await
-        {
-            Ok(rows) => rows,
-            Err(e) => {
-                tracing::error!(error = %e, "Vector search: SQLite learning query failed");
-                return Ok(vec![]);
-            }
-        };
-
-        search_learning_rows_in_memory(rows, query_embedding, limit)
-    }
-
-    async fn search_metrics(
-        &self,
-        workspace_id: &str,
-        query_embedding: &[f32],
-        limit: usize,
-    ) -> kyomi_core::Result<Vec<MetricSearchResult>> {
-        let bool_true = kyomi_core::sql_compat::bool_true(false);
-        let sql = format!(
-            "SELECT learning_id, insight, NULL AS title, created_at, embedding \
-             FROM agent_learnings \
-             WHERE workspace_id = $1 AND embedding IS NOT NULL \
-               AND learning_type = 'metric' AND enabled = {bool_true} AND superseded_by IS NULL"
-        );
-        let rows = match sqlx::query_as::<_, SqliteLearningRow>(&sql)
-            .bind(workspace_id)
-            .fetch_all(&self.pool)
-            .await
-        {
-            Ok(rows) => rows,
-            Err(e) => {
-                tracing::error!(error = %e, "Vector search: SQLite metric query failed");
-                return Ok(vec![]);
-            }
-        };
-
-        search_learning_rows_in_memory(rows, query_embedding, limit)
-    }
-
     async fn search_query_history(
         &self,
         _workspace_id: &str,
@@ -712,47 +524,6 @@ impl VectorSearch for InMemoryVectorSearch {
         // Dashboard search not yet implemented for SQLite
         Ok(vec![])
     }
-}
-
-/// Shared logic for learning/metric in-memory search over SQLite rows.
-fn search_learning_rows_in_memory(
-    rows: Vec<SqliteLearningRow>,
-    query_embedding: &[f32],
-    limit: usize,
-) -> kyomi_core::Result<Vec<LearningSearchResult>> {
-    let mut scored: Vec<ScoredIndex> = Vec::with_capacity(rows.len());
-    for (i, row) in rows.iter().enumerate() {
-        if let Some(ref emb_bytes) = row.embedding {
-            let emb = kyomi_core::embedding_compat::bytes_to_embedding(emb_bytes);
-            let score = cosine_similarity(&emb, query_embedding);
-            scored.push(ScoredIndex { index: i, score });
-        }
-    }
-
-    scored.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
-    scored.truncate(limit);
-
-    Ok(scored
-        .into_iter()
-        .map(|si| {
-            let row = &rows[si.index];
-            let created_at = chrono::DateTime::parse_from_rfc3339(&row.created_at)
-                .map(|dt| dt.with_timezone(&chrono::Utc))
-                .unwrap_or_else(|_| {
-                    // SQLite may store as "YYYY-MM-DD HH:MM:SS" without timezone
-                    chrono::NaiveDateTime::parse_from_str(&row.created_at, "%Y-%m-%d %H:%M:%S")
-                        .map(|ndt| ndt.and_utc())
-                        .unwrap_or_default()
-                });
-            LearningSearchResult {
-                learning_id: row.learning_id.clone(),
-                insight: row.insight.clone(),
-                title: row.title.clone(),
-                created_at,
-                score: si.score,
-            }
-        })
-        .collect())
 }
 
 // ---------------------------------------------------------------------------

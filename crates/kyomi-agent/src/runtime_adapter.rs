@@ -4,11 +4,21 @@ use crate::adapter::DurableRun;
 use crate::thinking::{AgentThinkingEvent, AgentThinkingTracker, ThinkingEventType};
 use agent_runtime::{
     AppendCommand, DomainOutcome, EventSink, ExecutionError, Payload, PublicPayload, SinkReceipt,
-    TransportOutcome,
+    TransportOutcome, UNKNOWN_GUIDANCE,
 };
 use kyomi_auth::conversation_events::{ConversationStore, EventStoreError};
 use std::collections::HashMap;
 use std::sync::Arc;
+
+/// Parse the tool's raw JSON payload for the UI schema. Unknown outcomes carry
+/// verify-before-retry guidance ahead of that payload; strip it first.
+fn tool_output_json(outcome_text: &str) -> serde_json::Value {
+    let raw = outcome_text
+        .strip_prefix(UNKNOWN_GUIDANCE)
+        .map(str::trim_start)
+        .unwrap_or(outcome_text);
+    serde_json::from_str(raw).unwrap_or_else(|_| serde_json::json!({}))
+}
 
 pub(crate) struct RuntimeSink {
     pub db: kyomi_core::DbPool,
@@ -78,10 +88,7 @@ impl RuntimeSink {
                 // Completion is a standalone persisted event: keep the original
                 // arguments alongside the result for tool renderers and replay.
                 let mut schema = crate::thinking::format_tool_schema(&name, &input, true);
-                let output = serde_json::from_str::<serde_json::Value>(
-                    command.detail.as_deref().unwrap_or(&text.preview),
-                )
-                .unwrap_or_else(|_| serde_json::json!({}));
+                let output = tool_output_json(command.detail.as_deref().unwrap_or(&text.preview));
                 if let (Some(schema), Some(output)) = (
                     schema.as_object_mut(),
                     crate::thinking::format_tool_schema(&name, &output, false).as_object(),
@@ -226,6 +233,20 @@ mod tests {
             payload: Payload::Public(payload),
             detail: None,
         }
+    }
+
+    #[test]
+    fn unknown_guidance_does_not_hide_the_raw_tool_payload_from_schema_parsing() {
+        let raw = r#"{"error":"timeout","datasource":"pg"}"#;
+        let guided = format!("{UNKNOWN_GUIDANCE}\n\n{raw}");
+        assert_eq!(
+            tool_output_json(&guided),
+            json!({"error": "timeout", "datasource": "pg"})
+        );
+        assert_eq!(
+            tool_output_json(raw),
+            json!({"error": "timeout", "datasource": "pg"})
+        );
     }
 
     #[tokio::test]

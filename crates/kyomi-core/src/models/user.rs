@@ -63,9 +63,6 @@ pub struct User {
     /// Last workspace accessed (for workspace selection on login).
     pub last_workspace_id: Option<String>,
 
-    /// User's personal knowledge document (markdown).
-    pub knowledge: Option<String>,
-
     /// BigQuery project to bill queries to.
     pub billing_project: Option<String>,
 

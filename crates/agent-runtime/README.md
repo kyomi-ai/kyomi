@@ -96,8 +96,10 @@ The provider port supplies complete responses only; it exposes no token API.
 Otherwise it awaits intent and start commits before exactly one tool invocation, then
 awaits the typed transport/domain outcome. A transport-completed result can have a
 rejected domain outcome. Repeated names have distinct call IDs. A duplicate start
-without a result is uncertain and refuses execution. Retrying result persistence must
-retry the same command, never invoke the action again. `SinkReceipt` distinguishes
+without a result returns an explicit Unknown tool outcome to the model with
+verify-before-retry guidance and refuses execution, so the turn can continue without
+a second invocation. Retrying result persistence must retry the same command, never
+invoke the action again. `SinkReceipt` distinguishes
 committed history from notification failure without undoing the commit.
 
 This contract cannot promise exactly-once external effects. An adapter that owns a

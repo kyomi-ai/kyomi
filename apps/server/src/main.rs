@@ -434,7 +434,7 @@ async fn serve() {
             shutdown_token.child_token(),
             config_arc.clone(),
         ));
-        let (_refresh_handle, _cleanup_handle, _maintenance_handle, _query_history_cleanup_handle, _public_dataset_handle) = catalog_scheduler.start();
+        let (_refresh_handle, _cleanup_handle, _query_history_cleanup_handle, _public_dataset_handle) = catalog_scheduler.start();
         tracing::info!("Catalog refresh scheduler started");
 
         // Watch scheduler — polls for due watches every 30s
