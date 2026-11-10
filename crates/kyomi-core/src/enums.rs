@@ -2,9 +2,7 @@
 
 //! Type-safe enums for all enum-like database columns.
 //!
-//! PostgreSQL has one true enum type (`learning_scope`), which uses
-//! `#[sqlx(type_name = "learning_scope")]`. All other "enum" columns are
-//! VARCHAR/TEXT storing snake_case strings.
+//! All enum columns are VARCHAR/TEXT storing snake_case strings.
 //!
 //! VARCHAR enums use manual `sqlx::Type + Encode + Decode` implementations
 //! (via `impl_sqlx_varchar_enum!`) that delegate to `String`, which is
@@ -87,82 +85,6 @@ macro_rules! impl_sqlx_varchar_enum {
             }
         }
     };
-}
-
-// ─── Learning scope (true PG enum) ──────────────────────────────────────────
-
-/// Visibility scope for agent learnings.
-///
-/// This is the **only** PostgreSQL enum type — stored as the custom type
-/// `learning_scope` in the DB. All other enums in this file are VARCHAR.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, sqlx::Type, Serialize, Deserialize)]
-#[sqlx(type_name = "learning_scope", rename_all = "lowercase")]
-#[serde(rename_all = "lowercase")]
-pub enum LearningScope {
-    Workspace,
-    User,
-}
-
-impl fmt::Display for LearningScope {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Workspace => write!(f, "workspace"),
-            Self::User => write!(f, "user"),
-        }
-    }
-}
-
-impl AsRef<str> for LearningScope {
-    fn as_ref(&self) -> &str {
-        match self {
-            Self::Workspace => "workspace",
-            Self::User => "user",
-        }
-    }
-}
-
-// ─── Learning type (VARCHAR) ────────────────────────────────────────────────
-
-/// Classification type for agent learnings.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum LearningType {
-    Navigation,
-    EventContext,
-    Preference,
-    Metric,
-}
-
-impl_sqlx_varchar_enum!(LearningType);
-
-impl fmt::Display for LearningType {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_ref())
-    }
-}
-
-impl AsRef<str> for LearningType {
-    fn as_ref(&self) -> &str {
-        match self {
-            Self::Navigation => "navigation",
-            Self::EventContext => "event_context",
-            Self::Preference => "preference",
-            Self::Metric => "metric",
-        }
-    }
-}
-
-impl FromStr for LearningType {
-    type Err = String;
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "navigation" => Ok(Self::Navigation),
-            "event_context" => Ok(Self::EventContext),
-            "preference" => Ok(Self::Preference),
-            "metric" => Ok(Self::Metric),
-            _ => Err(format!("unknown LearningType: {s}")),
-        }
-    }
 }
 
 // ─── Subscription tier (VARCHAR) ────────────────────────────────────────────
@@ -826,30 +748,6 @@ impl FromStr for ChatMessageRole {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_learning_scope_serde_roundtrip() {
-        let scope = LearningScope::Workspace;
-        let json = serde_json::to_string(&scope).unwrap();
-        assert_eq!(json, "\"workspace\"");
-        let back: LearningScope = serde_json::from_str(&json).unwrap();
-        assert_eq!(back, scope);
-
-        let scope = LearningScope::User;
-        let json = serde_json::to_string(&scope).unwrap();
-        assert_eq!(json, "\"user\"");
-        let back: LearningScope = serde_json::from_str(&json).unwrap();
-        assert_eq!(back, scope);
-    }
-
-    #[test]
-    fn test_learning_type_serde_roundtrip() {
-        let lt = LearningType::EventContext;
-        let json = serde_json::to_string(&lt).unwrap();
-        assert_eq!(json, "\"event_context\"");
-        let back: LearningType = serde_json::from_str(&json).unwrap();
-        assert_eq!(back, lt);
-    }
 
     #[test]
     fn test_subscription_tier_display() {

@@ -195,8 +195,6 @@ struct WorkspaceMembershipRow {
     stripe_customer_id: Option<String>,
     stripe_subscription_id: Option<String>,
     settings: Option<serde_json::Value>,
-    business_knowledge: Option<String>,
-    knowledge_updated_at: Option<DateTime<Utc>>,
     last_catalog_refresh: Option<DateTime<Utc>>,
     #[sqlx(default)]
     catalog_onboarding_completed: bool,
@@ -236,8 +234,6 @@ impl WorkspaceMembershipRow {
             stripe_customer_id: self.stripe_customer_id,
             stripe_subscription_id: self.stripe_subscription_id,
             settings: self.settings,
-            business_knowledge: self.business_knowledge,
-            knowledge_updated_at: self.knowledge_updated_at,
             last_catalog_refresh: self.last_catalog_refresh,
             catalog_onboarding_completed: self.catalog_onboarding_completed,
             catalog_indexed_projects: self.catalog_indexed_projects,
@@ -284,7 +280,7 @@ pub async fn get_user_workspaces(
            w.subscription_period_start, w.subscription_period_end, w.trial_ends_at, \
            w.ai_credits_used_usd, w.ai_bundle_balance_usd, w.analytics_bundle_events, \
            w.user_limit, w.stripe_customer_id, w.stripe_subscription_id, w.settings, \
-           w.business_knowledge, w.knowledge_updated_at, w.last_catalog_refresh, \
+           w.last_catalog_refresh, \
            w.catalog_onboarding_completed, \
            w.catalog_indexed_projects, w.created_at, w.updated_at, \
            wu.id AS wu_id, wu.workspace_id AS wu_workspace_id, wu.user_id AS wu_user_id, \
@@ -306,7 +302,6 @@ struct WorkspaceSnapshotRow {
     workspace_id: String,
     name: Option<String>,
     settings: Option<String>,
-    business_knowledge: Option<String>,
     updated_at: String,
 }
 
@@ -317,8 +312,8 @@ async fn fetch_workspace_settings_snapshot(
     get_workspace_settings_for_sync(pool, workspace_id).await
 }
 
-/// Return a workspace settings snapshot (name, settings, business_knowledge,
-/// updated_at) as a JSON value for the sync bootstrap protocol.
+/// Return a workspace settings snapshot (name, settings, updated_at) as a JSON
+/// value for the sync bootstrap protocol.
 ///
 /// Returns `None` if the workspace does not exist or the query fails.
 pub async fn get_workspace_settings_for_sync(
@@ -331,7 +326,6 @@ pub async fn get_workspace_settings_for_sync(
         r#"SELECT workspace_id,
                   name,
                   CAST(settings AS TEXT) AS settings,
-                  business_knowledge,
                   CAST(updated_at AS TEXT) AS updated_at
            FROM workspaces WHERE workspace_id = $1"#,
         workspace_id
@@ -348,7 +342,6 @@ pub async fn get_workspace_settings_for_sync(
         "workspace_id": row.workspace_id,
         "name": row.name,
         "settings": settings_json,
-        "business_knowledge": row.business_knowledge,
         "updated_at": row.updated_at,
     }))
 }
@@ -494,47 +487,6 @@ pub async fn update_catalog_onboarding(
         )
     };
     let result = kyomi_core::db_execute!(pool, &sql, completed, &projects_str, workspace_id)?;
-    Ok(result.rows_affected() > 0)
-}
-
-/// Update workspace business knowledge and its timestamp.
-pub async fn update_workspace_knowledge(
-    pool: &DbPool,
-    workspace_id: &str,
-    knowledge: &str,
-) -> kyomi_core::Result<bool> {
-    let is_pg = pool.is_postgres();
-    let now_expr = sql_compat::now(is_pg);
-    let sql = format!(
-        "UPDATE workspaces SET \
-         business_knowledge = $1, \
-         knowledge_updated_at = {now_expr}, \
-         updated_at = {now_expr} \
-         WHERE workspace_id = $2"
-    );
-    let result = kyomi_core::db_execute!(pool, &sql, knowledge, workspace_id)?;
-
-    // Sync log — best-effort: log a warning and continue on failure.
-    if result.rows_affected() > 0 {
-        let snapshot = fetch_workspace_settings_snapshot(pool, workspace_id).await;
-        if let Err(e) = sync_log_service::write_sync_entry(
-            pool,
-            sync_log_service::SyncEntryParams {
-                entity_type: entity_types::WORKSPACE_SETTINGS,
-                entity_id: workspace_id,
-                workspace_id,
-                action: SyncActionType::Update,
-                data: snapshot,
-                owner_user_id: None,
-                is_workspace_visible: true,
-            },
-        )
-        .await
-        {
-            tracing::warn!(error = %e, workspace_id = %workspace_id, "Failed to write sync log entry");
-        }
-    }
-
     Ok(result.rows_affected() > 0)
 }
 

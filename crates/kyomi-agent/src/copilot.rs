@@ -74,19 +74,11 @@ pub fn dashboard_read_only_tools() -> Vec<String> {
 // ─── System prompts ─────────────────────────────────────────────────────────
 
 /// Build the copilot system prompt for the given context type.
-pub fn build_copilot_system_prompt(
-    context_type: &str,
-    user_timezone: &str,
-    user_name: Option<&str>,
-) -> String {
-    let mut user_context = String::new();
-    if let Some(name) = user_name {
-        user_context.push_str(&format!("**User Name**: {name}\n"));
-    }
-    user_context.push_str(&format!("**User's Timezone**: {user_timezone}\n"));
-    user_context.push_str(
-        "**Current Time Context**: Each user message includes `current_time_user_tz` \
-         (user's local time with timezone offset) for relative time queries.\n",
+pub fn build_copilot_system_prompt(context_type: &str, user_timezone: &str) -> String {
+    let user_context = format!(
+        "**User's Timezone**: {user_timezone}\n\
+         **Current Time Context**: Each user message includes `current_time_user_tz` \
+         (user's local time with timezone offset) for relative time queries.\n"
     );
 
     match context_type {
@@ -422,8 +414,8 @@ mod tests {
 
     #[test]
     fn dashboard_and_knowledge_prompts_no_longer_mention_update_dashboard() {
-        let dashboard_prompt = build_copilot_system_prompt("dashboard_copilot", "UTC", None);
-        let knowledge_prompt = build_copilot_system_prompt("knowledge_copilot", "UTC", None);
+        let dashboard_prompt = build_copilot_system_prompt("dashboard_copilot", "UTC");
+        let knowledge_prompt = build_copilot_system_prompt("knowledge_copilot", "UTC");
 
         assert!(!dashboard_prompt.contains("update_dashboard"), "{dashboard_prompt}");
         assert!(!knowledge_prompt.contains("update_dashboard"), "{knowledge_prompt}");
@@ -437,8 +429,8 @@ mod tests {
     fn dashboard_and_knowledge_prompts_say_edits_are_saved() {
         // The prompts must no longer frame the change as a draft the user
         // applies — the write is real and already saved (binding decision 1).
-        let dashboard_prompt = build_copilot_system_prompt("dashboard_copilot", "UTC", None);
-        let knowledge_prompt = build_copilot_system_prompt("knowledge_copilot", "UTC", None);
+        let dashboard_prompt = build_copilot_system_prompt("dashboard_copilot", "UTC");
+        let knowledge_prompt = build_copilot_system_prompt("knowledge_copilot", "UTC");
 
         assert!(dashboard_prompt.contains("saved"), "{dashboard_prompt}");
         assert!(dashboard_prompt.contains("History"), "{dashboard_prompt}");

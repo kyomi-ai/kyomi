@@ -2780,11 +2780,11 @@ visualize:
     // exercises the `Vec<u8>` BLOB bind arm for `knowledge_chunks.embedding`.
     // `rechunk_document`'s Postgres arm binds `pgvector::Vector::from(embedding.clone())`
     // directly (never routing through `embedding_compat::bytes_to_pg_vector`
-    // at all), a structurally different bind site from `learning_service.rs`'s
-    // helper-mediated one — and `Vector` only implements sqlx's `Encode` for
-    // Postgres, so a wrong bind here type-checks, does not error at query
-    // time, and silently corrupts the stored vector. This test writes
-    // through the real `rechunk_document` production function against a
+    // at all), a structurally different bind site from the helper-mediated
+    // `bytes_to_pg_vector` shape used elsewhere — and `Vector` only implements
+    // sqlx's `Encode` for Postgres, so a wrong bind here type-checks, does not
+    // error at query time, and silently corrupts the stored vector. This test
+    // writes through the real `rechunk_document` production function against a
     // real Postgres+pgvector database and asserts cosine self-similarity
     // between the stored embedding and the same embedding recomputed from
     // the same input text, with a non-vacuity control asserting an
@@ -2912,16 +2912,14 @@ visualize:
     // ─── store_dashboard_embedding Postgres coverage (KYO-371) ─────────────
     //
     // `store_dashboard_embedding` (the extracted, awaitable core of
-    // `spawn_embedding_generation`) is the fourth production `pgvector::Vector`
-    // bind site and the only one KYO-334 left uncovered — see that function's
-    // doc comment. It binds `bytes_to_pg_vector(&embedding_bytes)`, the same
-    // helper-mediated bind shape `learning_service.rs` uses, making this the
-    // third production site of that shape (after `save_learning` and
-    // `update_learning` in `learning_service.rs`) — distinct only from
-    // `rechunk_document`'s direct `pgvector::Vector::from(embedding.clone())`
-    // above — so a wrong bind here type-checks, does not error at query time,
-    // and silently degrades dashboard semantic search. This test writes through
-    // the real `store_dashboard_embedding` production function against a real
+    // `spawn_embedding_generation`) is the remaining production helper-mediated
+    // `pgvector::Vector` bind site — see that function's doc comment. It binds
+    // `bytes_to_pg_vector(&embedding_bytes)`, the helper-mediated shape,
+    // distinct from `rechunk_document`'s direct
+    // `pgvector::Vector::from(embedding.clone())` above — so a wrong bind here
+    // type-checks, does not error at query time, and silently degrades dashboard
+    // semantic search. This test writes through the real
+    // `store_dashboard_embedding` production function against a real
     // Postgres+pgvector database and asserts cosine self-similarity between the
     // stored embedding and the same embedding recomputed from the same input
     // text, with a non-vacuity control asserting an unrelated embedding scores
