@@ -6,7 +6,6 @@
 //! and supporting models (invitations, transfers, API tokens).
 //! Field names and types match the PostgreSQL columns exactly.
 
-pub mod agent_learning;
 pub mod api_token;
 pub mod api_usage_log;
 pub mod chartml_validation_log;
@@ -35,7 +34,6 @@ pub mod watch;
 pub mod workspace;
 pub mod workspace_invitation;
 
-pub use agent_learning::AgentLearning;
 pub use api_token::ApiToken;
 pub use api_usage_log::ApiUsageLog;
 pub use chartml_validation_log::ChartMLValidationLog;
@@ -60,3 +58,5 @@ pub use verification_token::VerificationToken;
 pub use watch::{Watch, WatchExecution};
 pub use workspace::{Workspace, WorkspaceUser};
 pub use workspace_invitation::WorkspaceInvitation;
+
+pub mod personal_mcp;

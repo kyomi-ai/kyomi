@@ -151,6 +151,10 @@ impl SmtpSettings {
 /// Mirrors the Python `KyomiAPIConfig` — loaded from environment variables.
 #[derive(Debug, Clone)]
 pub struct Config {
+    /// Kill switch for all personal external MCP network discovery and execution.
+    /// Disabled until the integrated acceptance gate is complete.
+    pub personal_mcp_enabled: bool,
+
     /// PostgreSQL connection string
     pub database_url: String,
 
@@ -460,6 +464,7 @@ impl Config {
             edition: mode.edition(),
             mode,
             smtp_configured: smtp.can_send(),
+            personal_mcp_enabled: env::var("PERSONAL_MCP_ENABLED").as_deref() == Ok("true"),
             passkeys_enabled: env::var("PASSKEYS_ENABLED")
                 .unwrap_or_else(|_| "true".into())
                 .parse()
@@ -559,6 +564,7 @@ impl Config {
             edition: SelfHostedEdition::Community,
             mode: KyomiMode::Saas,
             smtp_configured: false,
+            personal_mcp_enabled: false,
             passkeys_enabled: true,
             password_auth_enabled: true,
             google_oauth_client_id: Some("test-google-client-id".into()),

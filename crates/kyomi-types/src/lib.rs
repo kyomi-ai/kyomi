@@ -131,3 +131,5 @@ pub struct CreatedBy {
     #[serde(default)]
     pub email: Option<String>,
 }
+
+pub mod personal_mcp;

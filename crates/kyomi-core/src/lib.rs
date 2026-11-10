@@ -41,9 +41,8 @@ pub use config::{Config, resolve_process_instance};
 pub use db::DbPool;
 pub use enums::{
     CatalogRefreshStatus, ChatMessageRole, DatasourceType, FeedbackStatus, FeedbackType,
-    InvitationStatus, LearningScope, LearningType, SessionType, SubscriptionStatus,
-    SubscriptionTier, TransferStatus, WatchExecutionStatus, WatchMode, WorkspaceRole,
-    WorkspaceStatus,
+    InvitationStatus, SessionType, SubscriptionStatus, SubscriptionTier, TransferStatus,
+    WatchExecutionStatus, WatchMode, WorkspaceRole, WorkspaceStatus,
 };
 pub use error::{Error, Result, PAYMENT_REQUIRED_CODE};
 pub use error_sanitizer::sanitize_error;

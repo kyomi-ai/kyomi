@@ -439,6 +439,13 @@ jobs:
           RUSTC_WRAPPER: ${{ env.SCCACHE_AVAILABLE == 'true' && 'sccache' || '' }}
         run: cargo clippy --locked -p kyomi-ui --target wasm32-unknown-unknown --features hydrate -- -D warnings
 
+      # Isolated deterministic outbound transport fixtures run even if an unrelated
+      # workspace test later fails. No external credentials or live MCP server.
+      - name: cargo test (outbound MCP conformance and safe egress)
+        env:
+          RUSTC_WRAPPER: ${{ env.SCCACHE_AVAILABLE == 'true' && 'sccache' || '' }}
+        run: cargo test --locked --no-fail-fast -p kyomi-mcp-client
+
       - name: cargo test (unit + integration tests)
         env:
           RUSTC_WRAPPER: ${{ env.SCCACHE_AVAILABLE == 'true' && 'sccache' || '' }}
