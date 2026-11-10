@@ -25,6 +25,13 @@ impl AgentTool for ForecastDataTool {
         super::query_utils::sql_result_domain_outcome(text)
     }
 
+    /// The model-supplied query executes before column/value validation, and
+    /// `execute_query` is not restricted to reads. A post-query `BadRequest`
+    /// may therefore follow a committed effect; keep it Unknown.
+    fn bad_request_is_pre_effect(&self) -> bool {
+        false
+    }
+
     fn name(&self) -> &str {
         "forecast_data"
     }
@@ -657,6 +664,14 @@ mod tests {
     #[test]
     fn forecast_data_tool_not_copilot_only() {
         assert!(!ForecastDataTool.is_copilot_only());
+    }
+
+    #[test]
+    fn forecast_bad_request_is_not_pre_effect() {
+        assert!(
+            !ForecastDataTool.bad_request_is_pre_effect(),
+            "the model-supplied query runs before column/value validation"
+        );
     }
 
     #[test]
