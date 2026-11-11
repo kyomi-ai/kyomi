@@ -73,7 +73,7 @@ Real precedent:
   clean with zero reviewer findings and went `CONFLICTING` anyway when #481
   merged four minutes earlier — `/merge-sweeper` routed it back, costing a full
   extra agent cycle for a change nothing was actually wrong with.
-- **2026-09-01 review log, line 251.** PR #448 (KYO-573) was signed clean in its
+- **2026-09-01 review log (private/local; not tracked in this repository), line 251.** PR #448 (KYO-573) was signed clean in its
   third review cycle, then went `CONFLICTING` because PR #445 (KYO-572, `749eaa62`)
   merged first — both appended tests at the same anchor, the end of `mod tests` in
   `crates/kyomi-agent/src/adapter.rs`, and git interleaved the two independent

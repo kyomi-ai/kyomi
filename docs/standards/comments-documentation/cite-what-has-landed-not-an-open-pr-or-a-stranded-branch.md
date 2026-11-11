@@ -8,6 +8,8 @@ page, from a citation written against `origin/main` — and it is not the same t
 branch can be retitled, rebased, restranded or abandoned between the moment you cite it and
 the moment anyone reads it, and the reader who follows the pointer finds nothing.
 
+(private/local review log; not tracked in this repository)
+
 Nothing mechanical catches this. No CI job or pre-commit hook in this repo checks that a
 relative markdown link resolves (confirmed during the KYO-534 cycle-2 review,
 `2026-08-31` `03:52`), so a link into a file that exists only on someone else's branch is
@@ -38,7 +40,7 @@ git branch -a --list '*<ticket>*'                                # or is it stra
 
 ```markdown
 <!-- WRONG — presents an open PR and an abandoned branch as settled precedent. -->
-See a-check-in-one-arm-does-not-guard-the-others.md (landing via PR #455) for the
+See the guard-coverage rule (landing via PR #455) for the
 worked example, and a-failure-path-must-emit-what-its-siblings-emit.md on
 origin/stranded/jason/kyo-463-spec-green6 for a second instance.
 
@@ -49,10 +51,10 @@ remedy — `git merge-tree --write-tree --name-only` — is narrower than this r
 
 Two blocking findings in one review, plus the accepted form from the week before:
 
-- **KYO-463** (`2026-09-03`, `12:35`) — two of the four 🟡 that blocked signing
+- (private/local review log; not tracked in this repository) **KYO-463** (`2026-09-03`, `12:35`) — two of the four 🟡 that blocked signing
   `quote-a-wrong-block-from-the-pre-fix-commit.md` were this exact shape. The flagship
-  citation pointed at `a-check-in-one-arm-does-not-guard-the-others.md` "(landing via
-  PR #455)": `gh pr view 455` showed OPEN, the file was not on `origin/main`, and the live
+  citation pointed at the rule then named "a check in one arm does not guard the
+  others", with the marker "(landing via PR #455)": `gh pr view 455` showed OPEN, the file was not on `origin/main`, and the live
   branch had already retitled it — so the quoted title was stale before the citing document
   merged. (The rule did eventually land, under the different slug
   [a-guard-in-one-branch-does-not-cover-the-others.md](../error-handling/a-guard-in-one-branch-does-not-cover-the-others.md),
@@ -61,7 +63,7 @@ Two blocking findings in one review, plus the accepted form from the week before
   four separate stranded branches for that one standard. Cycle 2 (`13:40`) kept the open-PR
   citation with its state and drift narrated, and deleted the stranded-branch citation
   outright.
-- **KYO-534 cycle 2** (`2026-08-31`, `03:52`) — the accepted form, signed. The nearest
+- (private/local review log; not tracked in this repository) **KYO-534 cycle 2** (`2026-08-31`, `03:52`) — the accepted form, signed. The nearest
   sibling existed only on unmerged PR #439, and the file cited it with an explicit
   "(in flight on PR #439)" marker. The reviewer confirmed the PR state, read the file at
   commit `e1611128` rather than at the branch tip, and recorded that the link "genuinely
@@ -72,7 +74,7 @@ Two blocking findings in one review, plus the accepted form from the week before
   state marker is a debt with a shelf life, correct when written and wrong the moment the
   PR merges; prefer the citation that never needs revisiting, and reach for the marker only
   when the sibling genuinely has not landed yet.
-- **KYO-607** (`2026-09-03`) — the same discipline across repos: the standards file staged
+- (private/local review log; not tracked in this repository) **KYO-607** (`2026-09-03`) — the same discipline across repos: the standards file staged
   alongside the script cited a fix that is not on `kyomi-private@main` but on the unmerged
   `origin/jason/kyo-584-agent-skills`, and the review verified every quoted phrase at commit
   `535ab1b` instead of against a branch that could move.

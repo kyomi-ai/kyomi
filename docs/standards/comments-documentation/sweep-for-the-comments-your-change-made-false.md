@@ -65,24 +65,24 @@ state in the PR body which files you had to reach outside the ticket's scope to 
 
 Five tickets, four log days, every one caught by a reviewer rather than by the sweep:
 
-- **KYO-703**, review log `2026-09-09`, the entry headed *"KYO-703: remove the PR-listing
+- **KYO-703**, review log (private/local; not tracked in this repository) `2026-09-09`, the entry headed *"KYO-703: remove the PR-listing
   ceiling from check-ticket-in-flight.sh"* (🟢 #1) and its cycle-2 re-review — the block
   quoted above. Fixed in-diff rather than ticketed.
-- **KYO-705**, review log `2026-09-10`, the entry headed *"KYO-705: remove Google OAuth
+- **KYO-705**, review log (private/local; not tracked in this repository) `2026-09-10`, the entry headed *"KYO-705: remove Google OAuth
   beta-access attestation"* (🟢 #2) and its cycle-2 re-review — the `kyomi-agent`
   `classify_configured_project_scope` doc comment naming a `kyomi-ui` function the diff
   deleted. Verifiable in git: the citation is present at `545a40b7^` and gone at `545a40b7`.
-- **KYO-728 phase A**, review log `2026-09-12`, the cycle-2 and cycle-3 entries under
+- **KYO-728 phase A**, review log (private/local; not tracked in this repository) `2026-09-12`, the cycle-2 and cycle-3 entries under
   *"collapse passkey-vs-email signup fork"* — 🟡 twice on `google_section.rs`'s doc comment,
   first for *"each view keeps its own `<AuthDivider>` call"* after `SignupView`'s divider was
   deleted, then for the replacement's description of `CredentialsView`'s remaining two. No
   identifier was deleted; the population changed.
-- **KYO-683 phase 3**, review log `2026-09-10`, the entry headed *"KYO-683 Phase 3: signup
+- **KYO-683 phase 3**, review log (private/local; not tracked in this repository) `2026-09-10`, the entry headed *"KYO-683 Phase 3: signup
   single-email (dead-path removal + resend fix)"* — two 🟢, both *"pre-existing doc text this
   diff didn't touch, but became inaccurate as a direct, unavoidable consequence of the
   deletions in this diff"*: *"preserved for the three signup callers below"* (two remained)
   and *"both signup flows"* (one remained).
-- **KYO-700**, review log `2026-09-09`, the entries headed *"KYO-700: revoke Google OAuth
+- **KYO-700**, review log (private/local; not tracked in this repository) `2026-09-09`, the entries headed *"KYO-700: revoke Google OAuth
   grant on disconnect"* — `google_oauth_disconnect_service`'s doc comment said it *"mirrors
   the logic from"* the REST route, inverted the moment the diff made the route delegate to it.
   Left for a future touch at cycle 1, fixed at cycle 3.

@@ -6734,6 +6734,7 @@ dependencies = [
  "kyomi-datasource-server",
  "kyomi-embed",
  "kyomi-knowledge",
+ "kyomi-mcp-client",
  "kyomi-slack",
  "kyomi-test-harness",
  "kyomi-test-tracing",

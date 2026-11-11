@@ -2,8 +2,97 @@
 //! the memoized view-state branch on `DatasourcesContent` (KYO-429), and
 //! the per-row delete-in-progress state (KYO-467).
 
-use super::super::row_is_deleting;
+use super::super::{datasource_switch_disabled, row_is_deleting};
 use super::{extract_between, SRC};
+use leptos::prelude::*;
+
+#[test]
+fn retired_enabled_switch_allows_disable_then_blocks_reenable_and_rolls_back() {
+    let owner = Owner::new();
+    owner.with(|| {
+        let (enabled, set_enabled) = signal(true);
+        let disabled = datasource_switch_disabled(false, enabled, Signal::stored(false));
+        assert!(
+            !disabled.get_untracked(),
+            "a retired enabled row must allow turning off"
+        );
+
+        let html = view! {
+            <super::super::Switch checked=Signal::from(enabled)
+                on_change=Callback::new(|_: bool| {}) disabled=disabled/>
+        }
+        .to_html();
+        assert!(html.contains("aria-checked=\"true\""), "{html}");
+        let (attributes, _) = html.split_once("class=\"").unwrap();
+        assert!(
+            !attributes.trim_end().ends_with("disabled"),
+            "the ON switch must be clickable: {html}"
+        );
+
+        let off_view = view! {
+            <super::super::Switch checked=Signal::from(enabled)
+                on_change=Callback::new(|_: bool| {}) disabled=disabled/>
+        };
+        set_enabled.set(false);
+        assert!(
+            disabled.get_untracked(),
+            "turning off must immediately block turning back on"
+        );
+        let html = off_view.to_html();
+        assert!(html.contains("aria-checked=\"false\""), "{html}");
+        let (attributes, _) = html.split_once("class=\"").unwrap();
+        assert!(
+            attributes.trim_end().ends_with("disabled"),
+            "the OFF switch must block re-enabling: {html}"
+        );
+        set_enabled.set(true);
+        assert!(
+            !disabled.get_untracked(),
+            "a failed disable's rollback must allow retrying"
+        );
+    });
+}
+
+#[test]
+fn datasource_switch_preserves_live_mode_and_delete_protections() {
+    let owner = Owner::new();
+    owner.with(|| {
+        for (can_enable, enabled, expected_disabled) in [
+            (false, false, true),
+            (false, true, false),
+            (true, false, false),
+            (true, true, false),
+        ] {
+            let (enabled, _) = signal(enabled);
+            let (deleting, set_deleting) = signal(false);
+            let disabled = datasource_switch_disabled(can_enable, enabled, deleting.into());
+            assert_eq!(disabled.get_untracked(), expected_disabled);
+            set_deleting.set(true);
+            assert!(disabled.get_untracked(), "deletion must disable every switch");
+            set_deleting.set(false);
+            assert_eq!(disabled.get_untracked(), expected_disabled);
+        }
+    });
+}
+
+#[test]
+fn datasource_row_wires_direction_aware_switch_without_static_disabled_styling() {
+    let row = extract_between(SRC, "fn DatasourceRow(", "fn DatasourceModal(");
+    assert!(row.contains("datasource_switch_disabled(can_enable, local_enabled, is_deleting)"));
+    let switch = extract_between(row, "<Switch", "/>");
+    assert!(switch.contains("checked=Signal::from(local_enabled)"));
+    assert!(switch.contains("disabled=switch_disabled_signal"));
+    assert!(
+        !switch.contains("class="),
+        "Switch's native disabled styles must follow its reactive state"
+    );
+    let callback = extract_between(
+        row,
+        "let on_toggle = Callback::new",
+        "let ds_for_delete = ds.clone();",
+    );
+    assert!(callback.contains("toggle_action.pending().get_untracked()"));
+}
 
 // ── KYO-260: analytics-link permission gating ──────────────────────
 //

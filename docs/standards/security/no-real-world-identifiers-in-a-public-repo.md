@@ -40,6 +40,8 @@ details, it does not belong in this repo at all: `CLAUDE.md` routes anything of 
 /// which is the response verbatim (it carries no identifying fields).
 ```
 
+(private/local review log; not tracked in this repository)
+
 Flagged in **KYO-619** (`2026-09-03`, `13:15`) — the sole blocking finding on a diff whose
 parsing and testing work the reviewer called excellent. A real-looking GCP project ID
 (`acme-corp-472819`) and a service-account identity (`test-service-account@test-project`) appeared across

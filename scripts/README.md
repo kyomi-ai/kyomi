@@ -2,6 +2,11 @@
 
 All scripts are organized by environment. **Every script is environment-specific** - no ambiguity about which database/services they target.
 
+## Standalone diagnostics
+
+- **[`tokio-starvation/`](tokio-starvation/README.md)** — Measures axum health
+  latency while deliberately blocking Tokio workers, without application services.
+
 ## Repo setup
 
 - **`setup-hooks.sh`** - Run once per clone to enable the tracked git hooks

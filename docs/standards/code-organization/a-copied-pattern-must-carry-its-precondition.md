@@ -65,7 +65,7 @@ let still_connecting = move || connect_attempt_live.get_untracked();
 
 Real precedent — two 🟡, two tickets, both traced to a borrowed precondition:
 
-- **KYO-436 (`15:05` cycle 2, 2026-08-22)** — 🟡, *incorrect user-facing message on error path*.
+- (private/local review log; not tracked in this repository) **KYO-436 (`15:05` cycle 2, 2026-08-22)** — 🟡, *incorrect user-facing message on error path*.
   The new `popup_close_blocked` branch rendered "You're All Set" / "Your account is linked"
   unconditionally, including after `send_oauth_error_to_opener`. The review names the borrowing
   explicitly: *"The implementer's own justification ('same pattern as OAuthCompletePage') does
@@ -73,7 +73,7 @@ Real precedent — two 🟡, two tickets, both traced to a borrowed precondition
   unconditionally-positive copy doesn't transfer to a page that can represent either outcome."*
   Cycle 3 (`15:45`) resolved it by making title and icon purely `status`-driven and appending
   only an outcome-neutral sentence.
-- **KYO-440 (`13:19` cycle 1, 2026-08-24)** — 🟡, *State Management*, at
+- (private/local review log; not tracked in this repository) **KYO-440 (`13:19` cycle 1, 2026-08-24)** — 🟡, *State Management*, at
   `crates/kyomi-ui/src/pages/settings/datasources.rs`. A comment justified overwriting the
   per-row `popup_monitor` slot on every click. *"That assumption is copied from
   `ModalOAuthStatusPanel`, where `oauth_connecting` is a private `bool` and the guard is
@@ -89,16 +89,16 @@ Real precedent — two 🟡, two tickets, both traced to a borrowed precondition
 The same window shows what the discipline looks like when it is done right, and in every case
 it is one grep plus one named property:
 
-- **KYO-467 (`19:15`, 2026-08-23)** — the new `toast_success` call is `#[cfg]`-gated while the
+- (private/local review log; not tracked in this repository) **KYO-467 (`19:15`, 2026-08-23)** — the new `toast_success` call is `#[cfg]`-gated while the
   neighbouring `toast_error` is not. Justified by grepping every `toast_success`/`toast_info`
   call inside an `Effect::new` in the same file and confirming all five are gated identically,
   *and* by reading `toast.rs` to confirm the functions are unconditionally defined and no-op
   safely — the property, not just the tally.
-- **KYO-434 (`12:45`, 2026-08-22)** — `overlay_class.clone()` justified by the property rather
+- (private/local review log; not tracked in this repository) **KYO-434 (`12:45`, 2026-08-22)** — `overlay_class.clone()` justified by the property rather
   than the neighbour: the `String` is captured by a `<Show>` children closure, which Leptos
   requires to be `Fn` and re-invokes on every retoggle, so a moved-in `String` would make it
   `FnOnce`. `content_class` a few lines above does the same thing for the same reason.
-- **KYO-406 (`15:40`, 2026-08-24)** — a raw `<button>` styled as an inline text link, justified
+- (private/local review log; not tracked in this repository) **KYO-406 (`15:40`, 2026-08-24)** — a raw `<button>` styled as an inline text link, justified
   by six pre-existing occurrences of the identical construction in the same file, which makes it
   established local precedent rather than a new design-system deviation.
 

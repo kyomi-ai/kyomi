@@ -32,15 +32,17 @@ because it was sourced — from the claim you have just retracted.
 
 **Rule:** When a review makes you withdraw or narrow a claim, treat the claim's whole
 evidence chain as part of the same edit, not just the flagged sentence. Re-read, in this
-order: the sentence that introduces or justifies the claim; the heading above it; the
-WRONG/RIGHT example that demonstrates it; every artefact the *previous* cycle cited in
-support of it; and every artefact your corrected text now names as its source or its
-re-check entrypoint. Correct each in the same commit, or state plainly in the corrected text
-that the other artefact disagrees and why. If an artefact is out of this PR's reach, file the
+order: the sentence that introduces or justifies the claim; the sentence that follows it;
+any back-reference pointing at it ("that", "the above", "see fact 1 above", "for this
+reason"); the heading above it; the WRONG/RIGHT example that demonstrates it; every
+artefact the *previous version* cited in support of the withdrawn claim, even if the
+replacement drops that citation; and every artefact your corrected text now names as its
+source or its re-check entrypoint. Correct each in the same commit, or state plainly in
+the corrected text that the other artefact disagrees and why. If an artefact is out of this PR's reach, file the
 ticket and name it — do not leave two tracked files quietly asserting opposite mechanisms.
 
 ```sh
-# WRONG — `git show origin/main:scripts/repro-headless-subagent-survival.sh`,
+# WRONG — `git show 518b65cb^:scripts/repro-headless-subagent-survival.sh`,
 # verbatim. The standard this script backs was rewritten in the same diff to
 # withdraw exactly this generalisation ("the harness keys availability on
 # configuration gates, not on session mode"), and that standard names this
@@ -51,8 +53,8 @@ ticket and name it — do not leave two tracked files quietly asserting opposite
 #      parameter's availability is mode-dependent, not universally present
 #      or universally absent.
 
-# RIGHT — the same block on PR #505's head (in flight, not merged as of
-# 2026-09-11). The two concrete schema observations above the clause are
+# RIGHT — `git show 518b65cb:scripts/repro-headless-subagent-survival.sh`,
+# merged in PR #505. The two concrete schema observations above the clause are
 # byte-identical between the two revisions (diffed); only the generalising
 # clause moved, and it now states the mechanism the standard states, names
 # the correlation as a correlation, and links the standard.
@@ -70,38 +72,36 @@ ticket and name it — do not leave two tracked files quietly asserting opposite
 requested-mode counters, marked `...`; every other character is verbatim from that revision.
 Both blocks are quotes, not reconstructions.)
 
-Real precedent — two tickets, and the flagship cost three of five review cycles:
+The historical blocks above are pinned to the [correction commit in merged PR
+#505](https://github.com/kyomi-ai/kyomi/commit/518b65cb9aa52984c494fe18c3a2937b542de40a).
+They describe that revision, not the current harness.
 
-- **KYO-692 / KYO-713 (PR #505), `2026-09-11` log, the *cycle 2* entry under "rename and
-  correct the headless sub-agent standard"** — 🟡. After the standard withdrew "the mechanism
-  appears to have been fixed upstream", *both* tracked scripts still concluded it: the
-  reviewer found "appears to have been fixed upstream since" surviving in
-  `scripts/repro-headless-subagent-survival.sh` and `scripts/audit-agent-run-deaths.sh`,
-  noting "the standard names `repro-headless-subagent-survival.sh` as the post-upgrade
-  re-check entrypoint, so a future agent following that pointer lands on the refuted
-  conclusion." The repro script's surrounding paragraph *was* edited by that same diff.
-- **Same ticket, the *cycle 3* entry** — 🟡, the scaffolding shape. The claim that rows
-  stratify by session type was withdrawn; the sentence justifying it ("because they do not
-  agree along session type") was left behind, now contradicted by the very table beneath it.
-  Two 🟢 in the same chain are the heading version of it: a section still titled "What's
-  changed since KYO-546" over a body whose conclusion had become a bound, and a
-  `DID NOT REPRODUCE` banner fifty lines above the qualification that bounded it.
-- **Same ticket, the *cycle 4* entry** — 🟡, and the citation-inversion shape stated exactly.
-  Cycle 3 had cited the repro script's "mode-dependent" line as an *ally* — evidence the rows
-  really do stratify by session type. The fix then withdrew mode-keying as the mechanism,
-  which converted that ally into a contradiction 25 lines from a hunk the same diff was
-  making. The reviewer's note is the rule in one sentence: *"a rewrite that withdraws a claim
-  must re-read not only the sentence introducing it but every artefact the previous cycle
-  cited in support of it — a citation made for a claim becomes a citation against its
-  replacement."* That chain — each cycle's finding created by the previous cycle's fix — broke
-  only at cycle 5, when both re-reads finally came back clean. **KYO-742** owns this rule.
-- **KYO-687, `2026-09-09` log, the *initial* review entry under "restate the Agent-tool
-  `run_in_background` rule as an invariant"** — the cross-repository version, twice in one
-  diff. 🟢: three docs were corrected and a "**fourth site**, tracked + public, still teaches
-  the false rule" — a public standards file, out of that PR's repo, which had to become its
-  own ticket (KYO-692, i.e. the flagship above). 🟡: a newly added sentence endorsed a
-  practice the *same file* had flatly banned 53 lines earlier; the diff did not create that
-  conflict but newly took a side in it without reconciling.
+KYO-692 / KYO-713 took five review cycles in the post-rebase correction of PR #505.
+The [PR's durable review-cycle summary](https://github.com/kyomi-ai/kyomi/pull/505#issuecomment-5626784758)
+and KYO-692's final implementation comment (2026-09-10, 23:25 UTC) record this sequence:
+
+| Cycle | Finding | How the previous version or correction left it behind |
+|---|---|---|
+| 1 | The WRONG example equated omission of `run_in_background` with passing `true`. | The original example's "or simply omitted under `claude -p` — same default" survived into the rewrite. |
+| 2 | The RIGHT example then equated omission with passing `false`; both scripts still suggested the kill mechanism was fixed upstream. | Cycle 1's correction inverted the conflation instead of separating the measurements, and the cited scripts retained the withdrawn inference. |
+| 3 | A justification survived after the observation it justified was withdrawn. | Cycle 2 reframed the observation but left its introducing sentence behind. KYO-742 records the surviving clause as "because they do not agree along session type". |
+| 4 | `scripts/repro-headless-subagent-survival.sh` still taught that availability was "mode-dependent". | Cycle 3 withdrew mode-keying as the mechanism, turning a script the standard cited twice as authority into a contradiction. |
+
+Cycle 1 exposed a carried-forward defect; cycles 2–4 show corrections leaving or creating
+another inconsistency. Cycle 5 was clean of blocking findings. Verifying each replacement
+against its evidence did not check the surrounding prose or the sources cited by its
+predecessor. KYO-742 records two positive instances from the cycle-4 implementation:
+
+- **Neighbourhood:** after inserting a clause, the implementer noticed that a following
+  "that" now had an ambiguous referent and changed it to "that variation" in the same pass.
+  The [landed standard at the correction commit](https://github.com/kyomi-ai/kyomi/blob/518b65cb9aa52984c494fe18c3a2937b542de40a/docs/standards/agent-orchestration/a-sub-agent-in-flight-must-not-outlive-its-turn.md)
+  retains that explicit referent.
+- **Cited artefact:** re-reading the reproduction script also caught its later environment
+  paragraph: "the whole point of KYO-688" was said to be differing behaviour under
+  `claude -p`, justified by "see fact 1 above". That back-reference reasserted the withdrawn
+  mechanism away from the header hunk. The same [correction commit](https://github.com/kyomi-ai/kyomi/commit/518b65cb9aa52984c494fe18c3a2937b542de40a)
+  repairs it to describe the observed schemas and their configuration, preventing another
+  review cycle rather than waiting for a reviewer to find it.
 
 Sibling of
 [re-derive-enumeration-comment-from-source.md](re-derive-enumeration-comment-from-source.md):
@@ -142,3 +142,12 @@ asks for. And
 that rule is why these claims get withdrawn in the first place — a correct observation with
 an over-reaching inference bolted on. This rule is about what the withdrawal owes the rest of
 the tree.
+
+Distinct from
+[verify-a-precedent-claim-against-its-source.md](verify-a-precedent-claim-against-its-source.md)
+and
+[a-resolving-identifier-is-not-a-verified-claim.md](a-resolving-identifier-is-not-a-verified-claim.md):
+those verify that a claim is supported by what it cites, beyond merely resolving a name.
+Here the replacement can pass that check and still leave its introducing or following
+sentence, a back-reference, or a previously cited artefact asserting the withdrawn claim.
+The extra step is re-reading what supported the *previous version* of the claim.
