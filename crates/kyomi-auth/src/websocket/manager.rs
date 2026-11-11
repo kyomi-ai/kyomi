@@ -242,6 +242,11 @@ impl WebSocketManager {
     /// Fallible notification submission for durable callers. A delivery failure never
     /// changes the committed journal; readers can recover from database snapshots.
     pub async fn try_send_to_user(&self, user_id: &str, message: WebSocketMessage) -> Result<(), String> {
+        if !crate::personal_mcp_privacy::can_receive_notification(&self.inner.db,user_id,&message)
+            .await.map_err(|_| "Private notification authorization failed".to_string())?
+        {
+            return Ok(());
+        }
         let json = serde_json::to_string(&message).map_err(|error| error.to_string())?;
         if let Some((redis, _)) = &self.inner.redis {
             let channel = format!("{REDIS_CHANNEL_PREFIX}{user_id}");
@@ -348,13 +353,28 @@ impl WebSocketManager {
                     }
                 };
 
-                manager.deliver_to_local_user(&user_id, &payload);
+                if let Err(error) = manager.deliver_redis_payload(&user_id, &payload).await {
+                    tracing::warn!(%error, "Redis conversation notification rejected");
+                }
             }
 
             tracing::debug!("Redis subscriber ended for {user_id}");
         });
 
         self.inner.subscribers.insert(user_id.to_string(), handle);
+    }
+
+    /// Recheck messages from other replicas; publisher authorization is not a
+    /// delivery lease, and an older publisher may retain a shared recipient list.
+    pub(crate) async fn deliver_redis_payload(&self, user_id: &str, json: &str) -> Result<(), String> {
+        let message: WebSocketMessage = serde_json::from_str(json).map_err(|_| "Invalid conversation notification".to_string())?;
+        if !crate::personal_mcp_privacy::can_receive_notification(&self.inner.db,user_id,&message)
+            .await.map_err(|_| "Private notification authorization failed".to_string())?
+        {
+            return Ok(());
+        }
+        self.deliver_to_local_user(user_id,json);
+        Ok(())
     }
 
     /// Deliver a JSON-encoded message to all local WebSocket connections for a user.

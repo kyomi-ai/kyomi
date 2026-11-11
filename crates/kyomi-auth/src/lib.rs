@@ -119,5 +119,6 @@ pub fn http_client() -> kyomi_core::Result<reqwest::Client> {
 }
 
 pub mod personal_mcp_oauth;
-pub mod personal_mcp_service;
 pub mod personal_mcp_grants;
+pub mod personal_mcp_privacy;
+pub mod personal_mcp_service;
