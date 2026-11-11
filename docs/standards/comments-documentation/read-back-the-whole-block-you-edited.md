@@ -52,9 +52,9 @@ is the case this rule exists for, not an exemption from it.
 ```
 
 Six 🟢 findings across five reviews and five tickets, in the `2026-09-02`, `2026-09-03` and
-`2026-09-09` review logs:
+`2026-09-09` review logs (private/local; not tracked in this repository):
 
-- **KYO-464** — the `assert-the-count-in-code addition to name-the-invariant-not-a-count.md`
+- (private/local review log; not tracked in this repository) **KYO-464** — the `assert-the-count-in-code addition to name-the-invariant-not-a-count.md`
   review. Two findings on one inserted paragraph. Placement: it "sits between the Rule
   paragraph and its own worked WRONG/RIGHT example, which illustrates the leftmost-match case
   from the Rule paragraph, not the fixed-size-array case just introduced … This breaks the
@@ -65,7 +65,7 @@ Six 🟢 findings across five reviews and five tickets, in the `2026-09-02`, `20
   test-attribution generalisation rather than between the Rule and its own worked example") —
   so what landed in
   [name-the-invariant-not-a-count.md](name-the-invariant-not-a-count.md) is the fixed block.
-- **KYO-619** — the `BigQuery missing-key parse fix` review. `paginate`'s doc comment "has no
+- (private/local review log; not tracked in this repository) **KYO-619** — the `BigQuery missing-key parse fix` review. `paginate`'s doc comment "has no
   blank line before the next `///` block and lands on `fetch_bigquery_list_page` instead;
   `paginate` itself — the function whose loop-termination safety this documents — has no doc
   comment at all." Fixed before merge: on `main`, both functions in
@@ -74,14 +74,14 @@ Six 🟢 findings across five reviews and five tickets, in the `2026-09-02`, `20
   fixes. "The reflow left an orphan short line, `# this tally is still`, wrapping mid-sentence
   onto its own line before `# hand-maintained and will re-rot…`." This is the WRONG block
   above, and the only one of the six that reached `main` with the defect intact.
-- **KYO-687** — the `restate the Agent-tool run_in_background rule as an invariant` re-review
+- (private/local review log; not tracked in this repository) **KYO-687** — the `restate the Agent-tool run_in_background rule as an invariant` re-review
   whose sole finding is the merged-bullet one (that heading appears three times in the
   `2026-09-09` log; this is the entry with a single 🟢 Copy-Paste finding). Merging two
   bullets in `~/repos/kyomi-private`'s `skills/backlog-fast/SKILL.md` left "costs nothing when
   the notification arrives and saves the run when it does not" near-verbatim in both the
   bullet and a paragraph eight lines below — "harmless, but a future 'simplify' pass could
   delete the wrong copy."
-- **KYO-703** — the `remove the PR-listing ceiling from check-ticket-in-flight.sh` re-review
+- (private/local review log; not tracked in this repository) **KYO-703** — the `remove the PR-listing ceiling from check-ticket-in-flight.sh` re-review
   that flagged `reconcile-merged-tickets.sh` (again one of three entries under that heading in
   the `2026-09-09` log). Both wrapping and redundancy in one edit: the inserted paragraph "was
   not re-wrapped, leaving two ragged short lines mid-paragraph … in a file otherwise wrapped

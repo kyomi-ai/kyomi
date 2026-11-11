@@ -53,7 +53,7 @@ gh pr view 410 --json state,mergedAt                 # a "still present on main"
 
 Real precedent — six rescues in ten days, one of which shipped a stale claim:
 
-- **KYO-602** (`2026-09-02`, `14:20` / `14:45`) — the flagship. The rescued E2E spec
+- (private/local review log; not tracked in this repository) **KYO-602** (`2026-09-02`, `14:20` / `14:45`) — the flagship. The rescued E2E spec
   `scripts/e2e-regression/bigquery-create-modal.cjs` carried a header list of what was *"Still
   present on `main` and not affected"*, and `Default Project` was on it. The field had been removed
   by KYO-415 (PR #410, merged) before the rescue, provable without a browser by a merged unit test,
@@ -70,7 +70,7 @@ Real precedent — six rescues in ten days, one of which shipped a stale claim:
   clippy invocation, the `chat_engine.rs` cfg shape and `mark-branch-stranded.sh`'s
   verify-before-destroy sequence all re-confirmed at tip. Two further files the mining run had
   staged were dropped from the rescue because they would have collided with an open PR.
-- **KYO-595** (`2026-09-02`, `12:15`) — `git diff FETCH_HEAD -- <path>` against
+- (private/local review log; not tracked in this repository) **KYO-595** (`2026-09-02`, `12:15`) — `git diff FETCH_HEAD -- <path>` against
   `refs/heads/stranded/jason/kyo-463-spec-green5` (fetched fresh) empty: *"nothing was rewritten
   during the rescue."* The second half then re-established each claim against the live tree —
   `kyomi-test-tracing` really is in `crates/kyomi-auth/Cargo.toml`'s `[dev-dependencies]`,
@@ -79,16 +79,16 @@ Real precedent — six rescues in ten days, one of which shipped a stale claim:
   symbol-anchored rather than line-anchored.
 - **KYO-577** (`2026-09-01`, `05:10`) — *"Verified every factual claim against the current worktree
   rather than trusting the rescued text."* The drift was real but benign: the rescued standard
-  recorded `enterprise/kyomi-slack/src/routes.rs:1837` as the review log had it, while the same
+  recorded `enterprise/kyomi-slack/src/routes.rs:1837` as the review log (private/local; not tracked in this repository) had it, while the same
   construction sits at `:1819` on current `main`. The landed file carries both, deliberately.
-- **KYO-533** (`2026-08-30`, `00:33` / `00:40`) — six standards files orphaned by five dead
+- (private/local review log; not tracked in this repository) **KYO-533** (`2026-08-30`, `00:33` / `00:40`) — six standards files orphaned by five dead
   `/backlog-fast` runs, landed together. Three factual corrections had already been made to the
   rescued text before review (a wrong log-entry attribution, a wrong error-variant claim about
   BigQuery's `list_projects`/`list_active_projects`, a wrong cycle count), and the reviewer
   re-derived them rather than trusting the report. The single 🟡 was the same shape: the rescued
   file never distinguished itself from its nearest sibling — exactly the check that goes stale
   while a file sits in a dead worktree and the corpus around it keeps growing.
-- **KYO-468** (`2026-08-29`, `21:20`, `21:49`, `23:40`) — the conservation half, done by hand
+- (private/local review log; not tracked in this repository) **KYO-468** (`2026-08-29`, `21:20`, `21:49`, `23:40`) — the conservation half, done by hand
   before the tombstone tooling existed: the rescued standards file confirmed `md5`
   `3503c54254bb19ca6de83318dadc636d`-identical to unpushed commit `40f8642a` in a dead worktree,
   via `git show`.

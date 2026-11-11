@@ -36,6 +36,8 @@ cannot carry a call-count claim. Then either:
 What you must not do is keep the count assertion and its comment. A test may prove less than
 you hoped; it may not claim more than it proves.
 
+(private/local review log; not tracked in this repository)
+
 ```rust
 // WRONG — a reconstruction, not a quote: the cycle-1 form was corrected in review
 // before the branch's only pushed commit, so no `<sha>` carries it; this is the
@@ -70,7 +72,7 @@ assert_eq!(
 
 Real precedent:
 
-- **KYO-776, the `create-path rechunk choke point + mined standards` review**
+- (private/local review log; not tracked in this repository) **KYO-776, the `create-path rechunk choke point + mined standards` review**
   (`2026-09-23` log) — 🟡, *Test Manipulation (overclaim)*, on
   `write_knowledge_file_populates_knowledge_chunks_on_create` in
   `crates/kyomi-agent/src/tools/knowledge.rs`. The reviewer read

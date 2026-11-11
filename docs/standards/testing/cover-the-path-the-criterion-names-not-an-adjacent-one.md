@@ -52,7 +52,7 @@ async fn explicit_scope_that_filters_to_empty_is_recorded_as_a_skip() {
 
 Three tickets in five days, all 🟡-blocking, all resolved in cycle 2:
 
-- **KYO-385** (review log `2026-08-20`, `21:10` → `21:45`) — AC3 ("partial write failure ⇒
+- **KYO-385** (review log (private/local; not tracked in this repository) `2026-08-20`, `21:10` → `21:45`) — AC3 ("partial write failure ⇒
   still `idle`") was tested only against the extracted pure `resolve_run_outcome`
   (`crates/kyomi-auth/src/catalog/helpers.rs`), never through `index_catalog_sql`. The stated
   blocker — no table write can succeed on the test SQLite pool — was checked and was false:
@@ -61,14 +61,14 @@ Three tickets in five days, all 🟡-blocking, all resolved in cycle 2:
   was achievable in-process. Cycle 2 added
   `partial_write_failure_one_cached_one_failed_resolves_to_idle`
   (`crates/kyomi-agent/src/catalog/traits.rs`), which runs `index_catalog_sql` for real.
-- **KYO-401** (review log `2026-08-21`, `14:20` → `13:15` cycle 2) — the AC asked for exact
+- **KYO-401** (review log (private/local; not tracked in this repository) `2026-08-21`, `14:20` → `13:15` cycle 2) — the AC asked for exact
   status code and body on the converted auth-critical handlers. `mcp.rs`'s three were covered
   by 21 pre-existing `contract_mcp.rs` tests; `oauth.rs`'s four (`oauth_authorize`,
   `oauth_authorize_continue`, `oauth_token`, `register_client`) had zero HTTP-boundary
   coverage before the diff and still had zero after it. The covered sibling half made the diff
   read as tested. Cycle 2 added `apps/server/tests/contract_oauth_client.rs` — 8 tests
   asserting exact status and whole body.
-- **KYO-444** (review log `2026-08-22`, `08:10` → `08:55`) — `ConfiguredProjectScope::Explicit(_)`,
+- **KYO-444** (review log (private/local; not tracked in this repository) `2026-08-22`, `08:10` → `08:55`) — `ConfiguredProjectScope::Explicit(_)`,
   the "non-empty key but every entry filters out" case the enum's own doc comment calls out,
   had no direct coverage; the guard clause consuming it was untested. Mutation-verified by the
   reviewer: replacing both `Explicit` arms with one unconditional pass-through still passed all

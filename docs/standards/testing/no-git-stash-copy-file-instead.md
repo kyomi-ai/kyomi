@@ -6,4 +6,6 @@ The sharpest case is a merge in progress. `git stash` drops `MERGE_HEAD` / `MERG
 
 **Rule:** When you need to compare against a clean tree mid-verification, `cp` the files you care about to a scratch location and compare against `git show <ref>:<path>`, or use a throwaway `git worktree`. Never `git stash` — and never at all when `git status` says a merge, rebase, or cherry-pick is in progress. Afterwards, confirm `git diff --cached --stat` matches what you staged before you started.
 
+(private/local review log; not tracked in this repository)
+
 Two incidents in two days, both during review verification: the KYO-329 review (2026-08-11) stashed mid-investigation and silently unstaged the file under review; the KYO-327 merge-conflict review (2026-08-12) stashed with a resolved merge staged and lost the merge markers entirely. Both were caught and fully recovered only because the reviewer re-checked `git status` and diffed byte-for-byte before signing.

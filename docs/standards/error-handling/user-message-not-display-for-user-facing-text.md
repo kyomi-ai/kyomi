@@ -60,7 +60,7 @@ Err(e) => {
 Six instances of this one species have been fixed across four tickets, three of those
 tickets inside two days. KYO-350 established `user_message()` and fixed the first three
 sites.
-KYO-380 (2026-08-20 review log) fixed the persisted `watch_executions.error_message`
+KYO-380 (2026-08-20 review log (private/local; not tracked in this repository)) fixed the persisted `watch_executions.error_message`
 write, extracting `watch_execution_error_message` in `crates/kyomi-agent/src/watch_execution.rs`.
 KYO-389 (2026-08-21) fixed three call sites in `crates/kyomi-agent/src/tools/copilot.rs`
 behind `validation_failure_result`. KYO-397 (2026-08-21) fixed `preview_watch`'s

@@ -4,7 +4,8 @@
 #
 # Plants synthetic fixtures in a tmp directory and invokes the linter against
 # each one, asserting exit code and (where relevant) output content. Every
-# identifier used anywhere in this file is synthetic — see the linter's own
+# identifier used anywhere in this file is synthetic or public attribution
+# metadata — see the linter's own
 # header and docs/standards/security/no-real-world-identifiers-in-a-public-repo.md
 # for why that is not optional in this repo.
 #
@@ -208,6 +209,32 @@ Nothing sensitive here.
 EOF
 REAL_IDENTIFIERS_DENYLIST="$TMP/throwaway-denylist.txt" \
     assert_exit "--message-file passes a clean message" 0 --message-file "$TMP/commit-msg-good.txt"
+
+cat > "$TMP/commit-msg-attribution.txt" <<'EOF'
+KYO-999: a perfectly ordinary commit message
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+EOF
+assert_exit "--message-file passes the public agent attribution" 0 \
+    --message-file "$TMP/commit-msg-attribution.txt"
+
+cat > "$TMP/commit-msg-unlisted-attribution.txt" <<'EOF'
+KYO-999: a perfectly ordinary commit message
+
+Co-Authored-By: Example Agent <noreply@some-unlisted-domain-example.test>
+EOF
+assert_exit "--message-file rejects an unlisted attribution domain" 1 \
+    --message-file "$TMP/commit-msg-unlisted-attribution.txt"
+assert_contains "  reports the right rule" "rule email-address"
+
+cat > "$TMP/commit-msg-attribution-subdomain.txt" <<'EOF'
+KYO-999: a perfectly ordinary commit message
+
+Co-Authored-By: Example Agent <noreply@attribution.anthropic.com>
+EOF
+assert_exit "--message-file rejects attribution subdomains" 1 \
+    --message-file "$TMP/commit-msg-attribution-subdomain.txt"
+assert_contains "  reports the right rule" "rule email-address"
 
 assert_exit "--message-file on a nonexistent file is a usage error" 2 --message-file "$TMP/does-not-exist.txt"
 

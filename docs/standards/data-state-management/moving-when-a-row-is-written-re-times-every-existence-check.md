@@ -88,7 +88,7 @@ mint_verification_email_or_notify_existing(db, email, None, frontend_url, existi
 ```
 
 Flagged as 🔴 (Correctness / Missing Error Context) in **KYO-683 phase 1**
-(`docs/review-logs/2026-09-10.md`, 15:57, finding 2). The phase moved `users`-row
+(`docs/review-logs/2026-09-10.md` (private/local review log; not tracked in this repository), 15:57, finding 2). The phase moved `users`-row
 creation from signup-start to verification-token redemption
 (`establish_verified_account`). `resend_verification_service` gated on
 `get_user_by_email`, falling out through `let Some(user) = user else { return

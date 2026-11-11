@@ -53,25 +53,25 @@ $ cargo clippy --locked -p kyomi-ui --features ssr --all-targets -- -D warnings
 Real precedent — the same symbol, the same misfire, across at least five distinct tickets
 over a week, each requiring its own re-derivation:
 
-- `docs/review-logs/2026-09-09.md` (KYO-682 review, panic-overlay `console_errors` fix):
+- `docs/review-logs/2026-09-09.md` (private/local review log; not tracked in this repository) (KYO-682 review, panic-overlay `console_errors` fix):
   *"pre-existing `dead_code` warning on the host test build,
   `crates/kyomi-ui/src/pages/settings/datasources.rs:78`
   (`credential_status_indicates_connected` never used) — untouched by this diff, reported
   not fixed."*
-- `docs/review-logs/2026-09-10.md` (KYO-725, chart-builder SQL editor fix): *"pass 2's lone
+- `docs/review-logs/2026-09-10.md` (private/local review log; not tracked in this repository) (KYO-725, chart-builder SQL editor fix): *"pass 2's lone
   `dead_code` on `datasources.rs:78` independently reproduced as a narrowing artifact, not
   present with `--features ssr`."* Re-confirmed verbatim in that ticket's cycle-2 re-review.
   The same log's beta-access-removal review calls it *"pre-existing
   `credential_status_indicates_connected` dead-code narrowing artifact in pass 2, confirmed
   untouched by this diff and reachable only from a `#[cfg(target_arch = "wasm32")]` call
   site plus an `ssr`-feature test module."*
-- `docs/review-logs/2026-09-13.md` — three separate reviews on one day. KYO-536 (`10:23`)
+- `docs/review-logs/2026-09-13.md` (private/local review log; not tracked in this repository) — three separate reviews on one day. KYO-536 (`10:23`)
   and KYO-684 (`17:30`) each hit it on unrelated diffs, and KYO-679 (the Rule B
   disposal-safety lint ratchet) hit it in *both* of its review cycles (`00:00` and `01:00`),
   each naming *"the pre-existing, separately-ticketed (KYO-754) `dead_code` failure"* and
   confirming via `git diff --cached` that the flagged file is untouched. KYO-679 changed no
   Rust files at all, and still had to reason about it twice.
-- `docs/review-logs/2026-09-14.md` (KYO-697 email-observability fix, three review cycles):
+- `docs/review-logs/2026-09-14.md` (private/local review log; not tracked in this repository) (KYO-697 email-observability fix, three review cycles):
   cycles 1 and 2 both hit *"pass 2 fails only on the pre-declared KYO-754
   `credential_status_indicates_connected` dead_code."* Cycle 3 is the sharpest evidence for
   why this can't be trusted as a stable signal either way: *"`-p kyomi-server -p kyomi-ui`

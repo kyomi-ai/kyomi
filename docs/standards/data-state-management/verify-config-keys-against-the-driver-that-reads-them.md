@@ -63,9 +63,9 @@ const SYNAPSE_SERVER_CONFIG_KEY: &str = "server";
 }
 ```
 
-Four incidents, `2026-08-23` and `2026-08-24` review logs:
+Four incidents, `2026-08-23` and `2026-08-24` review logs (private/local; not tracked in this repository):
 
-- **KYO-516** (`10:15`, 2026-08-24) — the `host`/`server` mismatch above. The review
+- (private/local review log; not tracked in this repository) **KYO-516** (`10:15`, 2026-08-24) — the `host`/`server` mismatch above. The review
   confirmed it by reading `providers/synapse.rs` directly rather than trusting the ticket:
   `server` hard-required, `port` and `encrypt` hardcoded in the driver (so the UI's copies
   were inert), and `trust_server_certificate` genuinely read via `config.trust_cert()` — so
@@ -73,16 +73,16 @@ Four incidents, `2026-08-23` and `2026-08-24` review logs:
   dead-code cleanup. Shipped as `SYNAPSE_SERVER_CONFIG_KEY` plus
   `synapse_server_config_key_matches_the_driver_contract`, whose doc comment says outright
   that it cannot see the driver.
-- **KYO-522** (`08:15`, 2026-08-24) — the `tenant_id` wrong-map case, found *as a discovery
+- (private/local review log; not tracked in this repository) **KYO-522** (`08:15`, 2026-08-24) — the `tenant_id` wrong-map case, found *as a discovery
   during KYO-516's own review* and filed rather than fixed inline. Fix duplicates the write
   into `build_credentials`'s `"service_principal"` arm; the `connection_config` write stays,
   because `enterprise_oauth` still needs it there.
-- **KYO-415** (`06:23`, 2026-08-24) — the deletion case done right. Removing BigQuery's
+- (private/local review log; not tracked in this repository) **KYO-415** (`06:23`, 2026-08-24) — the deletion case done right. Removing BigQuery's
   Default Project field was safe only because
   `grep -rn "default_project" ~/repos/kyomi-connect/crates/` returned nothing and
   `resolve_billing_project` provably reads only `billing_project`/`default_billing_project`.
   The grep across the sibling repo *was* the evidence.
-- **KYO-460** (`14:00`, 2026-08-23) — the wrong-type case. A migration retyped the corrupted
+- (private/local review log; not tracked in this repository) **KYO-460** (`14:00`, 2026-08-23) — the wrong-type case. A migration retyped the corrupted
   boolean leaves in `connection_config`, but the PR's "six is the complete set" was
   empirically false: `shared_credentials`, read by `resolve_shared_credentials`
   (`~/repos/kyomi-connect/crates/kyomi-datasource/src/factory.rs:82`) via

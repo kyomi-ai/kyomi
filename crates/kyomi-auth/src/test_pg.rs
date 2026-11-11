@@ -198,16 +198,15 @@ pub(crate) async fn cleanup_workspace_and_users_pg(
 /// for an exact match (modulo pgvector's own storage rounding) and drops the
 /// more the two vectors diverge.
 ///
-/// `table` and `id_col` are always test-internal literals (`"agent_learnings"`
-/// / `"learning_id"`, `"knowledge_chunks"` / `"id"`, `"dashboards"` /
-/// `"dashboard_id"`) supplied by the calling test, never user input, so
-/// building the query with `format!` is safe here — this is not a pattern to
-/// copy anywhere a caller-controlled value could reach the SQL string.
+/// `table` and `id_col` are always test-internal literals (`"knowledge_chunks"`
+/// / `"id"`, `"dashboards"` / `"dashboard_id"`) supplied by the calling test,
+/// never user input, so building the query with `format!` is safe here — this
+/// is not a pattern to copy anywhere a caller-controlled value could reach the
+/// SQL string.
 ///
-/// Third extraction of this exact query, after independent copies in
-/// `dashboard_service`'s rechunk test and `learning_service`'s
-/// `learning_embedding_similarity` — see `docs/CODING_STANDARDS.md`'s "third
-/// copy of a test helper is the extraction trigger" rule (KYO-371).
+/// Extracted from independent copies in `dashboard_service`'s rechunk and
+/// embedding tests — see `docs/CODING_STANDARDS.md`'s "third copy of a test
+/// helper is the extraction trigger" rule (KYO-371).
 pub(crate) async fn cosine_similarity_pg(
     pg: &sqlx::PgPool,
     table: &str,

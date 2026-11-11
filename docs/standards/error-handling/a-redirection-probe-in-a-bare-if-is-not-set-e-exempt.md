@@ -46,6 +46,8 @@ if ! sh -c ': < /dev/tty' 2>/dev/null || ! sh -c ': > /dev/tty' 2>/dev/null; the
 fi
 ```
 
+(private/local review log; not tracked in this repository)
+
 Flagged in **KYO-641** (`2026-09-04`, `20:40`) on `deploy/install.sh`: `prompt()`'s `/dev/tty`
 reads/writes had no guard at all, so a headless run (`curl | sh < /dev/null`, a CI job, a
 `docker build RUN`) hit a raw, unformatted interpreter error at the first prompt rather than a

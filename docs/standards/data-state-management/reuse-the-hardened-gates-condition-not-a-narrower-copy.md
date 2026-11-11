@@ -48,7 +48,7 @@ if run_complete {
 }
 ```
 
-Real precedent: **KYO-622** (review log `2026-09-06`, `01:06`, 🔴 Correctness / Asymmetry
+Real precedent: **KYO-622** (review log (private/local; not tracked in this repository) `2026-09-06`, `01:06`, 🔴 Correctness / Asymmetry
 Violation). A new container-liveness GC mechanism (`reconcile_container_liveness`) was
 added beside the existing, KYO-385/KYO-614-hardened `archive_missing_tables` gate. All
 three call sites derived `run_complete = errors.is_empty()` alone. The reviewer proved

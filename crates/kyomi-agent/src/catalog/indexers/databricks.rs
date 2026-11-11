@@ -19,7 +19,7 @@ use tracing::warn;
 
 use super::{ensure_query_ok, extract_rows_from_batch};
 use crate::catalog::traits::{
-    index_catalog_sql, CatalogIndexer, SQLCatalogIndexer,
+    index_catalog_sql, CatalogIndexer, ContainerDiscovery, SQLCatalogIndexer,
 };
 use kyomi_auth::catalog::helpers::IndexerContext;
 use kyomi_auth::catalog::types::{CatalogIndexResult, ColumnEntry, TableEntry};
@@ -91,7 +91,7 @@ impl SQLCatalogIndexer for DatabricksIndexer {
     async fn discover_all_containers(
         &self,
         provider: &dyn DatasourceProvider,
-    ) -> Result<Vec<String>> {
+    ) -> Result<ContainerDiscovery> {
         let result = provider
             .execute_query("SHOW CATALOGS", None, None, false, None)
             .await?;
@@ -111,7 +111,7 @@ impl SQLCatalogIndexer for DatabricksIndexer {
             .collect();
 
         catalogs.sort();
-        Ok(catalogs)
+        Ok(ContainerDiscovery::complete(catalogs))
     }
 
     async fn get_tables_in_container(

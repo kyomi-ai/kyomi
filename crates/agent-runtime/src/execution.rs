@@ -11,10 +11,8 @@ use sha2::{Digest, Sha256};
 pub enum ExecutionError {
     #[error("provider failed: {0}")]
     Provider(String),
-    #[error("durable prerequisite failed: {0}")]
+    #[error("the turn was stopped because its progress could not be saved safely: {0}")]
     Persistence(String),
-    #[error("tool outcome is unknown after execution: {0}")]
-    Uncertain(String),
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -40,7 +38,26 @@ impl ToolOutcome {
     pub fn succeeded(&self) -> bool {
         self.transport == TransportOutcome::Completed && self.domain == DomainOutcome::Succeeded
     }
+
+    /// Make an uncertain outcome explicit to the model before it is persisted.
+    /// Unknown means the tool may have executed; the model must verify before
+    /// retrying and must not blindly repeat a mutating call.
+    pub fn ensure_unknown_guidance(&mut self) {
+        if (self.transport == TransportOutcome::Unknown || self.domain == DomainOutcome::Unknown)
+            && !self.text.contains(UNKNOWN_GUIDANCE)
+        {
+            self.text = if self.text.is_empty() {
+                UNKNOWN_GUIDANCE.to_string()
+            } else {
+                format!("{UNKNOWN_GUIDANCE}\n\n{}", self.text)
+            };
+        }
+    }
 }
+
+/// The complete verify-before-retry instruction prepended to every Unknown
+/// outcome. Exported so consumers that parse the raw tool payload can strip it.
+pub const UNKNOWN_GUIDANCE: &str = "Outcome unknown: the tool may have executed. Verify the result before retrying; do not blindly repeat a mutating call.";
 #[derive(Clone, Debug)]
 pub struct ResponseRecord {
     pub raw: serde_json::Value,
@@ -185,12 +202,8 @@ impl ExecutionContext {
         name: String,
         arguments: serde_json::Value,
     ) -> Result<ToolOutcome, ExecutionError> {
-        if let Some(outcome) = sink.tool_outcome(self, &id).await? {
-            if outcome.transport == TransportOutcome::Unknown
-                || outcome.domain == DomainOutcome::Unknown
-            {
-                return Err(ExecutionError::Uncertain(outcome.text));
-            }
+        if let Some(mut outcome) = sink.tool_outcome(self, &id).await? {
+            outcome.ensure_unknown_guidance();
             return Ok(outcome);
         }
         let prefix = id.as_str();
@@ -214,12 +227,33 @@ impl ExecutionContext {
             ))
             .await?;
         // A persisted start is a durable execution fence, not permission to repeat an action.
+        // Return an explicit unknown result to the model instead of ending the turn.
         if started.receipt.duplicate {
-            return Err(ExecutionError::Uncertain(
-                "tool start already committed; reconcile its receipt instead of rerunning".into(),
-            ));
+            let mut outcome = ToolOutcome {
+                transport: TransportOutcome::Unknown,
+                domain: DomainOutcome::Unknown,
+                text: "Tool execution start was already committed; the runtime did not execute the tool again.".into(),
+            };
+            outcome.ensure_unknown_guidance();
+            let key = format!("{prefix}:outcome");
+            let (text, detail) = self.text(&key, &outcome.text, 8000);
+            let command = self.command(
+                &key,
+                Payload::Public(PublicPayload::ToolOutcome {
+                    tool_call_id: id,
+                    text,
+                    transport: outcome.transport.clone(),
+                    domain: outcome.domain.clone(),
+                }),
+                detail,
+            );
+            sink.commit(&command)
+                .await
+                .map_err(|error| ExecutionError::Persistence(error.to_string()))?;
+            return Ok(outcome);
         }
-        let outcome = tool.execute().await;
+        let mut outcome = tool.execute().await;
+        outcome.ensure_unknown_guidance();
         let key = format!("{prefix}:outcome");
         let (text, detail) = self.text(&key, &outcome.text, 8000);
         let command = self.command(
@@ -235,12 +269,7 @@ impl ExecutionContext {
         // Retrying the same result command is safe; invoking the tool again is not.
         sink.commit(&command)
             .await
-            .map_err(|error| ExecutionError::Uncertain(error.to_string()))?;
-        if outcome.transport == TransportOutcome::Unknown
-            || outcome.domain == DomainOutcome::Unknown
-        {
-            return Err(ExecutionError::Uncertain(outcome.text));
-        }
+            .map_err(|error| ExecutionError::Persistence(error.to_string()))?;
         Ok(outcome)
     }
 }

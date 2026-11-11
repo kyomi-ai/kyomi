@@ -7,7 +7,7 @@
 //! Model: `BGE-small-en-v1.5` (384 dimensions, asymmetric encoding).
 //!
 //! BGE is an asymmetric model — queries and passages are embedded differently:
-//! - **Passages** (stored data: catalog entries, learning insights, descriptions):
+//! - **Passages** (stored data: catalog entries, document chunks, descriptions):
 //!   embedded as-is via [`EmbeddingService::embed_passage`] / [`EmbeddingService::embed_passages`].
 //! - **Queries** (user search terms): embedded with a prefix via [`EmbeddingService::embed_query`].
 
@@ -117,7 +117,7 @@ impl EmbeddingService {
 
     // ─── Passage embedding (no prefix) ──────────────────────────────────
 
-    /// Embed a batch of passages (catalog entries, learning insights, descriptions).
+    /// Embed a batch of passages (catalog entries, document chunks, descriptions).
     ///
     /// Passages are embedded as-is — no query prefix. Returns one `Vec<f32>`
     /// (384 dimensions) per input text.

@@ -39,7 +39,6 @@ pub mod encryption;
 pub mod feedback_service;
 pub mod google_oauth;
 pub mod jwt;
-pub mod learning_service;
 pub mod trakkt_service;
 pub mod mcp_session_manager;
 pub mod middleware;
@@ -119,5 +118,6 @@ pub fn http_client() -> kyomi_core::Result<reqwest::Client> {
         .map_err(|e| kyomi_core::Error::Internal(format!("Failed to build HTTP client: {e}")))
 }
 
+pub mod personal_mcp_oauth;
 pub mod personal_mcp_service;
 pub mod personal_mcp_privacy;

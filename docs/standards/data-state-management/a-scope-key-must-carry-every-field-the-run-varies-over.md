@@ -54,6 +54,8 @@ archive_stale_rows(ArchiveScope::Containers(enumerated_datasets)).await?;
 // SELECT DISTINCT project_id, dataset_id FROM datasource_table_cache WHERE ...
 ```
 
+(private/local review log; not tracked in this repository)
+
 Flagged 🟡 in KYO-614's `container-scoped archive gate` review (`2026-09-03`), on the diff
 whose entire purpose was to stop a partial enumeration from archiving live catalog rows.
 `ArchiveScope::Containers(HashSet<String>)` was keyed by bare `dataset_id`

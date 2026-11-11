@@ -14,7 +14,7 @@ use serde_json::Value;
 
 use super::{ensure_query_ok, extract_rows_from_batch, extract_string_column, sql_escape};
 use crate::catalog::traits::{
-    index_catalog_sql, CatalogIndexer, SQLCatalogIndexer,
+    index_catalog_sql, CatalogIndexer, ContainerDiscovery, SQLCatalogIndexer,
 };
 use kyomi_auth::catalog::helpers::IndexerContext;
 use kyomi_auth::catalog::types::{CatalogIndexResult, ColumnEntry, TableEntry};
@@ -79,7 +79,7 @@ impl SQLCatalogIndexer for MySqlIndexer {
     async fn discover_all_containers(
         &self,
         provider: &dyn DatasourceProvider,
-    ) -> Result<Vec<String>> {
+    ) -> Result<ContainerDiscovery> {
         let exclusions = SYSTEM_DATABASES
             .iter()
             .map(|db| format!("'{db}'"))
@@ -97,7 +97,7 @@ impl SQLCatalogIndexer for MySqlIndexer {
         ensure_query_ok(&result, "discovering databases")?;
         let names = extract_string_column(&result, 0);
         // Double-filter in Rust for robustness
-        Ok(names.into_iter().filter(|n| !is_system_database(n)).collect())
+        Ok(ContainerDiscovery::complete(names.into_iter().filter(|n| !is_system_database(n)).collect()))
     }
 
     async fn get_tables_in_container(

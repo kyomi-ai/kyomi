@@ -644,9 +644,10 @@ jobs:
   # ---------------------------------------------------------------------------
   # Worktree lifecycle & script self-tests (KYO-578, KYO-617, KYO-629, KYO-632, KYO-662, KYO-679, KYO-710, KYO-733)
   #
-  # Hermetic shell self-tests cover ticket lifecycle controls, lint policies,
-  # tooling freshness, and real commit/amend hooks. All suites run even if an
-  # earlier suite fails; the job reports every failure at the end.
+  # Hermetic shell self-tests cover ticket lifecycle controls, lint policies
+  # (including server-function divergence and signal disposal safety), tooling
+  # freshness, and real commit/amend hooks. All suites run even if an earlier
+  # suite fails; the job reports every failure at the end.
   worktree-lifecycle-selftests:
     name: Worktree Lifecycle & Script Self-Tests
     runs-on: ubuntu-latest
@@ -682,6 +683,7 @@ jobs:
             scripts/preflight-clippy-test.sh
             scripts/lib/stale-tooling-guard-test.sh
             scripts/lint/check-real-identifiers-test.sh
+            scripts/lint/check-server-fns-test.sh
             scripts/lint/check-disposal-safety-test.sh
             scripts/repro-headless-subagent-survival-test.sh
             scripts/check-agent-run-result-test.sh

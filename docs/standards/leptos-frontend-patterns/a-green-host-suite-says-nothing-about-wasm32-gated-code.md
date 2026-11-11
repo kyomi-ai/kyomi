@@ -76,7 +76,7 @@ fn error_event_message(data: Option<&serde_json::Value>) -> String {
 Real precedent — `crates/kyomi-ui/src/components/chat/chat_engine.rs`, three reviews in
 three days:
 
-- **KYO-501** (review log `2026-08-29`, `08:33`) is where the mechanism was demonstrated
+- **KYO-501** (review log (private/local; not tracked in this repository) `2026-08-29`, `08:33`) is where the mechanism was demonstrated
   rather than assumed. The reviewer *"reverted the `error` handler to the pre-fix inline
   `context_type`-only check and ran `cargo test -p kyomi-ui --features ssr` — all 13
   `chat_engine` tests (and the full 508-test suite) stayed green. This proves
@@ -89,19 +89,19 @@ three days:
   residual wiring gap across all six handlers. The same review's CI-parity list records the
   other half: the wasm32/hydrate clippy pass is *"the only pass that compiles the changed
   handler wiring."*
-- **KYO-550** (review log `2026-08-30`, `02:55`) is the payoff. Because `error_event_message`
+- **KYO-550** (review log (private/local; not tracked in this repository) `2026-08-30`, `02:55`) is the payoff. Because `error_event_message`
   is host-compiled, the reviewer could mutate it — reintroducing
   `.get("error").or_else(|| d.get("message"))` — and watch
   `error_event_message_does_not_fall_back_to_the_message_key` fail with
   `left: "should not be read", right: "An error occurred"`. That mutation is available only
   because the function sits outside the gate; the identical bug one level up, in the closure,
   is still unfalsifiable on the host.
-- **KYO-550 rework** (review log `2026-08-30`, `21:15`) records the convention as
+- **KYO-550 rework** (review log (private/local; not tracked in this repository) `2026-08-30`, `21:15`) records the convention as
   established rather than ad hoc: *"`should_handle`, `error_event_context_type`, and
   `error_event_message` all carry identical `#[cfg(any(test, target_arch = "wasm32"))]`,
   consistent with the file's established pattern; the only production caller is itself
   `#[cfg(target_arch = "wasm32")]`."*
-- **KYO-474** (review log `2026-08-29`, `15:05`) shows the compile half is treated as a
+- **KYO-474** (review log (private/local; not tracked in this repository) `2026-08-29`, `15:05`) shows the compile half is treated as a
   standing requirement, not a special case: the wasm32/hydrate clippy invocation is run
   alongside the three `--features ssr` passes on a diff that touched no wasm-only code, on
   the principle that the ssr passes cannot speak for it.

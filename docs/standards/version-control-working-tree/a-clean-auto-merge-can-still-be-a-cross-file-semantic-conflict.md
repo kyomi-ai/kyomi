@@ -79,17 +79,17 @@ cargo test --locked -p kyomi-ui --features ssr chat_engine::tests_disposal_safet
 Real precedent — six critical findings across three independent PRs in two days, none of
 them in a conflicted hunk:
 
-- **KYO-214 (2026-10-09 23:52)** — 🔴, arity. The branch-only
+- (private/local review log; not tracked in this repository) **KYO-214 (2026-10-09 23:52)** — 🔴, arity. The branch-only
   `watch_service/duplicate_names_tests.rs` calls `create_watch` with 11 args; the auto-merged
   signature takes 12 (`timezone` inserted after `schedule`). rustc E0061. The conflict
   resolution in `watch_service.rs` itself was *textually flawless* — proven mechanically —
   because the defect was never in that file.
-- **KYO-214 (same review)** — 🔴, behavioural/schema. The branch-only
+- (private/local review log; not tracked in this repository) **KYO-214 (same review)** — 🔴, behavioural/schema. The branch-only
   `name_uniqueness_migration_tests.rs` seeds a "before" state at migrations `< 39`, which
   predates main's timezone migration (`00045`); the merged `get_watch` SELECTs `timezone` and
   the test panics. `cargo check` cannot see this — it is a runtime failure in a test the
   other side of the merge never compiled or ran.
-- **KYO-840 (2026-10-10, cycle 1)** — 🔴, behavioural. The branch-authored
+- (private/local review log; not tracked in this repository) **KYO-840 (2026-10-10, cycle 1)** — 🔴, behavioural. The branch-authored
   `oauth_refresh_rejects_unbound_token_but_browser_refresh_succeeds` asserts
   `invalid_grant: client_id mismatch`; main's #571 added an earlier `is_none()` guard that
   returns `invalid_grant: refresh token is not an OAuth client token` first. The merged
@@ -97,7 +97,7 @@ them in a conflicted hunk:
   the branch's pre-#571 guard order. The review note names the class exactly: *"a **cross-file
   semantic merge conflict** (test assertion vs guard-order change) that text-merge and cargo
   check both miss."*
-- **KYO-800 (2026-10-10 09:40, PR #547)** — three 🔴s, constructor drift. Main-only test
+- (private/local review log; not tracked in this repository) **KYO-800 (2026-10-10 09:40, PR #547)** — three 🔴s, constructor drift. Main-only test
   constructors (`restore_tests::edited_dashboard`, `tests_disposal_safety::build_real_engine_for_disposal_test`,
   `copilot_message_projection_tracks_frames_after_session_attachment`) omit fields the branch
   made required (`copilot_receipt`, `view_context`, `historical_preview`). Auto-merge kept both

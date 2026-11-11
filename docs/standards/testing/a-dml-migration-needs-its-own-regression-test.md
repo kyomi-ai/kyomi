@@ -41,7 +41,7 @@ let orphan: Option<i64> = sqlx::query_scalar("SELECT 1 FROM users WHERE id = ?1"
 assert_eq!(orphan, None, "the referenced unverified row must survive the DELETE");
 ```
 
-Flagged in **KYO-683** (review log `2026-09-10`, heading *"KYO-683 Phase 1: signup
+Flagged in **KYO-683** (review log (private/local; not tracked in this repository) `2026-09-10`, heading *"KYO-683 Phase 1: signup
 single-email (server-side)"*): the reconciliation migration
 (`20260910120000_reconcile_unverified_user_rows.sql` plus its SQLite twin) shipped with no
 test exercising its disposition logic, despite the two precedents above sitting in the same
