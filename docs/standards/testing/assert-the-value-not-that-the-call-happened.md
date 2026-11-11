@@ -48,7 +48,7 @@ assert!(!row_is_deleting(Some("ds-1"), "ds-2", true));
 Precedent — one 🟡 that blocked signing, and four cases where the value assertion is what
 caught the defect or was named as the reason the diff could be signed:
 
-- **KYO-443 / KYO-426** (review log `2026-08-22`, `08:40` → `09:35` cycle 2) — 🟡, blocked
+- **KYO-443 / KYO-426** (review log (private/local; not tracked in this repository) `2026-08-22`, `08:40` → `09:35` cycle 2) — 🟡, blocked
   signing. The create-mode/empty-slug guard existed twice: the pure
   `oauth_status_source_to_fetch` and an inlined copy in `use_oauth_status_refetch`'s `Memo`.
   The two replacement tests "pin today's source text/branch order but do not assert the
@@ -57,21 +57,21 @@ caught the defect or was named as the reason the diff could be signed:
   (`read_slug: impl FnOnce() -> String`) so the `Memo` delegates to the one implementation,
   and replaced the source-text pins with tests passing a `read_slug` closure that panics if
   invoked — "a genuine regression trap, not source-text pinning."
-- **KYO-467** (`2026-08-23`, `19:15`) — the reviewer's own mutation collapsed
+- (private/local review log; not tracked in this repository) **KYO-467** (`2026-08-23`, `19:15`) — the reviewer's own mutation collapsed
   `row_is_deleting` to `delete_pending` alone. Exactly three tests failed, all of them value
   assertions; the wiring test above stayed green. Logged as "the KYO-477 lens (test proves
   the signal is *computed* correctly, not merely *read*)."
-- **KYO-466 cycle 2** (`2026-08-23`, `17:45`) — mutation kept the
+- (private/local review log; not tracked in this repository) **KYO-466 cycle 2** (`2026-08-23`, `17:45`) — mutation kept the
   `resource_errors.get("projects")` read and hardcoded the message instead of interpolating
   the bound reason; `test_action_effect_computes_bq_projects_error_from_the_bound_reason`
   failed. Named in the log as "exactly the KYO-427 failure mode (right plumbing, wrong bound
   value)."
-- **KYO-411** (`2026-08-21`, `19:49`) — a test that string-matched a `Signal::derive` body
+- (private/local review log; not tracked in this repository) **KYO-411** (`2026-08-21`, `19:49`) — a test that string-matched a `Signal::derive` body
   was rewritten to call `connection_step_satisfied_from` directly across three input
   combinations. Judged "strictly stronger than the original — string presence can't verify
   logical wiring, direct calls can," and explicitly not test-weakening: the extraction is
   what made the stronger assertion possible.
-- **KYO-427** (`2026-08-23`, `12:26`) and **KYO-406** (`2026-08-24`, `15:40`) — both signed
+- (private/local review log; not tracked in this repository) **KYO-427** (`2026-08-23`, `12:26`) and **KYO-406** (`2026-08-24`, `15:40`) — both signed
   with the distinction stated in the notes. KYO-427's new tests are "reachability tests
   (mutation-provable) rather than the source-marker truth-table style that can pass while
   behavior is wrong"; KYO-406's asserts "on the actual computed `Vec` a real `Select` would

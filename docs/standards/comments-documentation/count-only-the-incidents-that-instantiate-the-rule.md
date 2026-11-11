@@ -49,7 +49,7 @@ Real precedent — three documents, and the flagship case cost three review cycl
 
 - **`label-a-reconstructed-code-block-as-not-a-quote.md`**, cycles 2 and 3 (the
   `New standard: label-a-reconstructed-code-block-as-not-a-quote` re-reviews in
-  `docs/review-logs/2026-09-04.md`; those headings carry no ticket key to cite).
+  `docs/review-logs/2026-09-04.md` (private/local review log; not tracked in this repository); those headings carry no ticket key to cite).
   Cycle 2 (🟡): two of the four cited findings do not instantiate the rule — *"This inflates
   the recurrence claim from 2 genuine instances to 4"* — and the document's own "sibling of
   `name-the-invariant-not-a-count.md`" sentence already said where one of them belonged.
@@ -60,12 +60,12 @@ Real precedent — three documents, and the flagship case cost three review cycl
   recommendation to hold the document until a second real instance turned up. Cycle 3's own
   note is the rule in one line: *"a citation that resolves and whose content summary is
   accurate in isolation can still be offered as evidence for the wrong thesis."*
-- **`a-failure-path-must-emit-what-its-siblings-emit.md`** (🟢, KYO-463's
+- (private/local review log; not tracked in this repository) **`a-failure-path-must-emit-what-its-siblings-emit.md`** (🟢, KYO-463's
   `"a failure path must emit what its siblings emit" mined standard` review, `2026-09-03`).
   "Four findings, four tickets, two languages, four days" — the four cited entries land on
   three distinct calendar days, not four. The findings were real and the pattern genuinely
   recurred; the *spread*, which is what makes a recurrence claim persuasive, was overstated.
-- **`a-resolving-identifier-is-not-a-verified-claim.md`** (🟡, KYO-533's
+- (private/local review log; not tracked in this repository) **`a-resolving-identifier-is-not-a-verified-claim.md`** (🟡, KYO-533's
   `land six orphaned standards files` review, `2026-08-30`). Blocked signing because the new
   file used the *identical* flagship incident — KYO-429, cycles 1 and 2 — as the primary
   motivating example of the pre-existing sibling

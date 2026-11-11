@@ -43,7 +43,7 @@ RIGHT — states the property the reader must hold, checkable without any named 
   about waiting is not a mechanism.
 ```
 
-Mined from two instances, both in the KYO-687 review (`docs/review-logs/2026-09-09.md`, the
+Mined from two instances, both in the KYO-687 review (`docs/review-logs/2026-09-09.md` (private/local review log; not tracked in this repository), the
 *"restate the Agent-tool `run_in_background` rule as an invariant"* entries):
 
 - **The rule being corrected.** KYO-546 established *"pass `run_in_background: false` on every

@@ -75,7 +75,7 @@ Real precedent: the same defect at three call sites.
   `✗ first sign (fully staged) succeeds — expected exit 0, got 1` followed by the
   `evp_pkey_signature_init` error. The job summary read "2 of 12 worktree lifecycle
   self-test suite(s) failed: scripts/sign-review-test.sh scripts/pre-commit-hook-test.sh".
-  The review-log entry `KYO-712 rework: ci.yml rebase resolution + -rawin for OpenSSL
+  The review-log entry (private/local; not tracked in this repository) `KYO-712 rework: ci.yml rebase resolution + -rawin for OpenSSL
   3.0.x` (`2026-09-12`) records the rework that followed. The reviewer "built an
   `ubuntu:24.04` (OpenSSL 3.0.13, matches `ubuntu-latest`) container via `podman`,
   confirmed flagless `pkeyutl -sign` fails with exactly the quoted error ... and `-rawin`
@@ -85,7 +85,7 @@ Real precedent: the same defect at three call sites.
     (`pkeyutl -verify -rawin`).
   - `scripts/pre-commit-hook-test.sh` runs the real `.githooks/pre-commit` (line 120,
     `pkeyutl -verify -rawin`) against the real `scripts/sign-review.sh`.
-- **KYO-747** is the review-log entry `KYO-747: sign-verification.sh -rawin fix (Ed25519
+- **KYO-747** is the review-log entry (private/local; not tracked in this repository) `KYO-747: sign-verification.sh -rawin fix (Ed25519
   pkeyutl on OpenSSL 3.0.x)` (`2026-09-23`). `scripts/sign-verification.sh`, the merge-gate
   signer, has the same flagless call KYO-712 fixed in the review gate. It was not caught
   the same way because, on `main`, no suite in the CI job exercises it: `git grep
@@ -96,7 +96,7 @@ Real precedent: the same defect at three call sites.
   for this rule: "Third occurrence of the exact same `pkeyutl -sign`-without-`-rawin`
   defect ... Worth a standards-doc entry ... so the next agent adding a signer doesn't
   reintroduce it a fourth time."
-- **The third site** is the verifier in the `~/.local/bin/gh` wrapper, which is outside
+- (private/local review log; not tracked in this repository) **The third site** is the verifier in the `~/.local/bin/gh` wrapper, which is outside
   this repo. Its `pkeyutl -verify` call (line 110) still has no `-rawin` at the time of
   writing. The KYO-747 entry records that it was left out of that ticket's scope as a
   documented manual step. It is also why the sweep has to reach past `scripts/`: the call

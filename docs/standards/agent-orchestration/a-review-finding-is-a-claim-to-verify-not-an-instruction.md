@@ -49,11 +49,13 @@ git show a4ce98e7:crates/kyomi-ui/src/pages/settings/datasources.rs \
 #    KYO-667 filed against the stale-tree resolution.
 ```
 
+(private/local review log; not tracked in this repository)
+
 Four incidents on four tickets, in the `2026-09-05` → `2026-09-09` window. One is the false
 finding; the other three are the remedy-overshoot half, and all three were resolved the right
 way — which is why they are worth pinning as a practice before the habit erodes:
 
-- **KYO-658**, review log `2026-09-05`, heading *"KYO-658 pre-work: new standard \"a review
+- **KYO-658**, review log (private/local; not tracked in this repository) `2026-09-05`, heading *"KYO-658 pre-work: new standard \"a review
   finding names a sample, not the population\""* — the only 🔴 in that entry carries a
   correction appended by the run that requested the review: *"**The 🔴 in this entry is FALSE —
   do not mine a standard from it.**"* The file's `datasources.rs` line citations were correct
@@ -65,7 +67,7 @@ way — which is why they are worth pinning as a practice before the habit erode
   (drop the file) stands; only the 🔴's reasoning is void"* — the two 🟡s in the same entry
   were correct, and one of them is why the file was dropped. Verifying a finding is not a
   licence to discard the report.
-- **KYO-688**, review log `2026-09-09`, heading *"KYO-688 cron sub-agent survival re-test
+- **KYO-688**, review log (private/local; not tracked in this repository) `2026-09-09`, heading *"KYO-688 cron sub-agent survival re-test
   (re-review, cycle 2)"* — the implementer accepted the cycle-1 finding and declined the
   wording the reviewer had suggested for the fix, dropping a sentence saying the script's
   indeterminate runs *"predate a known journal gap unrelated to KYO-546."* The reviewer
@@ -76,7 +78,7 @@ way — which is why they are worth pinning as a practice before the habit erode
   new sentence."* The reviewer counted it as *"the second reviewed instance in this same log
   of an agent choosing to state a narrower, evidence-backed claim over a broader one a
   reviewer suggested."*
-- **KYO-687**, review log `2026-09-09`, heading *"KYO-687: restate the Agent-tool
+- **KYO-687**, review log (private/local; not tracked in this repository) `2026-09-09`, heading *"KYO-687: restate the Agent-tool
   `run_in_background` rule as an invariant (kyomi-private/skills)"*, the cycle-2 re-review —
   cycle 1 flagged that the diff endorsed one side of a pre-existing contradiction between two
   skill docs, and offered two ways out. The implementer took neither: it removed the
@@ -86,7 +88,7 @@ way — which is why they are worth pinning as a practice before the habit erode
   The reviewer's Notes generalise it: filing the reconciliation ticket and stating "this change
   takes no side" is *"a cleaner close than either endorsing or silently reverting — it keeps
   the PR scope honest and leaves the conflict discoverable."*
-- **KYO-703**, review log `2026-09-09`, heading *"KYO-703: remove the PR-listing ceiling from
+- **KYO-703**, review log (private/local; not tracked in this repository) `2026-09-09`, heading *"KYO-703: remove the PR-listing ceiling from
   check-ticket-in-flight.sh"*, the cycle-2 re-review — cycle 1 found a comment's *"that gap is
   not hypothetical"* evidence over-reaching while its conclusion was independently sound. The
   rewrite conceded the false empirical claim and rested the argument on a structural property

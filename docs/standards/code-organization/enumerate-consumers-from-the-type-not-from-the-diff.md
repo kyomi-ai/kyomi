@@ -45,9 +45,11 @@ PR, not the resulting number: a reviewer can re-run a grep, and cannot re-derive
 pub enum UserMessagePersistence { /* crates/kyomi-agent/src/adapter.rs */ }
 ```
 
+(private/local review log; not tracked in this repository)
+
 Three findings on 2026-08-23, three different tickets, one shape:
 
-- **KYO-492** (🔴, `00:58`) — `AgentExecutionConfig::user_message_id`
+- (private/local review log; not tracked in this repository) **KYO-492** (🔴, `00:58`) — `AgentExecutionConfig::user_message_id`
   (`crates/kyomi-agent/src/execution.rs`) was renamed across a declared six-file sweep;
   a seventh construction site at `enterprise/kyomi-slack/src/routes.rs` was missed and
   the diff did not compile under `--features slack`. The review's second 🔴 is the more
@@ -56,13 +58,13 @@ Three findings on 2026-08-23, three different tickets, one shape:
   stopped persisting every Slack user message. Shipped resolution split the two signals
   into `UserMessagePersistence` (`crates/kyomi-agent/src/adapter.rs`) rather than
   renaming in place.
-- **KYO-466** (🟡, `17:22`) — `DiscoverResourcesResult`
+- (private/local review log; not tracked in this repository) **KYO-466** (🟡, `17:22`) — `DiscoverResourcesResult`
   (`crates/kyomi-ui/src/server_fns/datasources.rs`) gained a `resource_errors` map.
   `EditModeCatalogTab` consumed it; `test_action`'s Effect — the sibling consumer of the
   same struct, in the same file — kept reading only `resources` and still rendered an
   unexplained empty dropdown, the exact failure the ticket existed to fix. Resolved by
   folding the second consumer into the same PR.
-- **KYO-460** (🟡, `14:00`) — a migration retyped the corrupted `connection_config`
+- (private/local review log; not tracked in this repository) **KYO-460** (🟡, `14:00`) — a migration retyped the corrupted `connection_config`
   boolean leaves; the PR's *"six is the complete set"* was empirically false.
   `shared_credentials`, written by the same pre-KYO-428 code path and read by
   `resolve_shared_credentials` in `~/repos/kyomi-connect`, was absent from both the

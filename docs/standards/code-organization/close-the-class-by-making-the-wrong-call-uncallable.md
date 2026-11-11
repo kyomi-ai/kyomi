@@ -65,7 +65,7 @@ impl<T, E: std::fmt::Display + NotKyomiCoreError> IntoServerFnError<T> for Resul
 
 Real precedent, the same week, in both directions:
 
-- **KYO-523** (review log `2026-08-29`, `22:44`, PR #433) did the strong
+- **KYO-523** (review log (private/local; not tracked in this repository) `2026-08-29`, `22:44`, PR #433) did the strong
   version: `.into_sfn_core()` *plus* the sealed `NotKyomiCoreError` marker that
   narrows `IntoServerFnError`'s blanket impl, so `.into_sfn()` on a
   `kyomi_core::Error` no longer compiles. 195 call sites migrated; the trait's
@@ -77,7 +77,7 @@ Real precedent, the same week, in both directions:
   `cargo check` failed with E0599. The design assessment recorded that
   "the compile-error-over-lint approach (sealed marker trait) is a stronger
   regression guard than the ticket's suggested lint."
-- **KYO-526** (review log `2026-08-30`, `00:12` and `12:56`, PR #435) did the
+- **KYO-526** (review log (private/local; not tracked in this repository) `2026-08-30`, `00:12` and `12:56`, PR #435) did the
   weak version for the sibling leak class: `.into_sfn_sqlx()` was added for the
   8 sites the ticket named, but nothing was narrowed — `sqlx::Error` still
   implements `NotKyomiCoreError`, so bare `.into_sfn()` keeps compiling for
@@ -87,7 +87,7 @@ Real precedent, the same week, in both directions:
   this PR partially fixed" — `crates/kyomi-ui/src/server_fns/datasources.rs`,
   the `last_catalog_refresh` and `catalog_refresh_status` reads. KYO-557 tracks
   finishing the migration.
-- **KYO-468** (review log `2026-08-29`, `21:20` through `23:40`) is the same
+- **KYO-468** (review log (private/local; not tracked in this repository) `2026-08-29`, `21:20` through `23:40`) is the same
   lesson outside error handling. Three consecutive review cycles each closed one
   more incomplete `bq_projects`/`bq_projects_error`/`bq_projects_attempted`
   reset site by hand — the routing predicate, then the Remove chip, then three

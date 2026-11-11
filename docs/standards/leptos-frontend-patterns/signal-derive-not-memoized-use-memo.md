@@ -20,4 +20,6 @@ let is_owner = move || {
 };
 ```
 
+(private/local review log; not tracked in this repository)
+
 Flagged as 🟡 in KYO-240 (2026-08-03): once the `UserContext` fetch failed, every later team action — remove member, role change, initiate/cancel transfer — bumped `members_version`/`transfers_version`, re-ran the enclosing closure, and re-logged "user context fetch failed", so one stale failure read as a stream of fresh ones. The identical shape one function away (`is_owner_from` re-awaiting a cached `Err`) was ticketed as KYO-304.

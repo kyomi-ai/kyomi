@@ -54,6 +54,17 @@ pub async fn has_password() -> Result<bool, ServerFnError> {
         .into_sfn_core()
 }
 
+/// Whether disconnecting Google would remove the current user's only sign-in method.
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
+pub async fn google_is_only_sign_in_method() -> Result<bool, ServerFnError> {
+    let auth = extract_auth().await?;
+    let ctx = extract_context()?;
+
+    kyomi_auth::user_service::google_is_only_sign_in_method(&ctx.db, &auth.user_id)
+        .await
+        .into_sfn_core()
+}
+
 /// Set a password for a user who does not yet have one (e.g. OAuth-only users).
 ///
 /// Validation rules:

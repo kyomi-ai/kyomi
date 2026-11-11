@@ -1,11 +1,23 @@
 # Cite a review-log entry by ticket and heading, not by timestamp
 
-`docs/review-logs/` is the corpus every standards rule draws its authority from, so almost
-every mined rule ends with a paragraph pointing back into it. The obvious way to write that
-pointer is the coordinate the log appears to offer: a date (the filename) and a time (the
-`### HH:MM —` heading). Both parts are unreliable, and they are unreliable in ways that do
-not announce themselves — the file exists, the timestamp exists, and the reader who follows
-the pointer lands on a real review entry that simply isn't yours.
+`docs/review-logs/` (private/local review logs; not tracked in this repository) is a
+source of incidents mined into these standards. Readers of this repository cannot follow
+those paths without separate local access. The standard must explain its argument in full;
+the log supplies private corroboration, not a prerequisite for understanding the rule.
+
+Label every private-log citation **(private/local review log; not tracked in this
+repository)**, including citations given only by date, ticket, or heading. Keep private
+paths as inline code, never as Markdown links that imply a tracked file. Mark command
+examples as requiring local access. Prefer existing tracked code, commits, or public
+artefacts as corroboration when useful; do not publish log contents or private incident
+details to make a citation accessible.
+
+For readers with local access, the obvious coordinate is a date (the filename) and a time
+(the `### HH:MM —` heading). Both are unreliable in ways that do not announce themselves:
+the file and timestamp can exist while the reader lands on a real review entry that
+simply isn't the intended one. The examples below refer to those private/local logs.
+
+(private/local review log; not tracked in this repository)
 
 The date is the **append** date, not the event date. `scripts/append-review-log.sh:95` writes
 to `${logs_dir}/$(date +%F).md`, evaluated when the append runs, so a review that concluded
@@ -15,19 +27,19 @@ late on one day and was written up after midnight is filed under the next day. C
 The time is free text the reviewing agent types into its own heading. Nothing derives it,
 nothing orders it, and nothing enforces it:
 
-- **Not monotonic.** `2026-09-03.md` opens `14:20`, `01:10`, `09:40`, `03:53`, then an
+- (private/local review log; not tracked in this repository) **Not monotonic.** `2026-09-03.md` opens `14:20`, `01:10`, `09:40`, `03:53`, then an
   untimed entry, then `04:32`. Scanning to "the 20:35 entry" by reading downwards finds the
   wrong one.
-- **Not unique.** `### 20:35` appears twice in `2026-08-30.md` (lines 500 and 516 — the
+- (private/local review log; not tracked in this repository) **Not unique.** `### 20:35` appears twice in `2026-08-30.md` (lines 500 and 516 — the
   initial and cycle-2 reviews of the same file). `### 14:20` appears twice in `2026-09-03.md`,
   on two different tickets.
-- **Sometimes absent.** `2026-09-03.md:138` is `### (session) — Two new coding standards: …`.
+- (private/local review log; not tracked in this repository) **Sometimes absent.** `2026-09-03.md:138` is `### (session) — Two new coding standards: …`.
   There is no timestamp to cite; a paragraph that cites only timestamps silently drops that
   entry from its evidence, or invents one. The ticket key can be missing too — the three
   `### … — New standard: label-a-reconstructed-code-block-as-not-a-quote` entries in
   `2026-09-04.md` carry no `KYO-NN` anywhere in their headings, and a citation that supplies
   one anyway has fabricated it.
-- **Not a reliable `sed` range, either.** Entries contain their own `###` sub-headings —
+- (private/local review log; not tracked in this repository) **Not a reliable `sed` range, either.** Entries contain their own `###` sub-headings —
   `### Minor Issues (🟢 — logged, not blocking)` and `### Positive Observations` sit *inside*
   the 22:17 entry at `2026-09-03.md:1021`/`:1026` — so `sed -n '/22:17/,/^### /p'` stops
   before that entry's findings and reports them as absent.
@@ -59,10 +71,11 @@ Mined from the 2026-09-03 log (12:35 / 13:40 cycles, and 20:35).
      with the day named only after the file it actually landed in was opened. -->
 Mined from KYO-629's `preflight-clippy.sh + CI parity self-test` review and from
 the untimed `(session)` review of the two `guard-fixed-for-one-branch` /
-`prove-a-flagged-secret-is-fake` standards (both `docs/review-logs/2026-09-03.md`).
+`prove-a-flagged-secret-is-fake` standards (both `docs/review-logs/2026-09-03.md` (private/local review log; not tracked in this repository)).
 ```
 
 ```sh
+# Private/local review logs; not tracked in this repository. Requires local access.
 # Locate the entry without assuming a day, then read from its heading to the
 # *next entry's* heading rather than the next `###` of any kind.
 grep -rn "KYO-629" docs/review-logs/
@@ -74,7 +87,7 @@ Three documents in four days, each pointing at a real entry that was not the one
 
 - **`label-a-reconstructed-code-block-as-not-a-quote.md`** (blocked signing 🟡; the
   `New standard: label-a-reconstructed-code-block-as-not-a-quote` review — one of the
-  ticketless headings this rule warns about — in `docs/review-logs/2026-09-04.md`).
+  ticketless headings this rule warns about — in `docs/review-logs/2026-09-04.md` (private/local review log; not tracked in this repository)).
   Cited "the 2026-09-03 log (12:35 / 13:40 cycles, and 20:35)" for three of four findings.
   The real 20:35 entry (`2026-09-03.md:860`) is a KYO-629 rework with a Clean verdict and no
   technical-accuracy finding in it whatsoever; the intended finding is at 16:40
@@ -82,11 +95,11 @@ Three documents in four days, each pointing at a real entry that was not the one
   `### (session) —` entry at `:138`, which the paragraph never mentioned. Only the 12:35 half
   resolved. The cycle-2 fix cited the untimed entry by *description* rather than by clock,
   which is the shape this rule prescribes.
-- **`validate-a-suppression-predicate-anchored-not-by-substring-deletion.md:64`** (🟢, KYO-629's
+- (private/local review log; not tracked in this repository) **`validate-a-suppression-predicate-anchored-not-by-substring-deletion.md:64`** (🟢, KYO-629's
   `preflight-clippy.sh + CI parity self-test` review, `2026-09-03`). "Real precedent: KYO-558 /
   KYO-612 (2026-09-02)" — the cited entries are in `2026-09-03.md`, the file they were
   *appended* to. Off by one day; fixed by rewriting the date, per the same log's rework entry.
-- **`verify-the-replacement-before-destroying-the-original.md`** (🟢, KYO-463's
+- (private/local review log; not tracked in this repository) **`verify-the-replacement-before-destroying-the-original.md`** (🟢, KYO-463's
   `two new coding-standard docs (spec-green mining pass)` review, `2026-09-01`). Quoted
   KYO-567's fast-forward/non-ancestor-sha reasoning correctly but attributed it to "Cycle 3";
   the reasoning is in the `16:51` entry, which the log labels cycle 2. The `16:57` entry —

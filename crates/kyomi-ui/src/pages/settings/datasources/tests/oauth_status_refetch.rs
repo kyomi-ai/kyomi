@@ -1,11 +1,10 @@
 //! OAuth status re-fetch wiring: the shared `use_oauth_status_refetch`
 //! hook and its per-provider source-mapping functions (KYO-197, fixing
 //! Synapse's missing re-fetch), the create-mode fetch-guard predicate
-//! `oauth_status_source_to_fetch` (KYO-411/KYO-426/KYO-443), and the two
-//! places that predicate's effect has to be visible end-to-end: the
+//! `oauth_status_source_to_fetch` (KYO-411/KYO-426/KYO-443), the
 //! Connection-step gate accepting an already-established connection
-//! (KYO-411) and the BigQuery OAuth success arm writing `test_result` so
-//! create mode's Next button can ever enable at all (KYO-404).
+//! (KYO-411) and the BigQuery OAuth success arm recording successful
+//! `test_result` and `discovery_status` values (KYO-404).
 //!
 //! Split out of `oauth.rs` by KYO-475 — see
 //! `docs/standards/code-organization/one-test-topic-per-file-not-one-big-mod-tests.md`.
@@ -476,26 +475,22 @@ fn connection_step_satisfied_from_accepts_an_already_connected_kyomi_oauth_accou
 
 // ── KYO-404: BigQuery create-mode OAuth deadlock ────────────────────
 //
-// BigQuery datasources could not be created at all. The create-mode
-// "Next" button gates on `test_result.success`, but BigQuery's OAuth
-// success arm never wrote `test_result` — BigQuery has no Test &
-// Discover step; the OAuth handshake itself is the verification — so
-// `test_result` stayed `None` forever and "Next" never enabled. The fix
-// has three independent parts, each guarded by one test below: the
-// OAuth success arm now writes `test_result`/`discovery_status` itself;
-// the kyomi_oauth connect panel is no longer hidden in create mode (so
-// there is something to click that produces the write above); and the
-// create-mode `can_next` gate gained a narrow bigquery-enterprise_oauth
-// exception for the one mode that still cannot produce a `test_result`
-// before save.
+// KYO-404 added successful `test_result`/`discovery_status` writes to the
+// BigQuery OAuth success arm. This test pins those writes, not their
+// necessity for the current create-mode Connection-step gate:
+// `connection_step_satisfied_from` accepts Datasource(_) modes before
+// save, while the retired GoogleAccount/kyomi_oauth path accepts either
+// `oauth_connected` or `test_succeeded`. The success arm sets the former
+// alongside `test_result`. None/service_account requires `test_succeeded`;
+// the listener only applies this write when the message source matches the
+// currently selected provider/mode (KYO-921), covered by
+// `modal_oauth_callback_ignores_late_success_after_selection_changes` below.
 
 /// The `GoogleSuccess | BigqueryEnterpriseSuccess` arm of the modal-level
-/// OAuth `postMessage` listener must itself write `test_result` and
-/// `discovery_status` to a success state. Before KYO-404 this arm only
-/// updated the OAuth connected/email/expired/connecting signals, so
-/// nothing in the BigQuery kyomi_oauth flow (which never calls
-/// `do_test_and_discover`) ever produced a `test_result`, permanently
-/// disabling the create-mode "Next" button.
+/// OAuth `postMessage` listener records successful `test_result` and
+/// `discovery_status` values without calling `do_test_and_discover`.
+/// This source test preserves those writes; it does not establish that
+/// either is required to enable the current create-mode "Next" button.
 ///
 /// Bounds: the extraction runs from the exact arm pattern
 /// `OAuthMessage::GoogleSuccess { email }` up to the next arm's pattern,
@@ -523,13 +518,77 @@ fn google_oauth_success_arm_sets_test_result_and_discovery_status() {
     assert!(
         arm.contains("set_test_result.try_set(Some(TestConnectionResult {"),
         "the GoogleSuccess | BigqueryEnterpriseSuccess arm must set test_result to \
-         Some(...) on success — without it, test_result stays None forever for \
-         BigQuery kyomi_oauth, which never runs Test & Discover, permanently \
-         disabling the create-mode Next button (KYO-404)"
+         Some(...) on success to record the OAuth result for UI that renders \
+         test_result; this source guard pins result recording, not the create-mode \
+         Next gate, which accepts Datasource(_) modes before save or an already \
+         connected GoogleAccount (KYO-916)"
     );
     assert!(
         arm.contains("set_discovery_status.try_set(\"success\""),
         "the GoogleSuccess | BigqueryEnterpriseSuccess arm must also set \
          discovery_status to \"success\" alongside test_result"
     );
+}
+
+/// Drive the production callback after changing the selection, as a late popup does.
+#[test]
+fn modal_oauth_callback_ignores_late_success_after_selection_changes() {
+    use super::super::{build_modal_oauth_listener, ModalOAuthSetters, TestConnectionResult};
+    use crate::utils::oauth_popup::OAuthMessage;
+    use leptos::prelude::*;
+    use std::{cell::Cell, rc::Rc};
+
+    let owner = Owner::new();
+    owner.with(|| {
+        for (provider, mode, message) in [
+            ("bigquery", "kyomi_oauth", OAuthMessage::GoogleSuccess { email: Some("account@example.com".into()) }),
+            ("bigquery", "enterprise_oauth", OAuthMessage::BigqueryEnterpriseSuccess { email: Some("enterprise@example.com".into()) }),
+            ("snowflake", "oauth", OAuthMessage::SnowflakeSuccess { email: None }),
+            ("databricks", "oauth", OAuthMessage::DatabricksSuccess { email: None }),
+            ("synapse", "enterprise_oauth", OAuthMessage::MicrosoftEnterpriseSuccess { email: None }),
+        ] {
+            let selection = RwSignal::new((provider.to_string(), mode.to_string()));
+            let (connected, set_modal_oauth_connected) = signal(false);
+            let (email, set_modal_oauth_email) = signal(None);
+            let (expired, set_modal_oauth_expired) = signal(true);
+            let (connecting, set_modal_oauth_connecting) = signal(true);
+            let (test, set_test_result) = signal::<Option<TestConnectionResult>>(None);
+            let (discovery, set_discovery_status) = signal("idle".to_string());
+            let calls = Rc::new(Cell::new(0));
+            let calls_for_callback = calls.clone();
+            let callback = build_modal_oauth_listener(
+                move || selection.get_untracked(),
+                ModalOAuthSetters { set_modal_oauth_connected, set_modal_oauth_email, set_modal_oauth_expired, set_modal_oauth_connecting, set_test_result, set_discovery_status },
+                move || calls_for_callback.set(calls_for_callback.get() + 1),
+                |_| panic!("success must not emit an error"),
+            );
+            // Constructed while OAuth was selected, dispatched after switching away.
+            for current in [("bigquery", "service_account"), ("snowflake", "password"), ("postgres", ""), ("bigquery", if mode == "kyomi_oauth" { "enterprise_oauth" } else { "kyomi_oauth" })] {
+                if current == (provider, mode) { continue; }
+                selection.set((current.0.into(), current.1.into()));
+                callback(message.clone());
+                assert!(!connected.get_untracked(), "{provider}/{mode} leaked into {current:?}");
+                assert_eq!(email.get_untracked(), None);
+                assert!(expired.get_untracked());
+                assert!(connecting.get_untracked());
+                assert!(test.get_untracked().is_none());
+                assert_eq!(discovery.get_untracked(), "idle");
+                assert_eq!(calls.get(), 0);
+                assert!(!connection_step_satisfied_from("bigquery", "service_account", connected.get_untracked(), test.get_untracked().is_some_and(|r| r.success)));
+            }
+            selection.set((provider.into(), mode.into()));
+            callback(message);
+            assert!(connected.get_untracked());
+            assert!(!expired.get_untracked());
+            assert!(!connecting.get_untracked());
+            if provider == "bigquery" {
+                assert!(test.get_untracked().is_some_and(|r| r.success));
+                assert_eq!(discovery.get_untracked(), "success");
+                assert_eq!(calls.get(), 0);
+            } else {
+                assert_eq!(calls.get(), 1);
+                assert!(test.get_untracked().is_none());
+            }
+        }
+    });
 }

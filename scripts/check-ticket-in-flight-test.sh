@@ -63,13 +63,17 @@ mkdir -p "$STUB_BIN"
 export GH_STDOUT_FILE="$tmpdir/gh_stdout"
 export GH_STDERR_FILE="$tmpdir/gh_stderr"
 export GH_EXIT_FILE="$tmpdir/gh_exit"
+export GH_CALLS_DIR="$tmpdir/gh_calls"
+mkdir -p "$GH_CALLS_DIR"
 
 cat >"$STUB_BIN/gh" <<'STUB'
 #!/usr/bin/env bash
-# Test-only stand-in for `gh`. Ignores its arguments entirely and replays
+# Test-only stand-in for `gh`. Records argv per call, then replays
 # whatever the test harness staged in GH_STDOUT_FILE / GH_STDERR_FILE /
 # GH_EXIT_FILE. Ships only inside this test's own $tmpdir/bin, first on
 # PATH for the duration of the run — never touches the real `gh` or network.
+call_file="$(mktemp "$GH_CALLS_DIR/call.XXXXXX")"
+printf '%s\0' "$@" >"$call_file"
 if [ "$1" = api ] && [[ "$2" =~ /pulls/[0-9]+$ ]]; then
     printf 'closed\t-\tunused\t-\t-\ttest/repo\ttest/repo\n'
     exit 0
@@ -205,6 +209,7 @@ run_check() {
     # run_check <dir> <ticket> [extra args to check-ticket-in-flight.sh...]
     local dir="$1" ticket="$2" out
     shift 2
+    rm -f "$GH_CALLS_DIR"/call.*
     if out="$(cd "$dir" && "$SCRIPT" "$ticket" "$@" 2>&1)"; then
         CHECK_STATUS=0
     else
@@ -249,6 +254,46 @@ assert_not_contains() {
     else
         printf "  \xe2\x9c\x93 %s\n" "$name"
         PASS=$((PASS + 1))
+    fi
+}
+
+assert_paginated_pr_fetch() {
+    # Inspect tokens, not a whole command or jq/query spelling. Separate call
+    # files preserve argv boundaries even when filters contain whitespace.
+    local call arg api_fetch=0 pr_list=0 paginated_fetch=0 endpoint paginate
+    local -a args=()
+    for call in "$GH_CALLS_DIR"/call.*; do
+        [ -f "$call" ] || continue
+        mapfile -d '' -t args <"$call"
+        if [ "${args[0]:-}" = pr ] && [ "${args[1]:-}" = list ]; then
+            pr_list=1
+        fi
+        [ "${args[0]:-}" = api ] || continue
+        endpoint=0 paginate=0
+        for arg in "${args[@]:1}"; do
+            case "$arg" in
+                */pulls | */pulls\?*) endpoint=1 ;;
+                --paginate) paginate=1 ;;
+            esac
+        done
+        if [ "$endpoint" = 1 ]; then
+            api_fetch=1
+            [ "$paginate" = 0 ] || paginated_fetch=1
+        fi
+    done
+    if [ "$api_fetch" = 1 ] && [ "$pr_list" = 0 ]; then
+        printf '  ✓ PR listing uses gh api and never gh pr list\n'
+        PASS=$((PASS + 1))
+    else
+        printf '  ✗ PR listing must use gh api and never gh pr list\n'
+        FAIL=$((FAIL + 1))
+    fi
+    if [ "$paginated_fetch" = 1 ]; then
+        printf '  ✓ PR listing API call includes --paginate\n'
+        PASS=$((PASS + 1))
+    else
+        printf '  ✗ PR listing API call must include --paginate\n'
+        FAIL=$((FAIL + 1))
     fi
 }
 
@@ -481,6 +526,7 @@ seed_main "$bare13"
 clone_repo "$bare13" "$t13/workerB"
 gh_ok_prs_n "$CEILINGLESS_ROWS"
 run_check "$t13/workerB" 422
+assert_paginated_pr_fetch
 assert_exit "a $CEILINGLESS_ROWS-row listing with no match is CLEAR, not a failure" 0
 assert_not_contains "does not claim the listing may be truncated" "may be truncated"
 assert_not_contains "does not fail closed on listing size" "COULD NOT COMPLETE ALL CHECKS"
@@ -499,6 +545,7 @@ seed_main "$bare14"
 clone_repo "$bare14" "$t14/workerB"
 gh_ok_prs_n "$CEILINGLESS_ROWS" "$(pr_row 503 OPEN "$POST_RESTART_TS" jason/kyo-422-guard)"
 run_check "$t14/workerB" 422
+assert_paginated_pr_fetch
 assert_exit "a match beyond the retired ceiling is IN FLIGHT" 1
 assert_contains "names the matching PR" "PR #503 (OPEN) branch jason/kyo-422-guard"
 echo

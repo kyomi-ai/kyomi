@@ -17,7 +17,7 @@ excluded is precisely where the unreviewed change sits, and the approval signatu
 to the whole staged diff, not to the subset the request named. So the change nobody read
 ships *signed*, with a review entry recording a scope that never covered it.
 
-Three shapes, all seen in the `2026-09-09` and `2026-09-11` review logs:
+Three shapes, all seen in the `2026-09-09` and `2026-09-11` review logs (private/local; not tracked in this repository):
 
 - **The named delta undercounts.** "Nothing is committed" when the branch carries three
   commits plus a staged delta; "that script was untouched" when it has two hunks against
@@ -70,7 +70,7 @@ assuming the pipeline transfers.)
 Four instances across three tickets and two log days, all caught by the reviewer rather
 than by the requester:
 
-- **KYO-692 / KYO-713 (PR #505), `2026-09-11` log, the *cycle 4* entry under "rename and
+- (private/local review log; not tracked in this repository) **KYO-692 / KYO-713 (PR #505), `2026-09-11` log, the *cycle 4* entry under "rename and
   correct the headless sub-agent standard"** — *"the branch carries **three commits**
   (`3da98da8`, `486e4b10`, `15a92e68`) plus a staged delta — the request's 'nothing is
   committed' is inaccurate; reviewed against `origin/main`, which is the correct baseline
@@ -82,14 +82,14 @@ than by the requester:
   also verified a **self-directed fix** in `repro-headless-subagent-survival.sh` that no
   previous cycle had reviewed — *"(no prior reviewer saw it)"* — reachable only by diffing
   the branch rather than reading the hunks the request pointed at.
-- **KYO-704 Phase A, `2026-09-11` log, the initial entry under "retire BigQuery
+- (private/local review log; not tracked in this repository) **KYO-704 Phase A, `2026-09-11` log, the initial entry under "retire BigQuery
   `kyomi_oauth`, default to `service_account`"** — 🟡, the justification shape. A doc
   comment asserted that `onboarding_service.rs` fails closed on the retired status; the
   reviewer read it and found *"an explicit two-value allowlist, not a catch-all"*, and
   closed on the scope claim directly: the repair is *"One-line fix … not a signature
   change, so the implementer's 'out of phase-A scope' justification for not touching this
   file doesn't actually cover it."*
-- **KYO-711, `2026-09-09` log, the *cycle 2* re-review under "self-test + CI registration
+- (private/local review log; not tracked in this repository) **KYO-711, `2026-09-09` log, the *cycle 2* re-review under "self-test + CI registration
   for `repro-headless-subagent-survival.sh`"** — the claim was unestablished rather than
   false, and establishing it took real work: *"the requester could not isolate the
   increment via `git diff --cached` (that shows the whole uncommitted PR against HEAD,
@@ -100,20 +100,20 @@ than by the requester:
 The derivation this rule asks for is already house practice, which is the argument for
 writing it down rather than a reason not to:
 
-- **KYO-703, `2026-09-09` log, the *cycle 2* entry under "remove the PR-listing ceiling
+- (private/local review log; not tracked in this repository) **KYO-703, `2026-09-09` log, the *cycle 2* entry under "remove the PR-listing ceiling
   from `check-ticket-in-flight.sh`"** — *"**Both changes are provably comment-only.**
   Stripped every `#`-comment and blank line from each file and diffed the remainder:
   `check-ticket-in-flight.sh` **335 executable lines identical** to the blob I signed as
   `6cf70b92…`."*
-- **KYO-688, `2026-09-09` log, the initial entry under "cron sub-agent survival re-test"**
+- (private/local review log; not tracked in this repository) **KYO-688, `2026-09-09` log, the initial entry under "cron sub-agent survival re-test"**
   — *"every added/removed line … begins with `#`, confirmed via
   `git diff --cached | grep -vE '^[+-]#'` returning nothing."*
-- **KYO-662, `2026-09-05` log, the *cycle 2* entry under "real-world identifier lint
+- (private/local review log; not tracked in this repository) **KYO-662, `2026-09-05` log, the *cycle 2* entry under "real-world identifier lint
   gate"** — the entry opens by naming why the scope claim matters at all (*"Diff changed
   after cycle-1 sign-off … invalidating the signature"*) and then derives it: *"Isolated the
   non-comment/non-blank changed lines in the pre-commit diff by hand … no other executable
   line moved."*
-- **KYO-644, `2026-09-05` log, the *cycle 2* entry under "chunk + offload catalog embedding
+- (private/local review log; not tracked in this repository) **KYO-644, `2026-09-05` log, the *cycle 2* entry under "chunk + offload catalog embedding
   batches off the async runtime"** — *"Verified the fix is comment-only — diffed … against
   the previously-reviewed state: every call site …, the chunking implementation,
   `EMBED_BATCH_SIZE`, and both regression tests are byte-identical to cycle 1."*

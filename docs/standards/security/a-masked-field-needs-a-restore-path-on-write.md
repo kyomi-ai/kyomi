@@ -79,7 +79,7 @@ if let Some(meta) = meta {
 Real precedent — one review, two 🔴, both pre-existing and both escalated rather than
 deferred:
 
-- **KYO-702**, review log `2026-09-15`, the entry headed *"KYO-702: BigQuery/Snowflake
+- **KYO-702**, review log (private/local; not tracked in this repository) `2026-09-15`, the entry headed *"KYO-702: BigQuery/Snowflake
   auth-mode-switch secret leak (strip_inactive_auth_mode_fields)"* — 2 🔴, unsigned. Finding
   #1: *"every save of a BigQuery(enterprise_oauth)/Snowflake(oauth)/Databricks(oauth)/
   Synapse(enterprise_oauth) datasource that doesn't retype the secret persists the literal
@@ -87,7 +87,7 @@ deferred:
   half, on `service_account_json`. The reviewer escalated both to CRITICAL despite their
   being pre-existing, because *"the diff's own new AC3-labeled test directly exercises this
   exact scenario and reports success while persisting a corrupted value."*
-- **KYO-780** (PR #532, merged as `0f30cc5b`), review log `2026-09-15`, the two entries
+- **KYO-780** (PR #532, merged as `0f30cc5b`), review log (private/local; not tracked in this repository) `2026-09-15`, the two entries
   headed *"KYO-780: restore type-specific sensitive connection_config fields
   (oauth_client_secret / service_account_json)"* — the fix, plus the registry additions for
   Snowflake and Databricks. The re-review records why those additions are not scope creep:

@@ -13,4 +13,6 @@ assert_eq!(counts.len(), 2, "query must return only the requested sessions; an A
 assert_eq!(counts.get("session-a"), Some(&3));
 ```
 
+(private/local review log; not tracked in this repository)
+
 Flagged as 🟡 in KYO-292 (2026-08-09): `postgres_fetch_session_counts_counts_messages_and_pinned` (`crates/kyomi-auth/src/chat_service.rs`) and `postgres_fetch_member_counts_counts_only_active_members` (`crates/kyomi-auth/src/workspace_service.rs`) both looked up only their own seeded ids and both survived the `AND`→`OR` mutation traced above, while the two sibling tests in the same diff that did assert `.len()` did not. This is the test-side counterpart of *`workspace_id` is not an authorization boundary* above — the query returns more than the requester may see, and every assertion still passes.
