@@ -53,13 +53,13 @@ let on_outcome = move |_outcome| {
 
 Three tickets, one shape:
 
-- **KYO-469** (`13:05`, 2026-08-23) — the double-speak case. The generic Test & Discover
+- (private/local review log; not tracked in this repository) **KYO-469** (`13:05`, 2026-08-23) — the double-speak case. The generic Test & Discover
   site rendered the same failure twice: once as the connection-badge heading and once
   through a separate `discovery_error`-driven `Alert`. The fix routed both sites through
   one shared `ConnectionTestResultBadge` and removed `discovery_error` entirely — the
   review counted the removal as *five* sites for one signal (two setters, two resets, one
   reader), which is the real size of retiring a reporting channel.
-- **KYO-440 cycle 4 / KYO-524** (`06:15`, 2026-08-24) — the same-event-two-producers case,
+- (private/local review log; not tracked in this repository) **KYO-440 cycle 4 / KYO-524** (`06:15`, 2026-08-24) — the same-event-two-producers case,
   introduced by an otherwise-correct fix. Making the popup monitor's liveness gate
   row-private (see
   [split-a-value-that-answers-two-questions.md](../data-state-management/split-a-value-that-answers-two-questions.md))
@@ -69,7 +69,7 @@ Three tickets, one shape:
   with the early return shown above, plus two tests pinning that the check lives in
   `on_outcome` and *not* in `still_connecting`, where it would resurrect the shared-signal
   bug the cycle had just closed.
-- **KYO-466** (`17:22`, 2026-08-23) — both remaining variants in one review. 🟡: the
+- (private/local review log; not tracked in this repository) **KYO-466** (`17:22`, 2026-08-23) — both remaining variants in one review. 🟡: the
   `test_action` Effect read `r.resources` but never `r.resource_errors`, so a
   `list_projects()` denial rendered an empty, unexplained dropdown — nobody spoke, on the
   exact code path the ticket existed to fix. 🟢: `discovery_outcome_message` computed three

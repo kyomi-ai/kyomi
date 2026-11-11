@@ -83,11 +83,13 @@ RIGHT — both deviations named, with the fact that forced each:
 - No other deviations.
 ```
 
+(private/local review log; not tracked in this repository)
+
 Real precedent — five tickets across four log days (`2026-09-09`, `2026-09-11`, `2026-09-12`,
 `2026-09-13`). Entries are cited by ticket and heading per
 [../comments-documentation/cite-a-review-log-entry-by-ticket-and-heading-not-by-timestamp.md](../comments-documentation/cite-a-review-log-entry-by-ticket-and-heading-not-by-timestamp.md):
 
-- **KYO-692 (PR #505), `2026-09-09` log, the entry under "rewrite
+- (private/local review log; not tracked in this repository) **KYO-692 (PR #505), `2026-09-09` log, the entry under "rewrite
   no-background-subagents-under-headless-run.md"** — the flagship, and the only clean-on-the-
   first-pass review in the chain. Two of the ticket's own ACs were false, both flagged before
   implementation. On AC 1 the reviewer: *"This is the correct call — omitting it entirely would
@@ -97,7 +99,7 @@ Real precedent — five tickets across four log days (`2026-09-09`, `2026-09-11`
   premise."* The entry's verdict is the rule in one line: *"Both deviations improve accuracy
   over literal AC compliance and neither weakens the "will this mislead a copier" test —
   approved as written."*
-- **KYO-692 / KYO-713 (PR #505), the `2026-09-09` "conflict-rebase re-review" entry and the
+- (private/local review log; not tracked in this repository) **KYO-692 / KYO-713 (PR #505), the `2026-09-09` "conflict-rebase re-review" entry and the
   `2026-09-11` entries under "rename and correct the headless sub-agent standard"** — the same
   three deviations were adjudicated in seven separate review entries across two days, each
   closing with a paragraph re-justifying them from scratch (*"all three upheld"*, four times in
@@ -111,20 +113,20 @@ Real precedent — five tickets across four log days (`2026-09-09`, `2026-09-11`
   still carries the defective form, and KYO-692 owns correcting it" would ship a false statement
   the moment this PR merges — so the deviation is justified; only the description of it was
   wrong."*
-- **KYO-679, `2026-09-13` log, the entry under "Rule B disposal-safety lint ratchet"** — the
+- (private/local review log; not tracked in this repository) **KYO-679, `2026-09-13` log, the entry under "Rule B disposal-safety lint ratchet"** — the
   convention case rather than the ticket case. The diff edited an existing file under
   `docs/standards/`, against the index's "adding a standard creates exactly one new file and
   modifies no existing line". Upheld, with the premise named: the file *"was already asserting
   stale/false claims… updating it is the correct call, not a violation of the "don't edit
   existing rule files" invariant, which is scoped to prevent concurrent-PR collisions on
   new-rule additions, not to freeze accuracy bugs in place."*
-- **KYO-704 Phase A, `2026-09-11` log, the initial entry under "retire BigQuery kyomi_oauth,
+- (private/local review log; not tracked in this repository) **KYO-704 Phase A, `2026-09-11` log, the initial entry under "retire BigQuery kyomi_oauth,
   default to service_account"** — 🟡, and the check on this rule rather than an instance of it.
   The deviation here was a *refusal* to touch a neighbouring file, justified as out of scope;
   the reviewer opened the fix and measured it: *"One-line fix… not a signature change, so the
   implementer's "out of phase-A scope" justification for not touching this file doesn't actually
   cover it."* A stated justification is a claim with the same standing as any other.
-- **KYO-728 phase A, `2026-09-12` log, the entry under "collapse passkey-vs-email signup
+- (private/local review log; not tracked in this repository) **KYO-728 phase A, `2026-09-12` log, the entry under "collapse passkey-vs-email signup
   fork"** — 🟢, the counter-example. The brief said a divider is removed; the diff re-gated it
   instead, *"rather than removing it outright, as the phase-A brief's item 1 literally states"*,
   with nothing in the PR explaining why. No false premise was behind it, literal compliance was

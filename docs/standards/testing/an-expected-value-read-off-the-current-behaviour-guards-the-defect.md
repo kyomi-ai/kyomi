@@ -65,12 +65,14 @@ assert_eq!(incoming["oauth_client_secret"], existing["oauth_client_secret"]);
 `strip_leaves_active_modes_own_fields_untouched_regardless_of_value`
 (`crates/kyomi-auth/src/credential_service.rs`, added by **KYO-702**) asserted
 `incoming["oauth_client_secret"] == MASKED_VALUE` after a save that round-trips the masked
-placeholder. The review of that PR (`docs/review-logs/2026-09-15.md`, the KYO-702 entry headed
+placeholder. The review of that PR (`docs/review-logs/2026-09-15.md` (private/local review log; not tracked in this repository), the KYO-702 entry headed
 "BigQuery/Snowflake auth-mode-switch secret leak (strip_inactive_auth_mode_fields)", finding
 #1 🔴, unsigned) found that the assertion documents a real data-loss bug as expected
 behaviour: "the diff's own new AC3-labeled test directly exercises this exact scenario and
 reports success while persisting a corrupted value — the test suite gives false confidence
 about the very guarantee the review brief asked to confirm."
+
+(private/local review log; not tracked in this repository)
 
 The same entry's finding #3 (🟢) recorded the smaller version of the same problem in the test's
 name and comment, and the follow-up ticket **KYO-780** carries rewording it as an explicit

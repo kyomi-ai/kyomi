@@ -49,30 +49,30 @@ sed -n '/^    fn the_adjacent_test(/,/^    }/p' "$f"   # read the seam
 
 Real precedent, six reviews in two days, all on the `mod tests` tail of one file family:
 
-- **KYO-446 cycle 2** (review log `2026-08-22`, `11:40`) — 🔴, refused signing. The committed
+- **KYO-446 cycle 2** (review log (private/local; not tracked in this repository) `2026-08-22`, `11:40`) — 🔴, refused signing. The committed
   blob was missing the `);` and `}` closing a preceding test's final `assert!(...)`, with the
   incoming comment block "spliced directly into the middle of that unclosed macro call." An
   insertion, not a deletion. It took two further cycles to land.
-- **KYO-407 rework** (`2026-08-22`, `20:47`) — the same hazard, one PR earlier: a cherry-pick
+- (private/local review log; not tracked in this repository) **KYO-407 rework** (`2026-08-22`, `20:47`) — the same hazard, one PR earlier: a cherry-pick
   had cost KYO-413's `bigquery_service_account_next_disables_after_validate_then_remove` its
   closing brace. The repair was verified by diffing 10 576 lines of `origin/main`'s copy
   against the new file's, plus `git diff --staged | grep '^-'` returning only the diff header.
-- **KYO-407 rebase** (`2026-08-23`, `00:49`) — the review is explicit that "a prior rebase of
+- (private/local review log; not tracked in this repository) **KYO-407 rebase** (`2026-08-23`, `00:49`) — the review is explicit that "a prior rebase of
   this same branch left a pre-existing test unclosed via this exact hazard," and was scoped
   deliberately to *mechanical proof no line was destroyed* rather than to re-litigating
   content: zero-deletion numstat, zero conflict markers, both competing test names present
   and passing.
-- **KYO-452 addendum** (`2026-08-23`, `13:52`) — the source of item 4. Naive brace counting
+- (private/local review log; not tracked in this repository) **KYO-452 addendum** (`2026-08-23`, `13:52`) — the source of item 4. Naive brace counting
   was tried and abandoned because the guard tests' own assertion strings carry literal braces;
   all eight tests on both sides of the conflict were extracted by indentation boundary and
   diffed individually, and the two conflict-boundary transitions were read directly. One
   branch's test had landed interleaved between another's tests 2 and 3 — correct, but only
   provably so by reading it.
-- **KYO-455** (`2026-08-23`, `14:58`) — a 2 978-line test-module move, verified by exactly the
+- (private/local review log; not tracked in this repository) **KYO-455** (`2026-08-23`, `14:58`) — a 2 978-line test-module move, verified by exactly the
   set comparison in item 3: sorted `#[test] fn` names extracted independently from both sides,
   byte-identical at 74/74 with no duplicates, plus an `md5sum` on the untouched production
   half.
-- **KYO-491** (`2026-08-23`, `23:52`) — `store.rs`'s brace-hoist conflict resolved with both
+- (private/local review log; not tracked in this repository) **KYO-491** (`2026-08-23`, `23:52`) — `store.rs`'s brace-hoist conflict resolved with both
   `mod reconciliation_tests` (4 tests) and `mod tests` (3) confirmed present and passing;
   the review names this as the highest-risk part of the diff.
 

@@ -37,7 +37,7 @@ tautological assertion is one of the few defects a green mutation names immediat
 
 ```rust
 // WRONG — a reconstruction, not a quote: KYO-716 squash-merged as PR #518, so no
-// `<sha>^` carries the pre-fix line; this is the form the 2026-09-12 review log
+// `<sha>^` carries the pre-fix line; this is the form the 2026-09-12 review log (private/local; not tracked in this repository)
 // records verbatim. `HealthResponse.status` is built by
 // `apps/server/src/health.rs:88` as `if all_healthy { "healthy" } else { "degraded" }`,
 // so both arms satisfy the disjunction and a drift-triggered flip to "degraded" —
@@ -56,7 +56,7 @@ assert_eq!(status, "healthy", "drift must not change status");
 
 Real precedent — two tickets, two days, two crates; one of them blocked signing:
 
-- **KYO-716, `2026-09-12` log, the `09:19` entry "migration schema drift detection"** — 🟡,
+- (private/local review log; not tracked in this repository) **KYO-716, `2026-09-12` log, the `09:19` entry "migration schema drift detection"** — 🟡,
   *Test Coverage*, `apps/server/tests/contract_health.rs:242`. The reviewer did not reason
   about it, they ran it: *"Verified by mutation: forced `status` to flip to `"degraded"`
   whenever `missing_versions` is non-empty — the exact regression the ticket forbids, which
@@ -66,7 +66,7 @@ Real precedent — two tickets, two days, two crates; one of them blocked signin
   same patch made `health_schema_key_names_drifted_versions_without_changing_status` fail
   with `left: "degraded", right: "healthy"`, and the reviewer's note is that *"the test is
   now load-bearing"*.
-- **KYO-697, `2026-09-14` log, the `01:41` cycle-2 entry "typed `EmailSendError` for email
+- (private/local review log; not tracked in this repository) **KYO-697, `2026-09-14` log, the `01:41` cycle-2 entry "typed `EmailSendError` for email
   send observability"** — 🟢, *Test Coverage*, `crates/kyomi-auth/src/auth_service.rs:5419`.
   *"`assert!(rendered.contains("verification"), "the log must say which email failed")` is a
   tautology — the static message `"Failed to send verification email"` already contains

@@ -42,7 +42,7 @@ infer the original base from whatever `origin/main` points to later. Before call
 citation false, establish which source it claims to describe and check that source.
 
 When a check genuinely needs a file that only exists in another clone —
-`docs/review-logs/` is gitignored here and lives only in the canonical clone — name that
+`docs/review-logs/` (private/local review log; not tracked in this repository) is gitignored here and lives only in the canonical clone — name that
 clone, say why you went there, and say what class of claim it
 is being used for, so the reader can tell it apart from a code `file:line` check that should
 never have left the worktree. The same applies to running a script: a repo-relative tool
@@ -70,7 +70,7 @@ $ git show a4ce98e7bd1fbe22c33d3e8156b9e90b5790bc8c:crates/kyomi-ui/src/pages/se
 
 Real precedent — three reviews, three different ways of reading the wrong directory:
 
-- **KYO-667**, review log `2026-09-05`, heading *"KYO-658 pre-work: new standard 'a review
+- **KYO-667**, review log (private/local; not tracked in this repository) `2026-09-05`, heading *"KYO-658 pre-work: new standard 'a review
   finding names a sample, not the population'"*. The entry carries a correction block
   appended after the fact:
   > **The 🔴 in this entry is FALSE — do not mine a standard from it.** It claims the file's
@@ -84,7 +84,7 @@ Real precedent — three reviews, three different ways of reading the wrong dire
   reviewer did not report the citation as *stale*, they reported it as never having been
   right, because none of the numbers matched the one revision they looked at.
 
-- **KYO-602 / KYO-558**, review log `2026-09-03`, the untimed `(session)` heading *"Two new
+- **KYO-602 / KYO-558**, review log (private/local; not tracked in this repository) `2026-09-03`, the untimed `(session)` heading *"Two new
   coding standards: guard-fixed-for-one-branch + prove-a-flagged-secret-is-fake"* — the
   untracked-file shape, caught before it was filed:
   > independently reran the length/mod-4 check in Python against the actual fixture at
@@ -96,7 +96,7 @@ Real precedent — three reviews, three different ways of reading the wrong dire
   No currency check would have helped: the file was untracked in the other clone, so there
   was no revision to be behind.
 
-- **KYO-558**, review log `2026-09-03`, heading *"KYO-558 disposal-safety cfg(test) skip
+- **KYO-558**, review log (private/local; not tracked in this repository) `2026-09-03`, heading *"KYO-558 disposal-safety cfg(test) skip
   broadening (re-review, cycle 3)"* — the same hazard applied to a *tool* rather than a
   file, hit and corrected mid-review:
   > Independently re-ran the real-tree no-collateral-change check myself … rather than
@@ -105,6 +105,8 @@ Real precedent — three reviews, three different ways of reading the wrong dire
 
   and, in the same entry's Notes: copying the linter out of its own directory "silently
   yields a vacuous empty-target pass."
+
+(private/local review log; not tracked in this repository)
 
 The habit that closes it is one sentence at the top of the review, and it is already in use:
 `2026-09-05`, heading *"KYO-658 column-embedding FK-violation race (populate.rs /

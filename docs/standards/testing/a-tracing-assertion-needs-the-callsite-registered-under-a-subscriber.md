@@ -57,6 +57,8 @@ pub async fn check_container_coverage(/* … */) -> Result<ContainerCoverage> {
 }
 ```
 
+(private/local review log; not tracked in this repository)
+
 Flagged in **KYO-616** (`2026-09-03`). Cycle 1 (`10:45`) was signed clean: the flake was
 already known, was correctly diagnosed as the interest cache, and had been addressed by
 calling `rebuild_interest_cache()` inside a test helper — "the officially sanctioned API for

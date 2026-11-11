@@ -44,19 +44,20 @@ Removing the `discovery_error` signal took five sites for one signal.
 Mechanical check before staging a docs change that cites history:
 
 ```sh
+# Private/local review logs; not tracked in this repository. Requires local access.
 grep -rn "test_result" crates/            # every quoted identifier resolves
 git show 4524bcc8 -- <path> | grep -c …   # every asserted count re-derived
 sed -n '/13:05/,/^### /p' docs/review-logs/2026-08-23.md   # every quoted log entry read
 ```
 
 Mined from four findings across two tickets in one week, every one a documentation file
-misdescribing an incident it cited:
+misdescribing an incident it cited (private/local review logs; not tracked in this repository):
 
-- **KYO-433** (`2026-08-23`, 12:27) — two 🟡 in
+- (private/local review log; not tracked in this repository) **KYO-433** (`2026-08-23`, 12:27) — two 🟡 in
   `docs/standards/data-state-management/teardown-clears-the-whole-derived-state-group.md`:
   a precedent paragraph quoting a signal that does not exist under that name, and a "four
   sites" count that the cited log *and* the merged diff both put at five.
-- **KYO-429** (`2026-08-22`, 05:06 and 05:45) — the same citation paragraph flagged 🟡 in
+- (private/local review log; not tracked in this repository) **KYO-429** (`2026-08-22`, 05:06 and 05:45) — the same citation paragraph flagged 🟡 in
   two consecutive cycles: first for three `file:line` incident locations that corresponded
   to no real content, then, after the rewrite, for naming the wrong logs and framing three
   separate findings as one review pass.

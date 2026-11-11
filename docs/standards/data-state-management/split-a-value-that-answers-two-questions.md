@@ -46,7 +46,7 @@ let still_connecting = move || connect_attempt_live.get_untracked();
 
 Two tickets, one shape:
 
-- **KYO-440** (review log `2026-08-24`, cycles 1–4 at `13:19` / `13:49` / `14:22` / `06:15`)
+- **KYO-440** (review log (private/local; not tracked in this repository) `2026-08-24`, cycles 1–4 at `13:19` / `13:49` / `14:22` / `06:15`)
   — `oauth_connecting: ReadSignal<Option<String>>`
   (`crates/kyomi-ui/src/pages/settings/datasources.rs:609`) was read both as the row's
   "Connecting…" indicator and as the popup monitor's `still_connecting` gate. Cycle 1 found a
@@ -60,7 +60,7 @@ Two tickets, one shape:
   implemented the split (a row-private, wasm-gated `connect_attempt_live` as the sole input
   to `still_connecting`) and all three vectors closed together. The reviewer's cycle-2 note is
   the rule in one line: *"Those are two different questions being answered by one signal."*
-- **KYO-492** (🔴 API Design, review log `2026-08-23` `00:58`; shipped `2026-08-24` `04:55`)
+- **KYO-492** (🔴 API Design, review log (private/local; not tracked in this repository) `2026-08-23` `00:58`; shipped `2026-08-24` `04:55`)
   — `AgentExecutionConfig`'s user-message-id field did double duty: it tagged the id for
   WebSocket streaming *and* signalled "already durably persisted, skip re-persisting". The
   Slack call site (`enterprise/kyomi-slack/src/routes.rs`) only ever wanted the tag, so a
