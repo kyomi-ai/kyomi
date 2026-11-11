@@ -7,10 +7,10 @@
 //! `build_ctx`), `agent.rs`'s `test_tool_context`, `execution.rs`'s
 //! `test_tool_context_for_roles`, and `tools/watch.rs`'s `unused_ctx` — see
 //! `docs/CODING_STANDARDS.md`'s "third copy of a test helper is the
-//! extraction trigger" rule. This module is the one place that builds a
-//! migrated in-memory SQLite [`kyomi_core::DbPool`] and a fully-populated
-//! [`ToolContext`] for this crate's tool tests, so that boilerplate exists
-//! exactly once.
+//! extraction trigger" rule. Database scaffolding now comes from
+//! `kyomi_test_db`; this module composes its migrated in-memory SQLite
+//! [`kyomi_core::DbPool`] into a fully-populated [`ToolContext`] for this
+//! crate's tool tests. Tool-specific fixtures remain here.
 //!
 //! # What this harness covers
 //!
@@ -56,39 +56,12 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use serde_json::json;
-use sqlx::sqlite::SqlitePoolOptions;
+pub(crate) use kyomi_test_db::test_pool;
+use kyomi_test_db::{seed_membership, seed_user, seed_workspace_with_name, sqlite_pool};
 
 use crate::provider::LLMProvider;
 use crate::tools::{AgentTool, ToolContext};
 use crate::types::{AgentTokenUsage, LLMResponse, Message, Tool, ToolCall};
-
-/// Build a migrated in-memory SQLite [`kyomi_core::DbPool`] for tests.
-///
-/// Runs the real `apps/server/migrations-sqlite` migration set against a
-/// fresh `sqlite::memory:` database with foreign keys enabled, so tool
-/// `execute()` methods can be driven end-to-end against real schema rather
-/// than a hand-rolled subset of it.
-pub(crate) async fn test_pool() -> kyomi_core::DbPool {
-    let _ = kyomi_core::constants::load_with_fallback();
-
-    let pool = SqlitePoolOptions::new()
-        .max_connections(1)
-        .connect("sqlite::memory:")
-        .await
-        .expect("connect in-memory sqlite");
-
-    sqlx::query("PRAGMA foreign_keys=ON")
-        .execute(&pool)
-        .await
-        .expect("enable foreign keys");
-
-    sqlx::migrate!("../../apps/server/migrations-sqlite")
-        .run(&pool)
-        .await
-        .expect("run sqlite migrations");
-
-    kyomi_core::DbPool::Sqlite(pool)
-}
 
 /// Build a fully-populated [`ToolContext`] over `db`, for user `"user-a"`
 /// in workspace `"ws-1"`. Every field is `pub`; overwrite whichever ones a
@@ -145,29 +118,12 @@ pub(crate) fn loaded_embedding() -> kyomi_embed::LazyEmbedding {
 /// that omits it will seed a workspace whose broadcasts silently reach
 /// nobody, not even the owner.
 pub(crate) async fn seed_user_and_workspace(db: &kyomi_core::DbPool) {
-    let sq = match db {
-        kyomi_core::DbPool::Sqlite(sq) => sq,
-        kyomi_core::DbPool::Postgres(_) => unreachable!("test pool is always sqlite"),
-    };
-
-    sqlx::query("INSERT INTO users (user_id, email) VALUES ('user-a', 'a@test.local')")
-        .execute(sq)
-        .await
-        .expect("insert user-a");
-    sqlx::query(
-        "INSERT INTO workspaces (workspace_id, name, owner_user_id) \
-         VALUES ('ws-1', 'Workspace', 'user-a')",
-    )
-    .execute(sq)
-    .await
-    .expect("insert workspace ws-1");
-    sqlx::query(
-        "INSERT INTO workspace_users (workspace_id, user_id, role, active) \
-         VALUES ('ws-1', 'user-a', 'workspace_admin', 1)",
-    )
-    .execute(sq)
-    .await
-    .expect("insert workspace_users user-a");
+    // NOTE: KYO-751 adopts the shared helpers' generic panic diagnostics;
+    // row values and the user -> workspace -> membership insert order stay the same.
+    let sq = sqlite_pool(db);
+    seed_user(sq, "user-a", "a@test.local").await;
+    seed_workspace_with_name(sq, "ws-1", "user-a", "Workspace").await;
+    seed_membership(sq, "ws-1", "user-a", "workspace_admin", true).await;
 }
 
 // ---------------------------------------------------------------------------

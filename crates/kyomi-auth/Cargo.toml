@@ -7,10 +7,10 @@ license.workspace = true
 [dependencies]
 agent-runtime = { workspace = true }
 kyomi-core = { workspace = true }
-kyomi-mcp-client = { workspace = true }
 kyomi-connect-protocol = { workspace = true }
 kyomi-embed = { workspace = true }
 kyomi-types = { workspace = true }
+kyomi-mcp-client = { workspace = true }
 kyomi-knowledge = { workspace = true }
 kyomi-datasource-server = { workspace = true }
 axum = { workspace = true }
@@ -61,6 +61,7 @@ thiserror = { workspace = true }
 ssh-key = { version = "0.6", features = ["ed25519", "alloc", "std"] }
 
 [dev-dependencies]
+kyomi-test-db = { workspace = true }
 # Exercise provider selection with both backends, as datasource 1.6.2 enables.
 rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs"] }
 kyomi-test-tracing = { workspace = true }
