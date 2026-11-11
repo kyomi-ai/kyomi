@@ -56,6 +56,9 @@ impl AgentTool for NativePrivacyTool {
     fn failure_domain_outcome(&self) -> agent_runtime::DomainOutcome {
         self.0.failure_domain_outcome()
     }
+    fn bad_request_is_pre_effect(&self) -> bool {
+        self.0.bad_request_is_pre_effect()
+    }
     async fn execute(
         &self,
         args: serde_json::Value,
