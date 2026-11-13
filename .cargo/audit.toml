@@ -16,7 +16,7 @@
 #   3. Re-check the whole list whenever `cargo update` runs. Entries whose
 #      blocker has cleared must be removed in the same PR that clears them.
 #
-# Last full review: 2026-11-09
+# Last full review: 2026-11-12
 # =============================================================================
 
 [advisories]
@@ -84,6 +84,57 @@ ignore = [
     # kyomi-datasource republished, `cargo update -p kyomi-datasource` here).
     "RUSTSEC-2026-0154", # russh: unbounded 32-bit allocation
     "RUSTSEC-2026-0153", # russh-cryptovec: unchecked CryptoVec allocation and growth handling
+
+    # -------------------------------------------------------------------------
+    # russh 0.54.5 — five advisories published 2026-11-12 (KYO-212 pin, again)
+    # -------------------------------------------------------------------------
+    # Same path and same blocker as the two russh entries above: kyomi-datasource
+    # 1.6.2 (`ssh` feature, SSH tunnel to a ClickHouse bastion) pins russh 0.54.
+    # The fixes need russh >= 0.65.0, i.e. the same kyomi-connect change and
+    # republish tracked by KYO-212. Reachability assessed 2026-11-12 against the
+    # advisory text (rustsec.org) and kyomi-datasource-1.6.2/src/ssh_tunnel.rs:
+    #
+    #   Our use is client-only: `russh::client::connect`, public-key auth
+    #   (`authenticate_publickey`, never keyboard-interactive), and
+    #   `channel_open_direct_tcpip` forwarding to a bastion host chosen by a
+    #   workspace admin, with an optional pinned host-key fingerprint. The
+    #   `TunnelClientHandler` implements only `check_server_key`; it keeps no
+    #   per-channel state. `russh::server` appears only in the crate's own
+    #   tests.
+    #
+    #   NOT reachable in production:
+    #     RUSTSEC-2026-0495  agent *server* signs confirm-constrained keys
+    #                        without calling `Agent::confirm` — we run no SSH
+    #                        agent server.
+    #     RUSTSEC-2026-0496  *server-side* keyboard-interactive response-count
+    #                        allocation — we run no russh server.
+    #
+    #   Reachable only from the configured bastion (a compromised or hostile
+    #   SSH host, or a network attacker where no host-key fingerprint is
+    #   pinned). Impact is memory exhaustion in the Kyomi server process
+    #   (availability); no data disclosure or code execution:
+    #     RUSTSEC-2026-0493  decompression bomb if zlib compression is
+    #                        negotiated; a server that offers no "none" method
+    #                        can force it on the default client config.
+    #     RUSTSEC-2026-0494  oversized KEXINIT name-lists allocate far more than
+    #                        the packet size, before authentication.
+    #     RUSTSEC-2026-0492  client `Handler` callbacks run for channels never
+    #                        opened; our handler has no per-channel state, so
+    #                        the described state-confusion/panic does not apply
+    #                        (not exercised beyond that by us).
+    #
+    # Cheap mitigation to do in kyomi-connect together with the real fix:
+    # restrict the client's preferred compression to "none" (removes 0493's
+    # trigger) and require a pinned host-key fingerprint for every tunnel.
+    #
+    # Remove when: KYO-212 lands (russh >= 0.65.0 in kyomi-connect,
+    # kyomi-datasource republished, `cargo update -p kyomi-datasource` here).
+    # Revisit by 2026-12-10 even if it has not landed.
+    "RUSTSEC-2026-0492", # russh: client Handler callbacks run for channels the client never opened
+    "RUSTSEC-2026-0493", # russh: no limit on the size of a decompressed SSH packet
+    "RUSTSEC-2026-0494", # russh: SSH message fields allocated before their size is checked
+    "RUSTSEC-2026-0495", # russh: agent server signs confirm-constrained keys without Agent::confirm
+    "RUSTSEC-2026-0496", # russh: pre-auth allocation from the keyboard-interactive response count
 
     # -------------------------------------------------------------------------
     # crypto-bigint 0.5.5 — held by the RustCrypto 0.13 ECC generation (KYO-955)
