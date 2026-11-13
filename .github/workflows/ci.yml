@@ -118,6 +118,20 @@ jobs:
         run: ./scripts/lint/check-disposal-safety.sh
 
       # --------------------------------------------------------------------
+      # Client eval lint.
+      #
+      # The frontend CSP deliberately omits 'unsafe-eval' (KYO-849), so
+      # anything that makes the browser compile a JavaScript string
+      # (js_sys::Function::new_*, js_sys::eval, string timers, JS eval /
+      # new Function) throws an uncatchable EvalError and kills the WASM
+      # app. auth_refresh::try_refresh did exactly that on its "session
+      # expired" fallback and stayed broken, unnoticed, from v2.7.1 until a
+      # session was lost. Pure bash + awk, milliseconds.
+      # --------------------------------------------------------------------
+      - name: Client eval lint (CSP has no unsafe-eval)
+        run: ./scripts/lint/check-client-eval.sh
+
+      # --------------------------------------------------------------------
       # Real-world identifier lint (KYO-662).
       #
       # A customer's real GCP project id and a real service-account
@@ -685,6 +699,7 @@ jobs:
             scripts/lint/check-real-identifiers-test.sh
             scripts/lint/check-server-fns-test.sh
             scripts/lint/check-disposal-safety-test.sh
+            scripts/lint/check-client-eval-test.sh
             scripts/repro-headless-subagent-survival-test.sh
             scripts/check-agent-run-result-test.sh
             scripts/pre-commit-hook-test.sh

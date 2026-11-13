@@ -46,27 +46,34 @@ pub fn refresh_and_reload() {
 }
 
 /// Call `/api/v1/auth/refresh` and return whether it succeeded.
+///
+/// This must NOT build JavaScript from a string (`js_sys::Function::new_*`,
+/// `js_sys::eval`): the frontend Content-Security-Policy deliberately omits
+/// `'unsafe-eval'` (KYO-849), so the browser throws an uncatchable
+/// `EvalError` and the page dies instead of redirecting to `/login`. Use the
+/// typed `fetch` API like every other client request. Enforced by
+/// `scripts/lint/check-client-eval.sh`.
 #[cfg(target_arch = "wasm32")]
 pub async fn try_refresh() -> bool {
-    use wasm_bindgen::prelude::*;
+    use wasm_bindgen::JsCast;
+    use wasm_bindgen_futures::JsFuture;
 
-    let promise = js_sys::Function::new_no_args(
-        "return fetch('/api/v1/auth/refresh', { method: 'POST', credentials: 'include' }).then(r => r.ok)",
-    )
-    .call0(&JsValue::NULL);
+    let Some(window) = web_sys::window() else {
+        return false;
+    };
 
-    match promise {
-        Ok(val) => {
-            if let Ok(promise) = val.dyn_into::<js_sys::Promise>() {
-                wasm_bindgen_futures::JsFuture::from(promise)
-                    .await
-                    .ok()
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false)
-            } else {
-                false
-            }
-        }
-        Err(_) => false,
-    }
+    let opts = web_sys::RequestInit::new();
+    opts.set_method("POST");
+    opts.set_credentials(web_sys::RequestCredentials::Include);
+
+    let Ok(response) =
+        JsFuture::from(window.fetch_with_str_and_init("/api/v1/auth/refresh", &opts)).await
+    else {
+        return false;
+    };
+
+    response
+        .dyn_into::<web_sys::Response>()
+        .map(|resp| resp.ok())
+        .unwrap_or(false)
 }

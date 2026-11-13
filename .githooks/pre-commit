@@ -170,6 +170,45 @@ elif [ -z "$staged_disposal_files" ]; then
     echo "✅ disposal-safety lint skipped (no matching files)."
 fi
 
+# --- Check 2b-2: no eval-style JavaScript in client code ---
+# The frontend CSP omits 'unsafe-eval' (KYO-849), so `js_sys::Function::new_*`,
+# `js_sys::eval`, string timers, and JS `eval(`/`new Function(` throw an
+# uncatchable EvalError in the browser and kill the WASM app. That is how
+# auth_refresh::try_refresh silently broke the "session expired -> redirect
+# to login" path from v2.7.1. Pure bash+awk, milliseconds. See
+# scripts/lint/check-client-eval.sh's header.
+echo "🔍 Checking client code for eval-style JavaScript..."
+
+client_eval_pattern='^crates/kyomi-ui(-components)?/(src/.*\.rs|.*\.(js|html))$'
+staged_eval_files=$(printf '%s\n' "$lint_changed_files" \
+    | grep -E "$client_eval_pattern" || true)
+
+if [ -n "$staged_eval_files" ]; then
+    # shellcheck disable=SC2086  # word-splitting is intentional here
+    if ! ./scripts/lint/check-client-eval.sh $staged_eval_files; then
+        echo ""
+        echo "❌ client-eval lint failed — commit blocked."
+        echo "   The frontend CSP forbids unsafe-eval (KYO-849). Use a typed API"
+        echo "   (e.g. web_sys fetch_with_str_and_init, Closure-based timers) instead of"
+        echo "   building JavaScript from a string, or add a justified escape hatch:"
+        echo "   // lint-allow: client-eval=<why>   (>= 5 characters)"
+        exit 1
+    fi
+    echo "✅ client-eval lint clean."
+fi
+
+unstaged_eval_files="$(unstaged_or_untracked_matching "$client_eval_pattern")"
+if [ -n "$unstaged_eval_files" ]; then
+    echo "🔍 Checking client-eval lint for unstaged/untracked files..."
+    # shellcheck disable=SC2086  # lint scripts accept a list of paths
+    if ! ./scripts/lint/check-client-eval.sh $unstaged_eval_files; then
+        echo "❌ client-eval lint failed for unstaged/untracked files — commit blocked."
+        exit 1
+    fi
+elif [ -z "$staged_eval_files" ]; then
+    echo "✅ client-eval lint skipped (no matching files)."
+fi
+
 # --- Check 2c: Real-world identifier lint (KYO-662) ---
 # Blocks customer/production identifiers (GCP service-account addresses,
 # non-allowlisted email domains, public IPv4 addresses, credential-shaped
