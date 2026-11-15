@@ -21,7 +21,6 @@
 
 mod bigquery;
 mod clickhouse;
-mod connect;
 mod databricks;
 mod flaredb;
 mod mysql;
@@ -34,7 +33,6 @@ mod synapse;
 // Re-export indexer structs for use by CatalogIndexingService.
 pub use bigquery::BigQueryIndexer;
 pub use clickhouse::ClickHouseIndexer;
-pub use connect::ConnectIndexer;
 pub use databricks::DatabricksIndexer;
 pub use flaredb::FlareDbIndexer;
 pub use mysql::MySqlIndexer;

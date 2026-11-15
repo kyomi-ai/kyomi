@@ -454,14 +454,9 @@ impl CatalogRefreshScheduler {
         // Determine effective email for credential lookup
         let effective_email = owner_email.unwrap_or("");
 
-        if effective_email.is_empty() && indexing_creds.is_none() {
-            info!(
-                workspace_id,
-                datasource = datasource_name,
-                "Skipping datasource: no credentials available"
-            );
-            return RefreshResult::Skipped;
-        }
+        // Credential availability is decided inside indexing (provider
+        // creation), where Connect datasources need none. Gating here would
+        // silently skip them and freeze `last_catalog_refresh` (KYO-967).
 
         // Log which credential path will be used for this datasource refresh.
         let credential_path = if indexing_creds.is_some() {
@@ -504,7 +499,6 @@ impl CatalogRefreshScheduler {
                 credentials: indexing_creds.as_ref(),
                 max_tables_per_dataset: None,
                 force: false,
-                connect_registry: None,
             },
         )
         .await;
@@ -521,7 +515,7 @@ impl CatalogRefreshScheduler {
                 );
             }
             "skipped" => {
-                debug!(
+                warn!(
                     workspace_id,
                     datasource = datasource_name,
                     datasource_type,
@@ -1645,6 +1639,79 @@ mod tests {
             );
         }
 
+    }
+
+    // -- Connect datasources are indexed by the scheduler (KYO-967) ---------
+    //
+    // Regression: the scheduler used to pass no Connect registry, so every
+    // `connection_type = 'connect'` datasource was skipped (logged at debug!)
+    // and its `last_catalog_refresh` froze forever. It also gated on owner
+    // credentials, which Connect datasources never need. The scheduler must
+    // dispatch Connect datasources through the same indexing path as direct
+    // ones: with no Connect agent connected the run must FAIL VISIBLY
+    // (status `failed` + reason), never be silently skipped.
+    #[tokio::test]
+    async fn scheduler_dispatches_connect_datasource_instead_of_skipping_it() {
+        use crate::test_support::{seed_user_and_workspace, test_pool};
+
+        let db = test_pool().await;
+        seed_user_and_workspace(&db).await;
+        let sq = match &db {
+            DbPool::Sqlite(pool) => pool,
+            DbPool::Postgres(_) => unreachable!("test pool is always sqlite"),
+        };
+        sqlx::query(
+            "INSERT INTO datasource_configs \
+                 (id, workspace_id, name, datasource_type, slug, connection_type, connection_config) \
+             VALUES ('ds-connect-1', 'ws-1', 'Connect PG', 'postgres', 'connect-pg', 'connect', '{}')",
+        )
+        .execute(sq)
+        .await
+        .expect("seed connect datasource");
+
+        crate::catalog::connect_transport::install_connect_registry(
+            kyomi_datasource_server::ConnectRegistry::new_local(),
+        );
+
+        let embedding = kyomi_embed::EmbeddingService::new().expect("load embedding model");
+        let scheduler = Arc::new(CatalogRefreshScheduler::new(
+            db.clone(),
+            kyomi_core::kv_store_memory::InMemoryKVStore::new_pool(),
+            std::sync::Arc::new([0u8; 32]),
+            LazyEmbedding::loaded(embedding),
+            CancellationToken::new(),
+            std::sync::Arc::new(kyomi_core::Config::test_config()),
+        ));
+
+        // `owner_email: None` and no indexing credentials: a direct datasource
+        // is skipped here, but a Connect datasource needs neither.
+        let result = scheduler
+            .refresh_datasource(
+                "ws-1",
+                "ds-connect-1",
+                "postgres",
+                "Connect PG",
+                &serde_json::json!({}),
+                None,
+            )
+            .await;
+
+        assert!(
+            matches!(result, RefreshResult::Failed),
+            "a Connect datasource with no connected agent must fail visibly, not be skipped"
+        );
+        let (status, progress): (Option<String>, Option<String>) = sqlx::query_as(
+            "SELECT catalog_refresh_status, CAST(catalog_refresh_progress AS TEXT) \
+             FROM datasource_configs WHERE id = 'ds-connect-1'",
+        )
+        .fetch_one(sq)
+        .await
+        .expect("read status");
+        assert_eq!(status.as_deref(), Some("failed"));
+        assert!(
+            progress.unwrap_or_default().contains("Connection test failed"),
+            "the failure reason must be persisted so the UI can explain a stale 'last indexed'"
+        );
     }
 
     // -- start() wiring (KYO-953) -------------------------------------------

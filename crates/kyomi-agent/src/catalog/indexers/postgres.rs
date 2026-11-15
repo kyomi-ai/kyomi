@@ -240,6 +240,7 @@ mod tests {
     fn project_id_from_connection_config() {
         let indexer = PostgresIndexer;
         let ctx = IndexerContext {
+            connection_type: "direct".to_string(),
             workspace_id: "ws".into(),
             datasource_config_id: "ds".into(),
             connection_config: serde_json::json!({"database": "mydb"}),
@@ -252,6 +253,7 @@ mod tests {
     fn project_id_missing_database() {
         let indexer = PostgresIndexer;
         let ctx = IndexerContext {
+            connection_type: "direct".to_string(),
             workspace_id: "ws".into(),
             datasource_config_id: "ds".into(),
             connection_config: serde_json::json!({}),

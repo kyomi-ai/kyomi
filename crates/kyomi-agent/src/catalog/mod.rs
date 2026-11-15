@@ -21,6 +21,7 @@
 //! - `search_entries` — weighted search entry generation
 //! - `indexers::sample_data`, `indexers::user_dataset`, `indexers::bigquery_public` — special indexers
 
+pub mod connect_transport;
 pub mod indexers;
 pub mod indexing_service;
 pub mod traits;

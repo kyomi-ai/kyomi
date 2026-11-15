@@ -344,6 +344,10 @@ async fn serve() {
         None => connect_registry,
     };
 
+    // Connect is a transport for catalog indexing (KYO-967): install the
+    // registry once so every indexing caller reaches Connect datasources.
+    kyomi_agent::catalog::connect_transport::install_connect_registry(connect_registry.clone());
+
     // Platform registry — register messaging platform implementations.
     #[cfg_attr(not(feature = "slack"), allow(unused_mut))]
     let mut registry = kyomi_core::platform::PlatformRegistry::new();

@@ -118,6 +118,7 @@ impl BigQueryPublicIndexer {
         }
 
         let ctx = IndexerContext {
+            connection_type: "direct".to_string(),
             workspace_id: PUBLIC_DATA_WORKSPACE_ID.to_string(),
             datasource_config_id: PUBLIC_DATASOURCE_CONFIG_ID.to_string(),
             connection_config: serde_json::json!({}),
