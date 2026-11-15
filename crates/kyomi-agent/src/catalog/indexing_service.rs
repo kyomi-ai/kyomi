@@ -10,7 +10,6 @@
 
 use kyomi_core::datasource_registry::DatasourceType;
 use kyomi_core::DbPool;
-use kyomi_datasource_server::ConnectRegistry;
 use kyomi_embed::EmbeddingService;
 use serde_json::Value;
 use std::str::FromStr;
@@ -82,10 +81,6 @@ pub struct IndexDatasourceParams<'a> {
     /// background indexing task, so this flag is a race backstop for
     /// callers that skip the upfront check, not a way to jump the queue.
     pub force: bool,
-    /// Connect registry for datasources that tunnel through a Connect binary.
-    /// `None` is fine for callers that don't have a Connect registry (e.g.
-    /// the scheduler) — Connect datasources will be skipped with an error.
-    pub connect_registry: Option<&'a ConnectRegistry>,
 }
 
 /// How long a just-started indexing run blocks subsequent runs before
@@ -125,7 +120,6 @@ impl CatalogIndexingService {
             credentials,
             max_tables_per_dataset,
             force,
-            connect_registry,
         } = params;
         // Load datasource config
         let ds_config = kyomi_core::db_fetch_optional!(
@@ -157,11 +151,6 @@ impl CatalogIndexingService {
         let connection_type = ds_config.connection_type;
         let ds_name = ds_config.name;
 
-        // Connect datasources use their own indexer that talks through the
-        // Connect binary's WebSocket tunnel. They don't go through the
-        // DatasourceType / SQLCatalogIndexer dispatch.
-        let is_connect = connection_type == "connect";
-
         // Parse datasource type (still needed for logging and non-connect dispatch)
         let ds_type = match DatasourceType::from_str(&ds_type_str) {
             Ok(t) => t,
@@ -172,28 +161,14 @@ impl CatalogIndexingService {
             }
         };
 
-        // Build the indexer: Connect datasources get ConnectIndexer, others
-        // get the standard per-type indexer.
-        let indexer: Box<dyn CatalogIndexer> = if is_connect {
-            match connect_registry {
-                Some(registry) => {
-                    Box::new(indexers::ConnectIndexer::new(registry.clone()))
-                }
-                None => {
-                    return CatalogIndexResult::skipped(
-                        "Connect datasource skipped — no Connect registry available \
-                         (Connect binary may not be running)",
-                    );
-                }
-            }
-        } else {
-            match get_indexer(&ds_type) {
-                Some(i) => i,
-                None => {
-                    return CatalogIndexResult::skipped(&format!(
-                        "No catalog indexer available for datasource type '{ds_type_str}'"
-                    ));
-                }
+        // The indexer is selected by datasource type alone. Connect is a
+        // transport: only provider creation (`index_catalog_sql`) knows it.
+        let indexer: Box<dyn CatalogIndexer> = match get_indexer(&ds_type) {
+            Some(i) => i,
+            None => {
+                return CatalogIndexResult::skipped(&format!(
+                    "No catalog indexer available for datasource type '{ds_type_str}'"
+                ));
             }
         };
 
@@ -292,6 +267,7 @@ impl CatalogIndexingService {
         let ctx = IndexerContext {
             workspace_id: workspace_id.to_string(),
             datasource_config_id: datasource_config_id.to_string(),
+            connection_type,
             connection_config,
             encryption_key,
         };
@@ -397,7 +373,6 @@ impl CatalogIndexingService {
         embedding: kyomi_embed::LazyEmbedding,
         workspace_id: String,
         datasource_id: String,
-        connect_registry: Option<ConnectRegistry>,
     ) {
         tokio::spawn(async move {
             // Resolve workspace owner email so the third-tier credential
@@ -429,7 +404,6 @@ impl CatalogIndexingService {
                 credentials: None,
                 max_tables_per_dataset: None,
                 force: false,
-                connect_registry: connect_registry.as_ref(),
             })
             .await;
 
@@ -497,7 +471,6 @@ impl CatalogIndexingService {
                 credentials: None,
                 max_tables_per_dataset: None,
                 force: false,
-                connect_registry: None,
             })
             .await;
 
@@ -742,7 +715,6 @@ mod tests {
             credentials: None,
             max_tables_per_dataset: None,
             force: false,
-            connect_registry: None,
         })
         .await;
 

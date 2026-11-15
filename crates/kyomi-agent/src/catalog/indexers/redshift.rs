@@ -249,6 +249,7 @@ mod tests {
     fn project_id_from_connection_config() {
         let indexer = RedshiftIndexer;
         let ctx = IndexerContext {
+            connection_type: "direct".to_string(),
             workspace_id: "ws".into(),
             datasource_config_id: "ds".into(),
             connection_config: serde_json::json!({"database": "analytics"}),

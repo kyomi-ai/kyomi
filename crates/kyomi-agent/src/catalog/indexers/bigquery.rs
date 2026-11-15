@@ -699,6 +699,7 @@ mod tests {
 
     fn bq_ctx(workspace_id: &str, datasource_config_id: &str) -> IndexerContext {
         IndexerContext {
+            connection_type: "direct".to_string(),
             workspace_id: workspace_id.to_string(),
             datasource_config_id: datasource_config_id.to_string(),
             connection_config: serde_json::json!({}),
@@ -743,6 +744,7 @@ mod tests {
             unreachable!("expected sqlite pool");
         };
         let ctx = IndexerContext {
+            connection_type: "direct".to_string(),
             workspace_id: "ws-filtered".to_string(),
             datasource_config_id: "ds-filtered".to_string(),
             connection_config: serde_json::json!({"catalog_projects": [123, true, null]}),
@@ -981,6 +983,7 @@ mod tests {
             unreachable!("expected sqlite pool");
         };
         let ctx = IndexerContext {
+            connection_type: "direct".to_string(),
             workspace_id: "ws-sa-fail".to_string(),
             datasource_config_id: "ds-sa-fail".to_string(),
             connection_config: serde_json::json!({"auth_mode": "service_account"}),
@@ -1034,6 +1037,7 @@ mod tests {
             unreachable!("expected sqlite pool");
         };
         let ctx = IndexerContext {
+            connection_type: "direct".to_string(),
             workspace_id: "ws-eo-fail".to_string(),
             datasource_config_id: "ds-eo-fail".to_string(),
             connection_config: serde_json::json!({"auth_mode": "enterprise_oauth"}),
@@ -1086,6 +1090,7 @@ mod tests {
             unreachable!("expected sqlite pool");
         };
         let ctx = IndexerContext {
+            connection_type: "direct".to_string(),
             workspace_id: "ws-ko-fail".to_string(),
             datasource_config_id: "ds-ko-fail".to_string(),
             connection_config: serde_json::json!({"auth_mode": "kyomi_oauth"}),

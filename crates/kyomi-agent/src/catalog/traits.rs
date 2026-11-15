@@ -457,6 +457,103 @@ pub async fn resolve_indexing_credentials(
     }
 }
 
+// ─── Provider creation (the only transport-aware step) ──────────────────────────
+
+/// Create the provider for a catalog run, recording any failure on the
+/// datasource's status so a stale "last indexed" is always explainable.
+///
+/// - `connection_type == "connect"`: the Connect agent holds the credentials,
+///   so none are resolved; the provider tunnels through the ambient registry.
+/// - otherwise: resolve credentials, then the indexer builds a direct provider.
+///
+/// On failure returns the finished [`CatalogIndexResult`] (boxed to keep the
+/// `Result` small); status has already been written.
+async fn create_catalog_provider(
+    indexer: &dyn SQLCatalogIndexer,
+    ctx: &IndexerContext,
+    db: &DbPool,
+    user_email: Option<&str>,
+    provided_credentials: Option<&Value>,
+    start_time: &chrono::DateTime<Utc>,
+) -> std::result::Result<Box<dyn DatasourceProvider>, Box<CatalogIndexResult>> {
+    let finish = |result: CatalogIndexResult| {
+        Box::new(
+            result
+                .with_times(&start_time.to_rfc3339(), &Utc::now().to_rfc3339())
+                .with_ids(&ctx.datasource_config_id, &ctx.workspace_id),
+        )
+    };
+
+    if ctx.connection_type == "connect" {
+        return match crate::catalog::connect_transport::connect_provider(&ctx.datasource_config_id)
+        {
+            Some(provider) => Ok(provider),
+            None => {
+                let msg = "Connect datasource cannot be indexed: no Connect registry is \
+                           installed (server wiring error)";
+                warn!(
+                    workspace_id = ctx.workspace_id,
+                    datasource_config_id = ctx.datasource_config_id,
+                    "{msg}"
+                );
+                let _ = update_datasource_status(
+                    db,
+                    &ctx.workspace_id,
+                    &ctx.datasource_config_id,
+                    "failed",
+                    None,
+                    Some(msg),
+                    &[],
+                )
+                .await;
+                Err(finish(CatalogIndexResult::error(msg)))
+            }
+        };
+    }
+
+    let Some(credentials) =
+        resolve_indexing_credentials(db, ctx, user_email, provided_credentials).await
+    else {
+        let _ = update_datasource_status(
+            db,
+            &ctx.workspace_id,
+            &ctx.datasource_config_id,
+            "idle",
+            None,
+            None,
+            &["No credentials available for catalog indexing".to_string()],
+        )
+        .await;
+        return Err(finish(CatalogIndexResult::skipped(
+            "No credentials available for catalog indexing",
+        )));
+    };
+
+    // `ctx.connection_config` is already decrypted — `indexing_service.rs`
+    // decrypts once at `IndexerContext` construction time (KYO-786), before
+    // any `CatalogIndexer` impl (this SQL path included) ever sees it.
+    match indexer
+        .create_provider(&ctx.connection_config, &credentials)
+        .await
+    {
+        Ok(p) => Ok(p),
+        Err(e) => {
+            let msg = format!("Failed to create provider: {e}");
+            let _ = update_datasource_status(
+                db,
+                &ctx.workspace_id,
+                &ctx.datasource_config_id,
+                "failed",
+                None,
+                Some(&msg),
+                &[],
+            )
+            .await;
+            Err(finish(CatalogIndexResult::error(&msg)))
+        }
+    }
+}
+
 // ─── SQL catalog indexing template method ───────────────────────────────────────
 
 /// Template method for SQL-based catalog indexing.
@@ -494,65 +591,19 @@ pub async fn index_catalog_sql(
     )
     .await;
 
-    // Resolve credentials
-    let credentials = resolve_indexing_credentials(
-        db,
+    // Provider creation is the ONLY place that knows the transport (KYO-967).
+    let provider = match create_catalog_provider(
+        indexer,
         ctx,
+        db,
         user_email,
         provided_credentials,
+        &start_time,
     )
-    .await;
-
-    let Some(credentials) = credentials else {
-        let result = CatalogIndexResult::skipped("No credentials available for catalog indexing")
-            .with_times(
-                &start_time.to_rfc3339(),
-                &Utc::now().to_rfc3339(),
-            )
-            .with_ids(&ctx.datasource_config_id, &ctx.workspace_id);
-
-        let _ = update_datasource_status(
-            db,
-            &ctx.workspace_id,
-            &ctx.datasource_config_id,
-            "idle",
-            None,
-            None,
-            &[],
-        )
-        .await;
-
-        return result;
-    };
-
-    // `ctx.connection_config` is already decrypted — `indexing_service.rs`
-    // decrypts once at `IndexerContext` construction time (KYO-786), before
-    // any `CatalogIndexer` impl (this SQL path included) ever sees it, so
-    // there is no separate decrypt step here anymore.
-    let provider = match indexer
-        .create_provider(&ctx.connection_config, &credentials)
-        .await
+    .await
     {
         Ok(p) => p,
-        Err(e) => {
-            let msg = format!("Failed to create provider: {e}");
-            let result = CatalogIndexResult::error(&msg)
-                .with_times(&start_time.to_rfc3339(), &Utc::now().to_rfc3339())
-                .with_ids(&ctx.datasource_config_id, &ctx.workspace_id);
-
-            let _ = update_datasource_status(
-                db,
-                &ctx.workspace_id,
-                &ctx.datasource_config_id,
-                "failed",
-                None,
-                Some(&msg),
-                &[],
-            )
-            .await;
-
-            return result;
-        }
+        Err(result) => return *result,
     };
 
     // Test connection
@@ -1134,6 +1185,7 @@ mod tests {
 
     fn cred_resolution_ctx(key: [u8; 32]) -> IndexerContext {
         IndexerContext {
+            connection_type: "direct".to_string(),
             workspace_id: "ws-cred".to_string(),
             datasource_config_id: "ds-cred".to_string(),
             connection_config: json!({}),
@@ -1459,6 +1511,80 @@ mod tests {
         }
     }
 
+    /// Migrated from the deleted `ConnectIndexer` suite (KYO-967): an explicit
+    /// empty container selection ("index nothing") archives every previously
+    /// cached table, and the run reports idle rather than failed. Connect
+    /// datasources now run through this same shared path.
+    #[tokio::test]
+    async fn explicit_empty_container_selection_archives_every_cached_table() {
+        let db = DbPool::connect("sqlite::memory:")
+            .await
+            .expect("connect in-memory sqlite");
+        let DbPool::Sqlite(sq) = &db else {
+            unreachable!("expected sqlite pool");
+        };
+        sqlx::query("INSERT INTO users (user_id, email) VALUES ('u1', 'u1@test.local')")
+            .execute(sq)
+            .await
+            .expect("insert user");
+        sqlx::query(
+            "INSERT INTO workspaces (workspace_id, name, owner_user_id) VALUES ('ws1', 'WS', 'u1')",
+        )
+        .execute(sq)
+        .await
+        .expect("insert workspace");
+        sqlx::query(
+            "INSERT INTO datasource_configs (id, workspace_id, name, datasource_type, slug) \
+             VALUES ('ds1', 'ws1', 'RS', 'redshift', 'rs')",
+        )
+        .execute(sq)
+        .await
+        .expect("insert datasource_config");
+        for i in 0..3 {
+            sqlx::query("INSERT INTO datasource_table_cache (workspace_id, datasource_config_id, project_id, dataset_id, table_id, table_metadata, is_archived) VALUES ('ws1', 'ds1', '', ?, 'table', '{}', 0)")
+                .bind(format!("schema_{i}"))
+                .execute(sq)
+                .await
+                .expect("seed cached table");
+        }
+
+        let embedding = EmbeddingService::new().expect("load embedding model");
+        let ctx = IndexerContext {
+            connection_type: "direct".to_string(),
+            workspace_id: "ws1".into(),
+            datasource_config_id: "ds1".into(),
+            connection_config: serde_json::json!({"database": "db", "catalog_schemas": []}),
+            encryption_key: std::sync::Arc::new([0u8; 32]),
+        };
+        let creds = serde_json::json!({"user": "u", "password": "p"});
+        let result = index_catalog_sql(
+            &MockRedshiftIndexer,
+            &ctx,
+            &db,
+            &embedding,
+            None,
+            Some(&creds),
+            None,
+        )
+        .await;
+
+        assert_ne!(result.status, "error", "explicit empty selection is not a failure: {result:?}");
+        let live: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM datasource_table_cache WHERE datasource_config_id = 'ds1' AND is_archived = 0",
+        )
+        .fetch_one(sq)
+        .await
+        .expect("count live");
+        assert_eq!(live, 0, "every cached table must be archived");
+        let status: String = sqlx::query_scalar(
+            "SELECT catalog_refresh_status FROM datasource_configs WHERE id = 'ds1'",
+        )
+        .fetch_one(sq)
+        .await
+        .expect("status");
+        assert_eq!(status, "idle");
+    }
+
     /// Regression for the Redshift/Postgres "0 tables found / N archived" bug.
     ///
     /// When a SQL indexer reports a non-empty `project_id` (Redshift and
@@ -1498,6 +1624,7 @@ mod tests {
 
         let embedding = EmbeddingService::new().expect("load embedding model");
         let ctx = IndexerContext {
+            connection_type: "direct".to_string(),
             workspace_id: "ws1".to_string(),
             datasource_config_id: "ds1".to_string(),
             connection_config: json!({ "database": "analytics" }),
@@ -1642,6 +1769,7 @@ mod tests {
 
         let embedding = EmbeddingService::new().expect("load embedding model");
         let ctx = IndexerContext {
+            connection_type: "direct".to_string(),
             workspace_id: "ws1".to_string(),
             datasource_config_id: "ds1".to_string(),
             connection_config: json!({ "database": "analytics" }),
@@ -1839,6 +1967,7 @@ mod tests {
         .expect("insert datasource_config");
 
         IndexerContext {
+            connection_type: "direct".to_string(),
             workspace_id,
             datasource_config_id,
             connection_config: json!({}),
@@ -2082,6 +2211,7 @@ mod tests {
 
         let embedding = EmbeddingService::new().expect("load embedding model");
         let ctx = IndexerContext {
+            connection_type: "direct".to_string(),
             workspace_id: "ws1".to_string(),
             datasource_config_id: "ds1".to_string(),
             connection_config: json!({ "database": "analytics", "catalog_schemas": ["public", "ghost"] }),
@@ -2279,6 +2409,7 @@ mod tests {
 
         let embedding = EmbeddingService::new().expect("load embedding model");
         let ctx = IndexerContext {
+            connection_type: "direct".to_string(),
             workspace_id: "ws1".to_string(),
             datasource_config_id: "ds1".to_string(),
             connection_config: json!({}),
@@ -2441,6 +2572,7 @@ mod tests {
 
         let embedding = EmbeddingService::new().expect("load embedding model");
         let ctx = IndexerContext {
+            connection_type: "direct".to_string(),
             workspace_id: "ws1".to_string(),
             datasource_config_id: "ds1".to_string(),
             connection_config: json!({}),

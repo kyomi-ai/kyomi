@@ -898,7 +898,6 @@ pub async fn refresh_catalog(
     // a live backstop against a second click racing this same request.
     let db = ac.ctx.db.clone();
     let embedding = ac.ctx.embedding.clone();
-    let connect_registry = ac.ctx.connect_registry.clone();
     let workspace_id = ac.ws_id.clone();
     let datasource_id = datasource.id.clone();
     let user_email = ac.auth.email.clone();
@@ -929,7 +928,6 @@ pub async fn refresh_catalog(
                     credentials: Some(&credentials),
                     max_tables_per_dataset: None,
                     force: false,
-                    connect_registry: connect_registry.as_ref(),
                 },
             )
             .await;

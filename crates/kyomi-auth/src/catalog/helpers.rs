@@ -35,6 +35,10 @@ pub struct IndexerContext {
     pub workspace_id: String,
     /// Datasource config ID being indexed.
     pub datasource_config_id: String,
+    /// Transport the datasource is reached over (`datasource_configs.connection_type`:
+    /// `"direct"` or `"connect"`). Only provider creation may branch on this;
+    /// it never selects which indexing logic runs.
+    pub connection_type: String,
     /// Connection configuration from the datasource config row.
     pub connection_config: Value,
     /// Encryption key for decrypting stored credentials.
@@ -454,7 +458,6 @@ pub async fn archive_missing_tables(
 /// isn't the run's resolved final status) pass `&[]`; only the three
 /// terminal call sites that already call `resolve_final_status`
 /// (`kyomi_agent::catalog::traits::index_catalog_sql`,
-/// `kyomi_agent::catalog::indexers::connect::process_discovered_catalog`,
 /// `UserDatasetIndexer::index_workspace_catalog`) pass the run's real error
 /// slice, on both the `"idle"` and `"failed"` outcomes it can resolve to.
 ///
@@ -936,17 +939,15 @@ fn format_container_keys_capped(containers: &HashSet<ContainerKey>) -> String {
 
 // ─── Cross-indexer enumeration logging (KYO-616) ───────────────────────────────
 //
-// The three catalog indexer paths — the SQL-template method
-// (`kyomi_agent::catalog::traits::index_catalog_sql`), the BigQuery
-// user-dataset REST indexer (`kyomi_auth::catalog::indexers::user_dataset`),
-// and the Connect indexer (`kyomi_agent::catalog::indexers::connect`) — each
-// walk their own containers/tables with a genuinely different loop shape (a
-// generic trait-driven container loop; nested BigQuery project/dataset REST
-// calls; a single already-materialized `CatalogResult`), so there is no one
-// loop to share between them. What IS shared is the log line itself — its
-// field names and what "discovered" vs. "enumerated" mean — so the three
-// paths report the same incident-reconstruction vocabulary instead of three
-// independently-worded ones.
+// The two catalog indexer paths — the SQL-template method
+// (`kyomi_agent::catalog::traits::index_catalog_sql`, which serves direct and
+// Connect datasources alike) and the BigQuery user-dataset REST indexer
+// (`kyomi_auth::catalog::indexers::user_dataset`) — walk their containers and
+// tables with genuinely different loop shapes (a generic trait-driven
+// container loop vs. nested BigQuery project/dataset REST calls), so there is
+// no one loop to share between them. What IS shared is the log line itself —
+// its field names and what "discovered" vs. "enumerated" mean — so both paths
+// report the same incident-reconstruction vocabulary.
 
 /// Log a run's enumeration summary: how many containers were discovered vs.
 /// successfully enumerated this run, and the enumerated containers' names
@@ -998,9 +999,8 @@ pub fn log_container_table_summary(
 /// Apply a [`ContainerCoverage`] check's outcome onto a run's persisted
 /// status/failure-reason pair and its accumulated `errors`.
 ///
-/// All three catalog-indexer call sites (`kyomi_agent::catalog::traits::
-/// index_catalog_sql`, `kyomi_agent::catalog::indexers::connect::
-/// process_discovered_catalog`, and this crate's own
+/// Both catalog-indexer call sites (`kyomi_agent::catalog::traits::
+/// index_catalog_sql` — which also serves Connect datasources — and this crate's own
 /// `UserDatasetIndexer::index_workspace_catalog`) need the exact same two
 /// rules applied to the exact same two outputs — extracted here rather than
 /// duplicated a third time (see `docs/CODING_STANDARDS.md`, "the third copy
@@ -2302,6 +2302,7 @@ mod tests {
         let (workspace_id, datasource_config_id, _) =
             seed_two_datasource_fixture(sq, "resurrection").await;
         let ctx = IndexerContext {
+            connection_type: "direct".to_string(),
             workspace_id,
             datasource_config_id,
             connection_config: Value::Null,

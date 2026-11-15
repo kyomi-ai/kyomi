@@ -75,6 +75,7 @@ impl UserDatasetIndexer {
         .await;
 
         let ctx = IndexerContext {
+            connection_type: "direct".to_string(),
             workspace_id: workspace_id.to_string(),
             datasource_config_id: datasource_config_id.to_string(),
             connection_config: serde_json::json!({}),
@@ -973,9 +974,9 @@ mod tests {
         assert_eq!(run_outcome.failure_reason, None);
     }
 
-    /// KYO-622: this module's counterpart to the SQL-template and Connect
-    /// paths' `three_reachable_empty_*_refreshes_do_not_archive_via_liveness_gc`
-    /// regression tests (`catalog::traits` and `catalog::indexers::connect`).
+    /// KYO-622: this module's counterpart to the SQL-template
+    /// path's `three_reachable_empty_*_refreshes_do_not_archive_via_liveness_gc`
+    /// regression test (`catalog::traits`).
     ///
     /// Driving the real `UserDatasetIndexer::index_workspace_catalog` entry
     /// point end-to-end for the same "reachable but empty" scenario is NOT
@@ -1605,6 +1606,7 @@ mod http_boundary {
         .expect("insert datasource_config");
 
         IndexerContext {
+            connection_type: "direct".to_string(),
             workspace_id,
             datasource_config_id,
             connection_config: serde_json::json!({}),

@@ -204,6 +204,7 @@ impl SampleDataIndexer {
             Err(e) => return CatalogIndexResult::error(&format!("Failed to build HTTP client: {e}")),
         };
         let ctx = IndexerContext {
+            connection_type: "direct".to_string(),
             workspace_id: SAMPLE_DATA_WORKSPACE_ID.to_string(),
             datasource_config_id: SAMPLE_DATASOURCE_CONFIG_ID.to_string(),
             connection_config: serde_json::json!({}),
