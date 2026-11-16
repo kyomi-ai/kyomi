@@ -64,6 +64,67 @@ pub fn resolve_watch_selection(
     Ok(WatchLlmSelection { provider_config, resolved, workspace_billed })
 }
 
+/// How one watch run talks to the LLM.
+#[derive(Debug, Clone, PartialEq)]
+pub enum RunPlan {
+    /// Realtime. `reason` says why a batch-configured watch is not batching
+    /// this run (shown on the execution record); `None` when realtime is simply
+    /// the configured mode.
+    Realtime { reason: Option<String> },
+    /// Batch, waiting no longer than `deadline`.
+    Batch { deadline: chrono::DateTime<chrono::Utc> },
+}
+
+/// Largest share of the gap to the next run held back as a safety margin.
+const MAX_MARGIN: chrono::Duration = chrono::Duration::minutes(15);
+
+/// Decide how a run executes.
+///
+/// * A manual "run now" is always realtime, whatever the mode.
+/// * A scheduled run batches only when the gap to the watch's next due time is
+///   at least the configured expected batch window; otherwise that occurrence
+///   runs realtime so a slow batch can never delay or drop an alert.
+/// * A batching run must finish waiting `margin` before the next run is due;
+///   past that the batch is cancelled and the run completes in realtime.
+///
+/// `support` is [`crate::batch::batch_support`] for the chosen provider; batch
+/// on an unsupported provider is an error, never a silent realtime run.
+pub fn plan_run(
+    resolved: &ResolvedWatchLlm,
+    support: Result<(), String>,
+    scheduled: bool,
+    next_run_at: Option<chrono::DateTime<chrono::Utc>>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<RunPlan, String> {
+    use kyomi_core::watch_llm::{WatchLlmMode, MAX_BATCH_WINDOW_MINUTES};
+    if resolved.mode != WatchLlmMode::Batch {
+        return Ok(RunPlan::Realtime { reason: None });
+    }
+    support?;
+    if !scheduled {
+        return Ok(RunPlan::Realtime {
+            reason: Some("manual runs always use realtime".into()),
+        });
+    }
+    let window = chrono::Duration::minutes(i64::from(resolved.batch_window_minutes));
+    let hard_cap = now + chrono::Duration::minutes(i64::from(MAX_BATCH_WINDOW_MINUTES));
+    let Some(next) = next_run_at else {
+        return Ok(RunPlan::Batch { deadline: hard_cap });
+    };
+    let gap = next - now;
+    if gap < window {
+        return Ok(RunPlan::Realtime {
+            reason: Some(format!(
+                "next scheduled run is in {}m, shorter than the {}m batch window; ran realtime",
+                gap.num_minutes().max(0),
+                resolved.batch_window_minutes
+            )),
+        });
+    }
+    let margin = (gap / 10).min(MAX_MARGIN);
+    Ok(RunPlan::Batch { deadline: (next - margin).min(hard_cap) })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -309,5 +370,81 @@ mod tests {
         let r = &main.requests()[0];
         assert_eq!(r.headers.get("x-api-key").map(String::as_str), Some("main-key"));
         assert_eq!(r.json()["model"], "cheap-model");
+    }
+
+    // -- plan_run -----------------------------------------------------------
+
+    use chrono::{Duration, TimeZone, Utc};
+    use kyomi_core::watch_llm::{ResolvedWatchLlm, BatchFailurePolicy};
+
+    fn resolved(mode: WatchLlmMode, window: u32) -> ResolvedWatchLlm {
+        ResolvedWatchLlm {
+            connection: None,
+            connection_from_workspace: false,
+            model: None,
+            mode,
+            batch_window_minutes: window,
+            batch_failure: BatchFailurePolicy::RealtimeRetry,
+        }
+    }
+
+    fn at() -> chrono::DateTime<Utc> {
+        Utc.with_ymd_and_hms(2026, 11, 16, 9, 0, 0).unwrap()
+    }
+
+    #[test]
+    fn realtime_mode_never_plans_a_batch() {
+        let p = plan_run(&resolved(WatchLlmMode::Realtime, 60), Ok(()), true, Some(at() + Duration::hours(8)), at());
+        assert_eq!(p, Ok(RunPlan::Realtime { reason: None }));
+    }
+
+    #[test]
+    fn a_manual_run_is_realtime_even_in_batch_mode() {
+        let p = plan_run(&resolved(WatchLlmMode::Batch, 60), Ok(()), false, Some(at() + Duration::hours(8)), at()).unwrap();
+        assert!(matches!(p, RunPlan::Realtime { reason: Some(r) } if r.contains("manual")));
+    }
+
+    #[test]
+    fn a_schedule_gap_shorter_than_the_window_runs_realtime_with_the_reason() {
+        let p = plan_run(&resolved(WatchLlmMode::Batch, 60), Ok(()), true, Some(at() + Duration::minutes(30)), at()).unwrap();
+        match p {
+            RunPlan::Realtime { reason: Some(r) } => {
+                assert!(r.contains("30m") && r.contains("60m"), "{r}");
+            }
+            other => panic!("expected realtime, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_gap_exactly_the_window_batches_with_a_deadline_before_the_next_run() {
+        let next = at() + Duration::minutes(60);
+        let p = plan_run(&resolved(WatchLlmMode::Batch, 60), Ok(()), true, Some(next), at()).unwrap();
+        let RunPlan::Batch { deadline } = p else { panic!("expected batch") };
+        assert!(deadline < next, "must stop waiting before the next run is due");
+        assert_eq!(next - deadline, Duration::minutes(6), "margin is a tenth of the gap");
+    }
+
+    #[test]
+    fn a_long_gap_caps_the_margin_and_the_wait() {
+        let next = at() + Duration::hours(48);
+        let RunPlan::Batch { deadline } = plan_run(&resolved(WatchLlmMode::Batch, 60), Ok(()), true, Some(next), at()).unwrap() else { panic!() };
+        assert_eq!(deadline, at() + Duration::hours(24), "never waits past the vendors' 24h expiry");
+        let next = at() + Duration::hours(10);
+        let RunPlan::Batch { deadline } = plan_run(&resolved(WatchLlmMode::Batch, 60), Ok(()), true, Some(next), at()).unwrap() else { panic!() };
+        assert_eq!(next - deadline, Duration::minutes(15), "margin capped at 15 minutes");
+    }
+
+    #[test]
+    fn an_overdue_or_past_next_run_is_realtime() {
+        let p = plan_run(&resolved(WatchLlmMode::Batch, 60), Ok(()), true, Some(at() - Duration::minutes(5)), at()).unwrap();
+        assert!(matches!(p, RunPlan::Realtime { reason: Some(_) }));
+    }
+
+    #[test]
+    fn batch_on_an_unsupported_provider_is_an_error_not_a_silent_realtime_run() {
+        let p = plan_run(&resolved(WatchLlmMode::Batch, 60), Err("no batch api".into()), true, Some(at() + Duration::hours(8)), at());
+        assert_eq!(p, Err("no batch api".into()));
+        // Realtime mode does not care about batch support.
+        assert!(plan_run(&resolved(WatchLlmMode::Realtime, 60), Err("x".into()), true, None, at()).is_ok());
     }
 }

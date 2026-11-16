@@ -36,6 +36,22 @@ use crate::types::{LLMResponse, Message, Tool};
 /// How often a waiting run polls the vendor (both vendors suggest ~1/minute).
 pub const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(60);
 
+/// The poll interval a run uses. A test can shorten it process-wide; no
+/// production path does.
+pub fn poll_interval() -> Duration {
+    #[cfg(test)]
+    {
+        let ms = TEST_POLL_MS.load(Ordering::Relaxed);
+        if ms > 0 {
+            return Duration::from_millis(ms);
+        }
+    }
+    DEFAULT_POLL_INTERVAL
+}
+
+#[cfg(test)]
+pub(crate) static TEST_POLL_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// How long a lease lasts without renewal. Renewed every poll.
 pub const LEASE_TTL_SECONDS: i64 = 180;
 

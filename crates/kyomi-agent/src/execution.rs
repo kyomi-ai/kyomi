@@ -371,6 +371,33 @@ pub async fn execute_agent_chat(
     config: AgentExecutionConfig,
     env: AgentExecutionEnv<'_>,
 ) -> kyomi_core::Result<AgentExecutionResult> {
+    execute_agent_chat_with(config, env, ExecutionExtras::default()).await
+}
+
+/// Per-run extras that only some callers have (watch batch mode, KYO-973).
+/// Kept out of [`AgentExecutionConfig`] so every other call site is unchanged.
+#[derive(Clone, Default)]
+pub struct ExecutionExtras {
+    /// Set for a watch run that talks to the LLM through a provider batch API.
+    pub watch_batch: Option<WatchBatchRun>,
+}
+
+/// A watch run that uses batch mode.
+#[derive(Clone)]
+pub struct WatchBatchRun {
+    pub execution_id: i32,
+    /// Latest time the run may still wait on a batch.
+    pub deadline: chrono::DateTime<chrono::Utc>,
+    /// Set when this instance loses the run's lease to another instance.
+    pub lease_lost: Arc<std::sync::atomic::AtomicBool>,
+}
+
+/// [`execute_agent_chat`] with per-run [`ExecutionExtras`].
+pub async fn execute_agent_chat_with(
+    config: AgentExecutionConfig,
+    env: AgentExecutionEnv<'_>,
+    extras: ExecutionExtras,
+) -> kyomi_core::Result<AgentExecutionResult> {
     // Built up front: a pure mapping off `config`/`env` with no I/O, so it
     // can happen before `env` is destructured below. See `build_tool_context`.
     let tool_context = build_tool_context(&config, &env);
@@ -426,7 +453,24 @@ pub async fn execute_agent_chat(
             // this path because both carry the Watch profile.
             let selection = crate::watch_llm::resolve_watch_selection(&ws_config, app_config)?;
             let kind = selection.provider_config.provider;
-            let client = create_provider(selection.provider_config)?;
+            let failure_policy = selection.resolved.batch_failure;
+            let mut client = create_provider(selection.provider_config)?;
+            if let Some(run) = &extras.watch_batch {
+                client = Box::new(crate::batch_run::BatchingProvider::new(
+                    client,
+                    &kind.to_string(),
+                    crate::batch_run::BatchRunContext {
+                        db: db.clone(),
+                        encryption_key: encryption_key.clone(),
+                        execution_id: run.execution_id,
+                        owner: crate::batch_run::instance_id().to_string(),
+                        deadline: run.deadline,
+                        failure_policy,
+                        poll_interval: crate::batch_run::poll_interval(),
+                        lease_lost: run.lease_lost.clone(),
+                    },
+                ));
+            }
             (client, kind, selection.workspace_billed, sampling)
         } else {
             let is_byok = ws_config.is_byok() && app_config.self_hosted;

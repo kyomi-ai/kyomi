@@ -353,6 +353,30 @@ pub async fn claim_lease(
     Ok(res.rows_affected() == 1)
 }
 
+/// Take over a run whose lease has lapsed or was released. Unlike
+/// [`claim_lease`] there is no "already mine" shortcut: only a genuinely
+/// lapsed lease can be taken, and exactly one caller wins it.
+pub async fn take_over_lease(
+    db: &DbPool,
+    execution_id: i32,
+    owner: &str,
+    expires_at: DateTime<Utc>,
+    now: DateTime<Utc>,
+) -> kyomi_core::Result<bool> {
+    let res = kyomi_core::db_execute!(
+        db,
+        "UPDATE watch_executions SET lease_owner = $1, lease_expires_at = $2 \
+         WHERE id = $3 AND llm_mode = 'batch' AND completed_at IS NULL \
+           AND (lease_expires_at IS NULL OR lease_expires_at < $4)",
+        owner,
+        expires_at,
+        execution_id,
+        now
+    )
+    .map_err(|e| db_err("take over lease", e))?;
+    Ok(res.rows_affected() == 1)
+}
+
 /// Give the lease up (graceful shutdown) so another instance resumes at once.
 pub async fn release_lease(
     db: &DbPool,
@@ -388,6 +412,47 @@ pub async fn release_all_leases(
     )
     .map_err(|e| db_err("release all leases", e))?;
     Ok(res.rows_affected())
+}
+
+#[derive(sqlx::FromRow)]
+struct CountRow {
+    n: i64,
+}
+
+/// Whether the watch has a batch-mode run that has not finished. The
+/// scheduler must not start the next occurrence while one is outstanding.
+pub async fn has_unfinished_batch_run(db: &DbPool, watch_id: &str) -> kyomi_core::Result<bool> {
+    let row = kyomi_core::db_fetch_one!(
+        db,
+        CountRow,
+        "SELECT COUNT(*) AS n FROM watch_executions \
+         WHERE watch_id = $1 AND llm_mode = 'batch' AND completed_at IS NULL \
+           AND status IN ('running', 'waiting_batch')",
+        watch_id
+    )
+    .map_err(|e| db_err("count unfinished runs", e))?;
+    Ok(row.n > 0)
+}
+
+/// What a resumed run needs from its execution record.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct RunInfo {
+    pub id: i32,
+    pub watch_id: Option<String>,
+    pub started_at: DateTime<Utc>,
+    pub batch_deadline_at: Option<DateTime<Utc>>,
+}
+
+/// Load the record of an unfinished batch-mode run (`None` once it finished).
+pub async fn unfinished_run(db: &DbPool, execution_id: i32) -> kyomi_core::Result<Option<RunInfo>> {
+    kyomi_core::db_fetch_optional!(
+        db,
+        RunInfo,
+        "SELECT id, watch_id, started_at, batch_deadline_at FROM watch_executions \
+         WHERE id = $1 AND llm_mode = 'batch' AND completed_at IS NULL",
+        execution_id
+    )
+    .map_err(|e| db_err("load run", e))
 }
 
 /// An unfinished batch-mode run nobody is driving.

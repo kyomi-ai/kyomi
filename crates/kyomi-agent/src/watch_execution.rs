@@ -32,13 +32,14 @@ use kyomi_auth::websocket::WebSocketManager;
 use kyomi_auth::{chat_service, user_service, watch_service};
 use kyomi_core::models::Watch;
 use kyomi_core::platform::PlatformRegistry;
+use kyomi_auth::watch_batch_service;
 use kyomi_core::{capability, DbPool, KVPool, WatchMode};
 use kyomi_embed::EmbeddingService;
 use kyomi_types::truncate_preview;
 
 use crate::adapter::{AssistantMessagePersistence, UserMessagePersistence};
 use crate::alert::deliver_watch_alert;
-use crate::execution::{execute_agent_chat, AgentExecutionConfig};
+use crate::execution::AgentExecutionConfig;
 use crate::tools::WATCH_TOOLS;
 
 // ---------------------------------------------------------------------------
@@ -770,14 +771,35 @@ fn format_relative_time(delta_seconds: i64) -> String {
 // Main execution function
 // ---------------------------------------------------------------------------
 
-/// Execute a watch by running the AI agent with the watch prompt.
-///
-/// This is the main entry point called by the scheduler or "Run Now" API.
+/// How a watch execution was started.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunKind {
+    /// A user's "run now" (and the watch tool): always realtime.
+    Manual,
+    /// The scheduler's due-time run: honours the watch LLM mode.
+    Scheduled,
+    /// Another attempt at an unfinished batch-mode run whose driver is gone
+    /// (restart, crash, lease handover). Replays from the durable call cache.
+    Resume { execution_id: i32 },
+}
+
+/// Everything a watch execution needs from the server.
+pub struct WatchRunEnv<'a> {
+    pub db: &'a DbPool,
+    pub kv: &'a KVPool,
+    pub encryption_key: &'a Arc<[u8; 32]>,
+    pub embedding: &'a EmbeddingService,
+    pub ws_manager: &'a WebSocketManager,
+    pub app_config: &'a Arc<kyomi_core::Config>,
+    pub connect_registry: Option<kyomi_datasource_server::ConnectRegistry>,
+    pub platforms: &'a Arc<PlatformRegistry>,
+}
+
+/// Execute a watch immediately, as a manual run (always realtime).
 ///
 /// # Arguments
-///
-/// * `db` — Database connection pool
-/// * `kv` — KV store (Redis or in-memory)
+/// * `db` — Database pool
+/// * `kv` — KV store (rate limiting, ephemeral state)
 /// * `encryption_key` — AES key for encrypted DB fields
 /// * `embedding` — Embedding service for semantic search
 /// * `ws_manager` — WebSocket manager for real-time notifications
@@ -795,32 +817,67 @@ pub async fn execute_watch(
     platforms: &Arc<PlatformRegistry>,
     watch_id: &str,
 ) -> kyomi_core::Result<()> {
-    info!(watch_id = %watch_id, "Starting watch execution");
+    execute_watch_with(
+        WatchRunEnv { db, kv, encryption_key, embedding, ws_manager, app_config, connect_registry, platforms },
+        watch_id,
+        RunKind::Manual,
+    )
+    .await
+}
+
+/// Execute a watch with an explicit [`RunKind`]. See [`execute_watch`].
+pub async fn execute_watch_with(
+    env: WatchRunEnv<'_>,
+    watch_id: &str,
+    kind: RunKind,
+) -> kyomi_core::Result<()> {
+    let WatchRunEnv { db, kv, encryption_key, embedding, ws_manager, app_config, connect_registry, platforms } = env;
+    info!(watch_id = %watch_id, ?kind, "Starting watch execution");
 
     // 1. Load watch from DB
     let watch = load_watch(db, watch_id).await?;
-    let Some(watch) = watch else {
+    let Some(watch) = watch.filter(|w| w.enabled) else {
         info!(watch_id = %watch_id, "Watch not found or disabled, skipping");
+        if let RunKind::Resume { execution_id } = kind {
+            // The run was already in flight: do not leave it waiting forever.
+            watch_service::fail_execution_minimal(
+                db,
+                execution_id,
+                "Watch was removed or disabled while a batch run was in progress",
+            )
+            .await?;
+        }
         return Ok(());
     };
 
-    if !watch.enabled {
-        info!(watch_id = %watch_id, "Watch is disabled, skipping");
-        return Ok(());
-    }
-
-    // 2. Create execution record
-    let execution = watch_service::create_execution(
-        db,
-        &watch.watch_id,
-        &watch.name,
-        &watch.workspace_id,
-        watch.mode,
-        &watch.created_by,
-    )
-    .await?;
-
-    let execution_id = execution.id;
+    // 2. Create (or, resuming, load) the execution record
+    let (execution_id, started_at, stored_deadline) = match kind {
+        RunKind::Resume { execution_id } => {
+            let Some(info) = watch_batch_service::unfinished_run(db, execution_id).await? else {
+                info!(execution_id, "Run already finished; nothing to resume");
+                return Ok(());
+            };
+            (info.id, info.started_at, info.batch_deadline_at)
+        }
+        RunKind::Manual | RunKind::Scheduled => {
+            let execution = watch_service::create_execution(
+                db,
+                &watch.watch_id,
+                &watch.name,
+                &watch.workspace_id,
+                watch.mode,
+                &watch.created_by,
+            )
+            .await?;
+            (execution.id, execution.started_at, None)
+        }
+    };
+    let run = RunSetup {
+        kind,
+        started_at,
+        stored_deadline,
+        lease_lost: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    };
 
     // Run the execution, capturing errors to ensure we always clean up
     let result = execute_watch_inner(
@@ -834,6 +891,7 @@ pub async fn execute_watch(
         platforms,
         &watch,
         execution_id,
+        &run,
     )
     .await;
 
@@ -852,6 +910,10 @@ pub async fn execute_watch(
                 &ws_status,
             )
             .await;
+        }
+        Err(_) if run.lease_lost.load(std::sync::atomic::Ordering::SeqCst) => {
+            // Another instance took over this batch run; the record is theirs.
+            info!(watch_id = %watch_id, execution_id, "Lost the run's lease to another instance; stopping");
         }
         Err(e) => {
             error!(watch_id = %watch_id, error = %e, "Watch execution failed");
@@ -916,6 +978,18 @@ pub async fn execute_watch(
     }
 
     Ok(())
+}
+
+/// Per-run facts [`execute_watch_inner`] needs besides the watch itself.
+struct RunSetup {
+    kind: RunKind,
+    /// The execution's stored start time: the frozen "current time" of the
+    /// run, so a resumed run rebuilds byte-identical requests.
+    started_at: DateTime<Utc>,
+    /// The batch deadline stored by the first attempt (resumes only).
+    stored_deadline: Option<DateTime<Utc>>,
+    /// Set when this instance loses the run's lease.
+    lease_lost: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// Data produced by [`prepare_watch_dispatch`] for the caller to attach to
@@ -1008,6 +1082,7 @@ async fn execute_watch_inner(
     platforms: &Arc<PlatformRegistry>,
     watch: &Watch,
     execution_id: i32,
+    run: &RunSetup,
 ) -> kyomi_core::Result<(String, String)> {
     let watch_id = &watch.watch_id;
     let mode = watch.mode;
@@ -1155,8 +1230,86 @@ async fn execute_watch_inner(
         return Ok(("no_alert".to_string(), "no_alert".to_string()));
     }
 
-    // 6. Build enhanced system prompt with ChartML reference and watch context
-    let current_time = Utc::now();
+    // 5c. Decide how this run talks to the LLM (KYO-973) and record it. A
+    // resumed batch run keeps the plan its first attempt recorded.
+    let ws_ai = kyomi_auth::workspace_ai_config::load(db, &watch.workspace_id)
+        .await
+        .map_err(|e| {
+            kyomi_core::Error::Internal(format!("failed to load workspace AI config: {e}"))
+        })?;
+    let selection = crate::watch_llm::resolve_watch_selection(&ws_ai, app_config)?;
+    let provider_name = selection.provider_config.provider.to_string();
+    let configured_model = selection.provider_config.model.clone().unwrap_or_default();
+    let plan = match run.kind {
+        RunKind::Resume { .. } => crate::watch_llm::RunPlan::Batch {
+            deadline: run.stored_deadline.ok_or_else(|| {
+                kyomi_core::Error::Internal("batch run has no stored deadline".into())
+            })?,
+        },
+        RunKind::Manual | RunKind::Scheduled => {
+            let plan = crate::watch_llm::plan_run(
+                &selection.resolved,
+                crate::batch::batch_support(
+                    selection.provider_config.provider,
+                    selection.provider_config.base_url.as_deref(),
+                ),
+                run.kind == RunKind::Scheduled,
+                watch.next_run_at,
+                Utc::now(),
+            )
+            .map_err(kyomi_core::Error::Internal)?;
+            let (mode, deadline, reason, lease) = match &plan {
+                crate::watch_llm::RunPlan::Realtime { reason } => ("realtime", None, reason.as_deref(), None),
+                crate::watch_llm::RunPlan::Batch { deadline } => (
+                    "batch",
+                    Some(*deadline),
+                    None,
+                    Some((
+                        crate::batch_run::instance_id(),
+                        Utc::now() + chrono::Duration::seconds(crate::batch_run::LEASE_TTL_SECONDS),
+                    )),
+                ),
+            };
+            watch_batch_service::record_run_llm(
+                db,
+                execution_id,
+                &watch_batch_service::RunLlm {
+                    provider: &provider_name,
+                    model: &configured_model,
+                    mode,
+                    deadline,
+                    fallback_reason: reason,
+                    lease,
+                },
+            )
+            .await?;
+            plan
+        }
+    };
+    let extras = match &plan {
+        crate::watch_llm::RunPlan::Batch { deadline } => crate::execution::ExecutionExtras {
+            watch_batch: Some(crate::execution::WatchBatchRun {
+                execution_id,
+                deadline: *deadline,
+                lease_lost: run.lease_lost.clone(),
+            }),
+        },
+        crate::watch_llm::RunPlan::Realtime { .. } => crate::execution::ExecutionExtras::default(),
+    };
+    // A batch run legitimately waits far longer than the realtime guard; its
+    // own bound is the batch deadline.
+    let max_duration = match &plan {
+        crate::watch_llm::RunPlan::Batch { deadline } => (*deadline - Utc::now())
+            .to_std()
+            .unwrap_or(std::time::Duration::from_secs(1))
+            .max(MAX_WATCH_DURATION),
+        crate::watch_llm::RunPlan::Realtime { .. } => MAX_WATCH_DURATION,
+    };
+
+    // 6. Build enhanced system prompt with ChartML reference and watch context.
+    // The run's stored start time, not "now": a resumed run must rebuild the
+    // identical prompt so its cached batch responses still match.
+    let current_time = run.started_at;
 
     let recent_alerts = if mode == WatchMode::Alert {
         get_recent_alerts_for_watch(db, watch_id, &current_time, 5).await
@@ -1224,7 +1377,7 @@ async fn execute_watch_inner(
     // regardless of its inner id), so `should_persist_new_message` recognises
     // that in-flight message as the same row already on disk and skips
     // writing it again.
-    let agent_config = build_watch_agent_config(
+    let mut agent_config = build_watch_agent_config(
         &session_id,
         &watch.created_by,
         &watch.workspace_id,
@@ -1233,9 +1386,10 @@ async fn execute_watch_inner(
         creator_workspace_roles.clone(),
         watch_dispatch.user_message_persistence,
     );
+    agent_config.max_duration = Some(max_duration);
 
     let lazy_embedding = kyomi_embed::LazyEmbedding::loaded(embedding.clone());
-    let agent_result = execute_agent_chat(
+    let agent_result = crate::execution::execute_agent_chat_with(
         agent_config,
         crate::execution::AgentExecutionEnv {
             db,
@@ -1247,8 +1401,20 @@ async fn execute_watch_inner(
             connect_registry: connect_registry.clone(),
             platforms: platforms.clone(),
         },
+        extras.clone(),
     )
     .await?;
+    // The configured model may be the provider default; record the real one.
+    if let Some(model) = agent_result.model.as_deref() {
+        if let Err(e) = kyomi_core::db_execute!(
+            db,
+            "UPDATE watch_executions SET llm_model = $1 WHERE id = $2",
+            model,
+            execution_id
+        ) {
+            warn!(execution_id, error = %e, "Failed to record the watch run's model (non-fatal)");
+        }
+    }
 
     let mut raw_response = agent_result.response_text;
     let mut input_tokens = agent_result
@@ -1329,7 +1495,7 @@ async fn execute_watch_inner(
                          {{\"should_alert\": false, \"reason\": \"...\"}}"
                     );
 
-                    let retry_config = build_watch_retry_config(
+                    let mut retry_config = build_watch_retry_config(
                         &session_id,
                         &watch.created_by,
                         &watch.workspace_id,
@@ -1338,8 +1504,9 @@ async fn execute_watch_inner(
                         correction_prompt,
                     );
 
+                    retry_config.max_duration = Some(max_duration);
                     let lazy_embedding_retry = kyomi_embed::LazyEmbedding::loaded(embedding.clone());
-                    match execute_agent_chat(
+                    match crate::execution::execute_agent_chat_with(
                         retry_config,
                         crate::execution::AgentExecutionEnv {
                             db,
@@ -1351,6 +1518,7 @@ async fn execute_watch_inner(
                             connect_registry: connect_registry.clone(),
                             platforms: platforms.clone(),
                         },
+                        extras.clone(),
                     )
                     .await
                     {

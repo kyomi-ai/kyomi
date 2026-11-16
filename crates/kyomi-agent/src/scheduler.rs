@@ -37,13 +37,14 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
+use kyomi_auth::watch_batch_service;
 use kyomi_auth::watch_service;
 use kyomi_auth::websocket::WebSocketManager;
 use kyomi_core::platform::PlatformRegistry;
 use kyomi_core::{Config, DbPool, KVPool};
 use kyomi_embed::LazyEmbedding;
 
-use crate::watch_execution;
+use crate::watch_execution::{self, RunKind};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -164,6 +165,9 @@ impl WatchScheduler {
                 error!(error = %e, "Error in watch poll loop");
             }
 
+            // Resume batch-mode runs whose driver is gone
+            self.resume_batch_runs().await;
+
             // Recover any executions orphaned by a crashed pod
             self.recover_orphaned_executions().await;
 
@@ -219,6 +223,21 @@ impl WatchScheduler {
                 }
             }
 
+            // A batch-mode run of this watch that has not finished blocks the
+            // next occurrence: it is left due (not advanced) and picked up
+            // once the run ends, so occurrences never overlap or get lost.
+            match watch_batch_service::has_unfinished_batch_run(&self.db, watch_id).await {
+                Ok(true) => {
+                    tracing::debug!(watch_id = %watch_id, "Skipping due watch: a batch run is still outstanding");
+                    continue;
+                }
+                Ok(false) => {}
+                Err(e) => {
+                    error!(watch_id = %watch_id, error = %e, "Failed to check for an outstanding batch run");
+                    continue;
+                }
+            }
+
             // Compute new next_run_at from cron schedule
             let new_next_run = match watch_service::calculate_next_run_in_timezone(&watch.schedule, watch.timezone.as_deref()) {
                 Ok(next) => next,
@@ -245,43 +264,7 @@ impl WatchScheduler {
                     // We won the claim — spawn execution
                     info!(watch_id = %watch_id, "Claimed watch, spawning execution");
 
-                    let db = self.db.clone();
-                    let kv = self.kv.clone();
-                    let encryption_key = self.encryption_key.clone();
-                    // Wait for embedding model (fast path: already loaded after ~440ms)
-                    let embedding = match self.embedding.wait_ready().await {
-                        Ok(emb) => emb.clone(),
-                        Err(e) => {
-                            tracing::error!(error = %e, "Embedding service not ready for watch execution");
-                            continue;
-                        }
-                    };
-                    let ws_manager = self.ws_manager.clone();
-                    let app_config = self.config.clone();
-                    let cr = self.connect_registry.clone();
-                    let platforms = self.platforms.clone();
-                    let wid = watch_id.clone();
-
-                    let handle = tokio::spawn(async move {
-                        if let Err(e) = watch_execution::execute_watch(
-                            &db,
-                            &kv,
-                            &encryption_key,
-                            &embedding,
-                            &ws_manager,
-                            &app_config,
-                            cr,
-                            &platforms,
-                            &wid,
-                        )
-                        .await
-                        {
-                            error!(watch_id = %wid, error = %e, "Watch execution failed");
-                        }
-                    });
-
-                    let mut active = self.active_executions.lock().await;
-                    active.insert(watch_id.clone(), handle);
+                    self.spawn_watch_run(watch_id, RunKind::Scheduled).await;
                 }
                 Ok(_) => {
                     // rows_affected == 0: another pod claimed it, skip silently
@@ -297,6 +280,101 @@ impl WatchScheduler {
         }
 
         Ok(())
+    }
+
+    /// Spawn one watch execution task and track it in `active_executions`.
+    async fn spawn_watch_run(&self, watch_id: &str, kind: RunKind) {
+        let db = self.db.clone();
+        let kv = self.kv.clone();
+        let encryption_key = self.encryption_key.clone();
+        // Wait for embedding model (fast path: already loaded after ~440ms)
+        let embedding = match self.embedding.wait_ready().await {
+            Ok(emb) => emb.clone(),
+            Err(e) => {
+                tracing::error!(error = %e, "Embedding service not ready for watch execution");
+                return;
+            }
+        };
+        let ws_manager = self.ws_manager.clone();
+        let app_config = self.config.clone();
+        let cr = self.connect_registry.clone();
+        let platforms = self.platforms.clone();
+        let wid = watch_id.to_string();
+
+        let handle = tokio::spawn(async move {
+            if let Err(e) = watch_execution::execute_watch_with(
+                watch_execution::WatchRunEnv {
+                    db: &db,
+                    kv: &kv,
+                    encryption_key: &encryption_key,
+                    embedding: &embedding,
+                    ws_manager: &ws_manager,
+                    app_config: &app_config,
+                    connect_registry: cr,
+                    platforms: &platforms,
+                },
+                &wid,
+                kind,
+            )
+            .await
+            {
+                error!(watch_id = %wid, error = %e, "Watch execution failed");
+            }
+        });
+
+        let mut active = self.active_executions.lock().await;
+        active.insert(watch_id.to_string(), handle);
+    }
+
+    /// Resume batch-mode runs whose driving instance is gone (KYO-973).
+    ///
+    /// A run is resumable when its lease lapsed (crash, restart) or was
+    /// released (graceful shutdown). The lease is claimed with a
+    /// compare-and-swap, so exactly one instance resumes each run, and a run
+    /// already tracked by this instance is never started twice.
+    async fn resume_batch_runs(&self) {
+        let now = Utc::now();
+        let runs = match watch_batch_service::resumable_runs(&self.db, now, 20).await {
+            Ok(runs) => runs,
+            Err(e) => {
+                error!(error = %e, "Failed to list resumable batch runs");
+                return;
+            }
+        };
+        for run in runs {
+            let Some(watch_id) = run.watch_id.clone() else {
+                // The watch was deleted mid-run: nothing to resume into.
+                if let Err(e) = watch_service::fail_execution_minimal(
+                    &self.db,
+                    run.id,
+                    "Watch was deleted while a batch run was in progress",
+                )
+                .await
+                {
+                    error!(execution_id = run.id, error = %e, "Failed to close a batch run of a deleted watch");
+                }
+                continue;
+            };
+            if self.active_executions.lock().await.contains_key(&watch_id) {
+                continue;
+            }
+            let won = watch_batch_service::take_over_lease(
+                &self.db,
+                run.id,
+                crate::batch_run::instance_id(),
+                now + chrono::Duration::seconds(crate::batch_run::LEASE_TTL_SECONDS),
+                now,
+            )
+            .await;
+            match won {
+                Ok(true) => {
+                    info!(watch_id = %watch_id, execution_id = run.id, "Resuming batch-mode watch run");
+                    self.spawn_watch_run(&watch_id, RunKind::Resume { execution_id: run.id }).await;
+                }
+                Ok(false) => {} // another instance won it
+                Err(e) => error!(execution_id = run.id, error = %e, "Failed to claim a batch run lease"),
+            }
+        }
     }
 
     /// Remove completed executions from the active tracking map.
@@ -412,6 +490,7 @@ impl WatchScheduler {
                  error_message = 'Execution orphaned — recovered after server restart', \
                  completed_at = {now_fn} \
              WHERE status = 'running' \
+               AND COALESCE(llm_mode, 'realtime') <> 'batch' \
                AND started_at < $1"
         );
         match kyomi_core::db_execute!(
@@ -641,6 +720,7 @@ impl WatchScheduler {
                          error_message = 'Execution interrupted by scheduler shutdown', \
                          completed_at = {now_fn} \
                      WHERE status = 'running' \
+                       AND COALESCE(llm_mode, 'realtime') <> 'batch' \
                        AND watch_id = $1"
                 );
                 match kyomi_core::db_execute!(self.db, &sql, wid) {
@@ -656,6 +736,20 @@ impl WatchScheduler {
                     "Marked running executions as interrupted by shutdown"
                 );
             }
+        }
+
+        // Batch-mode runs are not failed by a restart: hand their leases back
+        // so another instance (or this one, after restart) resumes them now.
+        match watch_batch_service::release_all_leases(
+            &self.db,
+            crate::batch_run::instance_id(),
+            Utc::now(),
+        )
+        .await
+        {
+            Ok(n) if n > 0 => info!(count = n, "Released batch-mode run leases for resumption"),
+            Ok(_) => {}
+            Err(e) => error!(error = %e, "Failed to release batch-mode run leases on shutdown"),
         }
 
         info!("Watch scheduler shutdown complete");
@@ -1019,3 +1113,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "scheduler_batch_tests.rs"]
+mod scheduler_batch_tests;
