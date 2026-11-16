@@ -793,7 +793,7 @@ impl CustomAgent {
                 // The continuation must carry the same server tools. If they are now
                 // withheld (allowance or budget spent, restricted session) there is
                 // nothing to continue with: answer with what we have, flagged.
-                && !self.admitted_server_tools().await.is_empty()
+                && !self.admitted_server_tools(false).await.is_empty()
             {
                 pause_continuations += 1;
                 self.state.messages.push(
@@ -805,6 +805,12 @@ impl CustomAgent {
             // No tool calls -- this is the final response.
             if response.tool_calls.is_none() {
                 let cut_short = response.finish_reason == "pause_turn";
+                if cut_short {
+                    // Either the continuation bound is spent or the provider tools can no
+                    // longer be sent (allowance, budget, restricted session, or a privacy /
+                    // budget check that failed, which fails closed): research ends flagged.
+                    warn!(continuations = pause_continuations, "pause_turn research ended without a continuation; answer is flagged as possibly incomplete");
+                }
                 let content = final_response_text(response);
                 // Reached only when the continuation bound is spent: say so rather
                 // than presenting the paused partial text as a complete answer.
@@ -1246,7 +1252,7 @@ impl CustomAgent {
         allow_server_tools: bool,
     ) -> (crate::provider::RequestOptions, Vec<Message>) {
         let mut options = self.config.request_options();
-        options.server_tools = if allow_server_tools { self.admitted_server_tools().await } else { Vec::new() };
+        options.server_tools = if allow_server_tools { self.admitted_server_tools(true).await } else { Vec::new() };
         let messages = if options.server_tools.is_empty() {
             crate::web::server_tools::without_provider_content(messages)
         } else {
@@ -1260,7 +1266,10 @@ impl CustomAgent {
         self.prepare_call(&[], true).await.0
     }
 
-    async fn admitted_server_tools(&self) -> Vec<serde_json::Value> {
+    /// The provider tools this request may carry. `log` controls the warning for
+    /// each withheld tool; the pause guard probes with `log = false` so one
+    /// withholding is reported once.
+    async fn admitted_server_tools(&self, log: bool) -> Vec<serde_json::Value> {
         if self.config.server_tools.is_empty() {
             return Vec::new();
         }
@@ -1294,7 +1303,8 @@ impl CustomAgent {
             };
             match refusal {
                 None => admitted.push(tool.with_max_uses(remaining)),
-                Some(reason) => warn!(tool = tool.kind.tool_name(), reason = %reason, "provider web tool withheld from this request"),
+                Some(reason) if log => warn!(tool = tool.kind.tool_name(), reason = %reason, "provider web tool withheld from this request"),
+                Some(_) => {}
             }
         }
         admitted
@@ -1304,7 +1314,7 @@ impl CustomAgent {
     /// answer (provider terms require citations to be displayed) and clear them.
     fn with_web_sources(&mut self, content: String) -> String {
         let sources = crate::web::server_tools::dedupe(std::mem::take(&mut self.web_sources));
-        format!("{content}{}", crate::web::server_tools::sources_footer(&sources))
+        crate::web::server_tools::append_footer(&content, &crate::web::server_tools::sources_footer(&sources))
     }
 
     /// Record what the provider's web tools did in one response: log it, feed
@@ -3839,21 +3849,64 @@ Second chart:\n{CHARTML_STRIPPED_NOTE}\nDone."
         assert_eq!(record.continuation, raw);
     }
 
+    /// Why the continuation cannot carry the tool: allowance spent, monthly budget
+    /// spent, or a restricted session. In each case the run ends flagged, sends no
+    /// continuation request, and stores no server blocks.
     #[tokio::test]
     async fn a_pause_with_the_tool_now_withheld_ends_flagged_instead_of_sending_a_prefill() {
-        let (mut agent, calls) = scripted_agent_with_config(
+        for reason in ["allowance", "monthly_budget", "restricted_session"] {
+            let (mut agent, calls) = scripted_agent_with_config(
+                server_tool_agent_config(),
+                vec![Reply::Response(server_response("pause_turn", None))],
+                Reply::Text("never reached".into()),
+            )
+            .await;
+            match reason {
+                // The fixture reports exactly one search; an allowance of 1 is spent by it.
+                "allowance" => {
+                    let mut config = (*agent.tool_context.config).clone();
+                    config.web_tools.caps.per_turn_search = 1;
+                    agent.tool_context.config = Arc::new(config);
+                }
+                "monthly_budget" => {
+                    let mut config = (*agent.tool_context.config).clone();
+                    config.web_tools.caps.workspace_monthly = 1;
+                    agent.tool_context.config = Arc::new(config);
+                }
+                _ => {
+                    crate::test_support::seed_user_and_workspace(&agent.tool_context.db).await;
+                    kyomi_core::db_execute!(&agent.tool_context.db, "INSERT INTO chat_sessions (session_id,user_id,workspace_id,personal_data_owner_id) VALUES ('s-pause','user-a','ws-1','user-a')").unwrap();
+                    agent.tool_context.session_id = Some("s-pause".into());
+                }
+            }
+            // The first request must still carry the tool, except for the restricted session.
+            let answer = agent.chat("hi", CancellationToken::new(), None, None, None).await.unwrap();
+            let calls = calls.lock().unwrap();
+            assert_eq!(calls.len(), 1, "{reason}: no continuation request is sent");
+            assert!(answer.contains("Web research was cut short"), "{reason}: {answer}");
+            assert!(
+                agent.state().messages.iter().all(|m| m.provider_content.is_none()),
+                "{reason}: the paused server blocks are not stored in any persisted message"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn sources_gathered_before_a_session_became_restricted_are_still_shown() {
+        // Sources are inbound web data, not outbound private data: showing them in the
+        // answer discloses nothing about the session. (Only further requests are withheld.)
+        let (mut agent, _calls) = scripted_agent_with_config(
             server_tool_agent_config(),
-            vec![Reply::Response(server_response("pause_turn", None))],
-            Reply::Text("never reached".into()),
+            vec![Reply::Response(server_response("end_turn", None))],
+            Reply::Text("x".into()),
         )
         .await;
-        // The paused response reports one search; with a per-turn allowance of 1 the
-        // continuation could not carry the tool.
-        let mut config = (*agent.tool_context.config).clone();
-        config.web_tools.caps.per_turn_search = 1;
-        agent.tool_context.config = Arc::new(config);
+        crate::test_support::seed_user_and_workspace(&agent.tool_context.db).await;
+        kyomi_core::db_execute!(&agent.tool_context.db, "INSERT INTO chat_sessions (session_id,user_id,workspace_id,personal_data_owner_id) VALUES ('s-late','user-a','ws-1','user-a')").unwrap();
+        agent.tool_context.session_id = Some("s-late".into());
         let answer = agent.chat("hi", CancellationToken::new(), None, None, None).await.unwrap();
-        assert_eq!(calls.lock().unwrap().len(), 1, "no continuation request is sent");
-        assert!(answer.contains("Web research was cut short"), "{answer}");
+        // The restricted session never sent the tool, so the provider response here is the
+        // scripted one: its citations are still the only sources and are shown.
+        assert!(answer.contains("**Sources**"), "{answer}");
     }
 }

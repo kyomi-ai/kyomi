@@ -2238,25 +2238,6 @@ fn render_workspace_info(schema: &Value) -> impl IntoView {
 
 // -- Web search / fetch (KYO-969) --
 
-/// Whether a URL from web content may be rendered as a link. The URL comes from
-/// untrusted web content, so only absolute http(s) URLs qualify (never
-/// `javascript:`, `data:` or relative URLs).
-fn is_safe_web_url(url: &str) -> bool {
-    let lower = url.trim().to_ascii_lowercase();
-    (lower.starts_with("https://") || lower.starts_with("http://")) && !lower.contains(char::is_whitespace)
-}
-
-/// The text between the untrusted-content fence the agent adds for the model
-/// (`<untrusted_web_content>\n...\n</untrusted_web_content>`); other text is unchanged.
-fn unfence_web_text(text: &str) -> String {
-    const OPEN: &str = "<untrusted_web_content>";
-    const CLOSE: &str = "</untrusted_web_content>";
-    text.strip_prefix(OPEN)
-        .and_then(|t| t.strip_suffix(CLOSE))
-        .map(|t| t.trim_matches('\n').to_string())
-        .unwrap_or_else(|| text.to_string())
-}
-
 /// Render one web source: a titled external link with its host, or plain text
 /// when the URL is not a safe http(s) URL.
 fn web_source_row(title: String, url: String, published: Option<String>) -> AnyView {
@@ -2266,13 +2247,13 @@ fn web_source_row(title: String, url: String, published: Option<String>) -> AnyV
         .and_then(|rest| rest.split(['/', '?', '#']).next())
         .unwrap_or("")
         .to_string();
-    let title = unfence_web_text(&title);
+    let title = kyomi_types::web_text::unfence(&title);
     let title = if title.trim().is_empty() { host.clone() } else { title };
     let meta = match published {
         Some(p) if !p.is_empty() => format!("{host} · {p}"),
         _ => host,
     };
-    let label = if is_safe_web_url(&url) {
+    let label = if kyomi_types::web_text::is_safe_web_url(&url) {
         view! {
             <a href=url target="_blank" rel="noopener noreferrer nofollow" class="text-primary hover:underline font-medium">
                 {title}
