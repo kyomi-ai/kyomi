@@ -383,6 +383,98 @@ pub async fn update_workspace_name(
     Ok(result.rows_affected() > 0)
 }
 
+#[derive(Debug, sqlx::FromRow)]
+struct WorkspaceSettingsTextRow {
+    settings: Option<String>,
+}
+
+/// Write the sync-log entry for a workspace settings change. Best-effort: a
+/// failure is logged and otherwise ignored.
+async fn log_settings_update(pool: &DbPool, workspace_id: &str) {
+    let snapshot = fetch_workspace_settings_snapshot(pool, workspace_id).await;
+    if let Err(e) = sync_log_service::write_sync_entry(
+        pool,
+        sync_log_service::SyncEntryParams {
+            entity_type: entity_types::WORKSPACE_SETTINGS,
+            entity_id: workspace_id,
+            workspace_id,
+            action: SyncActionType::Update,
+            data: snapshot,
+            owner_user_id: None,
+            is_workspace_visible: true,
+        },
+    )
+    .await
+    {
+        tracing::warn!(error = %e, workspace_id = %workspace_id, "Failed to write sync log entry");
+    }
+}
+
+/// Maximum compare-and-swap attempts in [`update_workspace_settings_with`].
+const SETTINGS_CAS_ATTEMPTS: usize = 8;
+
+/// Atomically edit a workspace's settings JSON.
+///
+/// [`update_workspace_settings`] replaces the whole blob, so a caller that
+/// reads, edits and writes it back loses any key another writer changed in
+/// between (the title model, default model, context window...). This reads the
+/// current settings, applies `edit`, and writes the result only if the stored
+/// settings are still exactly what was read (compare-and-swap on the raw
+/// text); otherwise it re-reads and re-applies `edit`, up to
+/// [`SETTINGS_CAS_ATTEMPTS`] times. `edit` must therefore be a pure function
+/// of the settings it is given.
+///
+/// Returns `Ok(false)` when the workspace does not exist.
+pub async fn update_workspace_settings_with(
+    pool: &DbPool,
+    workspace_id: &str,
+    edit: impl Fn(&Option<serde_json::Value>) -> kyomi_core::Result<serde_json::Value>,
+) -> kyomi_core::Result<bool> {
+    let is_pg = pool.is_postgres();
+    let now = sql_compat::now(is_pg);
+    // NULL-safe comparison: `settings` may be NULL on a fresh workspace.
+    let sql = if is_pg {
+        format!(
+            "UPDATE workspaces SET settings = $1::json, updated_at = {now} \
+             WHERE workspace_id = $2 AND CAST(settings AS TEXT) IS NOT DISTINCT FROM $3"
+        )
+    } else {
+        format!(
+            "UPDATE workspaces SET settings = $1, updated_at = {now} \
+             WHERE workspace_id = $2 AND CAST(settings AS TEXT) IS $3"
+        )
+    };
+
+    for _ in 0..SETTINGS_CAS_ATTEMPTS {
+        let row = kyomi_core::db_fetch_optional!(
+            pool,
+            WorkspaceSettingsTextRow,
+            "SELECT CAST(settings AS TEXT) AS settings FROM workspaces WHERE workspace_id = $1",
+            workspace_id
+        )?;
+        let Some(WorkspaceSettingsTextRow { settings: raw }) = row else {
+            return Ok(false);
+        };
+        let current: Option<serde_json::Value> = match raw.as_deref() {
+            None => None,
+            Some(text) => Some(serde_json::from_str(text).map_err(|e| {
+                kyomi_core::Error::Internal(format!("stored workspace settings are not JSON: {e}"))
+            })?),
+        };
+        let next = edit(&current)?;
+        let next_str = serde_json::to_string(&next)
+            .map_err(|e| kyomi_core::Error::Internal(format!("JSON serialization failed: {e}")))?;
+        let result = kyomi_core::db_execute!(pool, &sql, &next_str, workspace_id, &raw)?;
+        if result.rows_affected() > 0 {
+            log_settings_update(pool, workspace_id).await;
+            return Ok(true);
+        }
+    }
+    Err(kyomi_core::Error::Internal(
+        "workspace settings changed concurrently; please retry".into(),
+    ))
+}
+
 /// Update workspace settings JSON (full replace).
 ///
 /// `workspaces.settings` is a Postgres `json` column. Binding `$1` as text
@@ -411,25 +503,8 @@ pub async fn update_workspace_settings(
     };
     let result = kyomi_core::db_execute!(pool, &sql, &settings_str, workspace_id)?;
 
-    // Sync log — best-effort: log a warning and continue on failure.
     if result.rows_affected() > 0 {
-        let snapshot = fetch_workspace_settings_snapshot(pool, workspace_id).await;
-        if let Err(e) = sync_log_service::write_sync_entry(
-            pool,
-            sync_log_service::SyncEntryParams {
-                entity_type: entity_types::WORKSPACE_SETTINGS,
-                entity_id: workspace_id,
-                workspace_id,
-                action: SyncActionType::Update,
-                data: snapshot,
-                owner_user_id: None,
-                is_workspace_visible: true,
-            },
-        )
-        .await
-        {
-            tracing::warn!(error = %e, workspace_id = %workspace_id, "Failed to write sync log entry");
-        }
+        log_settings_update(pool, workspace_id).await;
     }
 
     Ok(result.rows_affected() > 0)
@@ -1963,4 +2038,112 @@ mod tests {
 
         cleanup_pg(pg, &workspace_id, &[&owner_id, &member_id, &inactive_id]).await;
     }
+
+    // ---- update_workspace_settings_with (compare-and-swap) -------------------
+
+    fn set_key(key: &'static str, value: serde_json::Value)
+        -> impl Fn(&Option<serde_json::Value>) -> kyomi_core::Result<serde_json::Value>
+    {
+        move |current| {
+            let mut s = current.clone().unwrap_or_else(|| serde_json::json!({}));
+            s["custom_settings"][key] = value.clone();
+            Ok(s)
+        }
+    }
+
+    #[tokio::test]
+    async fn settings_edit_preserves_unrelated_keys_and_handles_null_settings() {
+        let pool = test_pool().await;
+        let sq = match &pool { DbPool::Sqlite(sq) => sq.clone(), _ => unreachable!() };
+        seed_user(&sq, "u-cas", "u-cas@example.com").await;
+        seed_workspace(&sq, "ws-cas", "u-cas").await;
+        sqlx::query("UPDATE workspaces SET settings = NULL WHERE workspace_id = 'ws-cas'")
+            .execute(&sq).await.unwrap();
+
+        assert!(update_workspace_settings_with(&pool, "ws-cas", set_key("title_model", serde_json::json!("m1"))).await.unwrap());
+        assert!(update_workspace_settings_with(&pool, "ws-cas", set_key("temperature", serde_json::json!(0.3))).await.unwrap());
+
+        let ws = get_workspace_full(&pool, "ws-cas").await.unwrap().unwrap();
+        let settings = ws.settings.unwrap();
+        assert_eq!(settings["custom_settings"]["title_model"], "m1");
+        assert_eq!(settings["custom_settings"]["temperature"], 0.3);
+    }
+
+    #[tokio::test]
+    async fn settings_edit_on_missing_workspace_reports_false() {
+        let pool = test_pool().await;
+        let ok = update_workspace_settings_with(&pool, "ws-nope", set_key("k", serde_json::json!(1))).await.unwrap();
+        assert!(!ok);
+    }
+
+    #[tokio::test]
+    async fn settings_edit_error_is_propagated_and_writes_nothing() {
+        let pool = test_pool().await;
+        let sq = match &pool { DbPool::Sqlite(sq) => sq.clone(), _ => unreachable!() };
+        seed_user(&sq, "u-cas-e", "u-cas-e@example.com").await;
+        seed_workspace(&sq, "ws-cas-e", "u-cas-e").await;
+        let before = get_workspace_full(&pool, "ws-cas-e").await.unwrap().unwrap().settings;
+        let r = update_workspace_settings_with(&pool, "ws-cas-e", |_| {
+            Err(kyomi_core::Error::Internal("boom".into()))
+        }).await;
+        assert!(r.is_err());
+        assert_eq!(get_workspace_full(&pool, "ws-cas-e").await.unwrap().unwrap().settings, before);
+    }
+
+    #[tokio::test]
+    async fn concurrent_settings_edits_do_not_lose_each_others_keys() {
+        let pool = test_pool().await;
+        let sq = match &pool { DbPool::Sqlite(sq) => sq.clone(), _ => unreachable!() };
+        seed_user(&sq, "u-cas-c", "u-cas-c@example.com").await;
+        seed_workspace(&sq, "ws-cas-c", "u-cas-c").await;
+
+        let (a, b, c, d, e) = tokio::join!(
+            update_workspace_settings_with(&pool, "ws-cas-c", set_key("k1", serde_json::json!(1))),
+            update_workspace_settings_with(&pool, "ws-cas-c", set_key("k2", serde_json::json!(2))),
+            update_workspace_settings_with(&pool, "ws-cas-c", set_key("k3", serde_json::json!(3))),
+            update_workspace_settings_with(&pool, "ws-cas-c", set_key("k4", serde_json::json!(4))),
+            update_workspace_settings_with(&pool, "ws-cas-c", set_key("k5", serde_json::json!(5))),
+        );
+        for r in [a, b, c, d, e] { assert!(r.unwrap()); }
+
+        let ws = get_workspace_full(&pool, "ws-cas-c").await.unwrap().unwrap();
+        let settings = ws.settings.unwrap();
+        for (i, k) in ["k1", "k2", "k3", "k4", "k5"].iter().enumerate() {
+            assert_eq!(settings["custom_settings"][k], (i + 1) as i64, "{k} lost: {settings}");
+        }
+    }
+
+    #[tokio::test]
+    async fn concurrent_settings_edits_on_postgres_do_not_lose_each_others_keys() {
+        use crate::test_pg::{
+            cleanup_workspace_and_users_pg, postgres_pool, postgres_test_pool_or_skip,
+            seed_user_pg, seed_workspace_pg, unique_test_id,
+        };
+        let Some(pool) = postgres_test_pool_or_skip("concurrent_settings_edits_on_postgres").await else {
+            return;
+        };
+        let pg = postgres_pool(&pool);
+        let user = unique_test_id("u-cas");
+        let ws = unique_test_id("ws-cas");
+        seed_user_pg(pg, &user, &format!("{user}@example.com")).await;
+        seed_workspace_pg(pg, &ws, &user).await;
+
+        let keys: [&'static str; 6] = ["a", "b", "c", "d", "e", "f"];
+        let results = futures_util::future::join_all(keys.iter().enumerate().map(|(i, key)| {
+            let pool = pool.clone();
+            let ws = ws.clone();
+            async move {
+                update_workspace_settings_with(&pool, &ws, set_key(key, serde_json::json!(i as i64))).await
+            }
+        })).await;
+        for r in results { assert!(r.unwrap()); }
+
+        let got = get_workspace_full(&pool, &ws).await.unwrap().unwrap();
+        let settings = got.settings.unwrap();
+        for (i, k) in keys.iter().enumerate() {
+            assert_eq!(settings["custom_settings"][k], i as i64, "{k} lost: {settings}");
+        }
+        cleanup_workspace_and_users_pg(pg, &ws, &[&user]).await;
+    }
+
 }

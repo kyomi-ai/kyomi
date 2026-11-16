@@ -337,8 +337,10 @@ pub struct AgentConfig {
     /// price. Do not "fix" this to include cache reads without re-deriving
     /// the cost model first.
     pub max_total_tokens: Option<u64>,
-    /// Sampling temperature (0.0-1.0). `None` uses model default.
+    /// Sampling temperature (0.0-1.0). `None` omits the field.
     pub temperature: Option<f32>,
+    /// Reasoning effort passed to the provider unchanged. `None` omits it.
+    pub reasoning_effort: Option<String>,
     /// Maximum tokens to generate per LLM call.
     pub max_tokens: u32,
     /// Whether to log full LLM context (for debugging).
@@ -353,6 +355,15 @@ pub struct AgentConfig {
     pub tool_filter: ToolFilter,
 }
 
+impl AgentConfig {
+    /// The per-request generation options this config asks providers for.
+    pub fn request_options(&self) -> crate::provider::RequestOptions {
+        crate::provider::RequestOptions::new(self.max_tokens)
+            .with_temperature(self.temperature)
+            .with_reasoning_effort(self.reasoning_effort.clone())
+    }
+}
+
 impl Default for AgentConfig {
     fn default() -> Self {
         Self {
@@ -363,6 +374,7 @@ impl Default for AgentConfig {
             max_duration: Some(Duration::from_secs(15 * 60)),
             max_total_tokens: Some(1_500_000),
             temperature: None,
+            reasoning_effort: None,
             max_tokens: 4096,
             log_context: false,
             // Default: chat context — exclude copilot-only and MCP-only tools.
@@ -1137,7 +1149,7 @@ impl CustomAgent {
             context.complete(&provider, sink.as_ref(), &agent_runtime::ModelCallId(format!("model-{}", self.state.global_iteration)))
                 .await.map_err(runtime_error)
         } else {
-            self.client.complete(messages, tools, self.config.temperature, self.config.max_tokens, &self.user_names).await
+            self.client.complete(messages, tools, &self.config.request_options(), &self.user_names).await
         }
     }
 
@@ -1483,8 +1495,8 @@ struct RuntimeProvider<'a> {
 impl agent_runtime::CompleteProvider for RuntimeProvider<'_> {
     type Response = crate::types::LLMResponse;
     async fn complete(&self) -> Result<(Self::Response, agent_runtime::ResponseRecord), agent_runtime::ExecutionError> {
-        let response = self.agent.client.complete(self.messages, self.tools, self.agent.config.temperature,
-            self.agent.config.max_tokens, &self.agent.user_names).await
+        let response = self.agent.client.complete(self.messages, self.tools, &self.agent.config.request_options(),
+            &self.agent.user_names).await
             .map_err(|error| agent_runtime::ExecutionError::Provider(error.to_string()))?;
         let mut planning = Vec::new();
         if let Some(thought) = response.thinking_content.as_deref().and_then(crate::thinking::clean_thought) {

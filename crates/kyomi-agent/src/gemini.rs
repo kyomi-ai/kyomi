@@ -14,6 +14,7 @@ use std::collections::HashMap;
 use serde_json::json;
 use tracing::{debug, info, warn};
 
+use crate::provider::RequestOptions;
 use crate::types::{AgentTokenUsage, LLMResponse, Message, MessageRole, Tool, ToolCall};
 
 // ---------------------------------------------------------------------------
@@ -224,32 +225,46 @@ impl GeminiProvider {
     // API Call
     // -----------------------------------------------------------------------
 
+    /// Build `generationConfig`. Unset temperature / effort are omitted.
+    ///
+    /// Effort maps to `thinkingConfig`: a plain integer is a token budget
+    /// (`thinkingBudget`, Gemini 2.5 style); anything else is passed
+    /// unchanged as `thinkingLevel` (Gemini 3+: minimal/low/medium/high/...).
+    pub(crate) fn build_generation_config(options: &RequestOptions) -> serde_json::Value {
+        let mut gen_config = json!({
+            "maxOutputTokens": options.max_tokens,
+        });
+        if let Some(temp) = options.temperature {
+            gen_config["temperature"] = json!(temp);
+        }
+        if let Some(effort) = &options.reasoning_effort {
+            gen_config["thinkingConfig"] = match effort.parse::<i64>() {
+                Ok(n) => json!({"thinkingBudget": n}),
+                Err(_) => json!({"thinkingLevel": effort}),
+            };
+        }
+        gen_config
+    }
+
     /// Send a completion request to the Gemini API.
     ///
     /// # Arguments
     /// * `messages` - Conversation history.
     /// * `tools` - Available tools (may be empty).
-    /// * `temperature` - Sampling temperature; defaults to 0.7.
-    /// * `max_tokens` - Maximum tokens to generate.
+    /// * `options` - Temperature, reasoning effort and max tokens; `None` fields are omitted.
     /// * `user_names` - Map of user_id -> display name for user attribution.
     pub async fn complete(
         &self,
         messages: &[Message],
         tools: &[Tool],
-        temperature: Option<f32>,
-        max_tokens: u32,
+        options: &RequestOptions,
         user_names: &HashMap<String, String>,
     ) -> kyomi_core::Result<LLMResponse> {
         let (system_instruction, contents) = Self::convert_messages_to_gemini(messages, user_names);
 
         // Build request body.
         let message_count = contents.len();
-        let mut gen_config = json!({
-            "maxOutputTokens": max_tokens,
-        });
-        if let Some(temp) = temperature {
-            gen_config["temperature"] = json!(temp);
-        }
+        let gen_config = Self::build_generation_config(options);
         let mut body = json!({
             "contents": contents,
             "generationConfig": gen_config,
@@ -274,7 +289,9 @@ impl GeminiProvider {
         let response_json = kyomi_core::retry::retry_with_backoff(|| self.call_api(&body)).await?;
 
         // Parse response.
-        Self::parse_response(&self.base.model, &response_json)
+        let response = Self::parse_response(&self.base.model, &response_json)?;
+        crate::provider::log_reasoning_usage("gemini", &self.base.model, options, &response);
+        Ok(response)
     }
 
     /// Send a single HTTP request to the Gemini API.
@@ -480,7 +497,12 @@ impl GeminiProvider {
                 .unwrap_or(0) as u32,
             cache_creation_input_tokens: 0,
             cache_read_input_tokens: 0,
-            reasoning_tokens: 0,
+            // `usageMetadata.thoughtsTokenCount`. Gemini reports thought
+            // tokens separately from `candidatesTokenCount`.
+            reasoning_tokens: usage
+                .and_then(|u| u.get("thoughtsTokenCount"))
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0) as u32,
         }
     }
 }
@@ -1265,4 +1287,58 @@ mod tests {
         assert_eq!(contents[3]["role"], "model");
     }
 
+
+    // -- KYO-972: temperature / reasoning effort wire shape -------------------
+
+    #[test]
+    fn generation_config_omits_unset_effort_and_temperature() {
+        let g = GeminiProvider::build_generation_config(&RequestOptions::new(512));
+        assert_eq!(g, json!({"maxOutputTokens": 512}));
+    }
+
+    #[test]
+    fn named_and_unrecognised_effort_become_thinking_level_unchanged() {
+        for v in ["minimal", "low", "high", "xhigh", "future-level"] {
+            let g = GeminiProvider::build_generation_config(
+                &RequestOptions::new(512).with_reasoning_effort(Some(v.into())),
+            );
+            assert_eq!(g["thinkingConfig"], json!({"thinkingLevel": v}), "{v}");
+        }
+    }
+
+    #[test]
+    fn numeric_effort_becomes_thinking_budget_number() {
+        let g = GeminiProvider::build_generation_config(
+            &RequestOptions::new(512).with_reasoning_effort(Some("1024".into())),
+        );
+        assert_eq!(g["thinkingConfig"], json!({"thinkingBudget": 1024}));
+    }
+
+    #[test]
+    fn temperature_number_is_sent_and_none_omits_it() {
+        let g = GeminiProvider::build_generation_config(&RequestOptions::new(512).with_temperature(Some(0.5)));
+        assert_eq!(g["temperature"], json!(0.5));
+        let g = GeminiProvider::build_generation_config(&RequestOptions::new(512).with_temperature(None));
+        assert!(g.get("temperature").is_none());
+    }
+}
+
+#[cfg(test)]
+mod reasoning_usage_tests {
+    use super::*;
+
+    #[test]
+    fn thought_tokens_are_read_from_usage_metadata() {
+        let usage = GeminiProvider::parse_usage(&serde_json::json!({
+            "usageMetadata": {"promptTokenCount": 3, "candidatesTokenCount": 7, "thoughtsTokenCount": 41}
+        }));
+        assert_eq!(usage.reasoning_tokens, 41);
+        assert_eq!(usage.output_tokens, 7);
+    }
+
+    #[test]
+    fn missing_thought_count_is_zero() {
+        let usage = GeminiProvider::parse_usage(&serde_json::json!({"usageMetadata": {}}));
+        assert_eq!(usage.reasoning_tokens, 0);
+    }
 }

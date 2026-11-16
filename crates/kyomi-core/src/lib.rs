@@ -22,6 +22,7 @@ pub mod json_utils;
 pub mod kv_store;
 pub mod kv_store_memory;
 pub mod kv_store_redis;
+pub mod llm_sampling;
 pub mod models;
 pub mod platform;
 pub mod redis;

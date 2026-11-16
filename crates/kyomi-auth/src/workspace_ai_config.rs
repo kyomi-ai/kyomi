@@ -103,6 +103,15 @@ pub struct WorkspaceAiConfig {
     /// Context window size for the configured model in tokens (0 = unknown).
     /// Stored in `settings.custom_settings.context_window`.
     pub context_window: u32,
+    /// Workspace reasoning-effort / temperature overrides from
+    /// `settings.custom_settings` (KYO-972). Applied only on self-hosted
+    /// deployments, like `default_model`: SaaS servers control the model and
+    /// its tuning entirely.
+    pub sampling: kyomi_core::llm_sampling::LlmSamplingSettings,
+    /// Stored sampling values that failed validation and were ignored (one
+    /// `key: reason` entry each). Surfaced on the AI settings page so an admin
+    /// can repair them; never fatal.
+    pub sampling_warnings: Vec<String>,
 }
 
 impl WorkspaceAiConfig {
@@ -235,6 +244,16 @@ pub async fn load(
     };
 
     let context_window = read_context_window(&row.settings);
+    let (sampling, sampling_warnings) =
+        kyomi_core::llm_sampling::read_workspace_sampling(&row.settings);
+    for warning in &sampling_warnings {
+        // Debug, not warn: `load` runs on every LLM call and the admin-facing
+        // report is the warning list on Settings -> AI.
+        tracing::debug!(
+            workspace_id = %workspace_id,
+            "ignoring invalid stored LLM tuning value: {warning}"
+        );
+    }
 
     Ok(WorkspaceAiConfig {
         provider,
@@ -243,6 +262,8 @@ pub async fn load(
         base_url,
         title_model,
         context_window,
+        sampling,
+        sampling_warnings,
     })
 }
 
@@ -582,6 +603,8 @@ mod tests {
             base_url: None,
             title_model: None,
         context_window: 0,
+        sampling: Default::default(),
+        sampling_warnings: Vec::new(),
         };
         assert!(!cfg.is_byok());
     }
@@ -600,6 +623,8 @@ mod tests {
                 base_url: None,
                 title_model: None,
             context_window: 0,
+            sampling: Default::default(),
+        sampling_warnings: Vec::new(),
             };
             assert!(cfg.is_byok(), "expected BYOK for {p:?}");
         }

@@ -721,25 +721,19 @@ pub async fn set_workspace_default_dashboard(
 
     ac.require(Permission::SetWorkspaceDefaults, "Workspace admin access required")?;
 
-    let workspace = kyomi_auth::workspace_service::get_workspace_full(ac.db(), &ac.ws_id)
-        .await
-        .into_sfn_core()?
-        .ok_or_else(|| ServerFnError::new("Workspace not found"))?;
-
-    let mut current_settings = workspace.settings.clone().unwrap_or(serde_json::json!({}));
-
     let dashboard_value = match dashboard_id {
         Some(id) if !id.is_empty() => serde_json::json!(id),
         _ => serde_json::Value::Null,
     };
 
-    if let Some(obj) = current_settings.as_object_mut() {
-        obj.insert("default_dashboard_id".to_string(), dashboard_value);
-    }
-
-    kyomi_auth::workspace_service::update_workspace_settings(ac.db(), &ac.ws_id, &current_settings)
-        .await
-        .into_sfn_core()?;
+    super::workspace::edit_workspace_settings(&ac, |settings| {
+        let mut current = settings.clone().unwrap_or(serde_json::json!({}));
+        if let Some(obj) = current.as_object_mut() {
+            obj.insert("default_dashboard_id".to_string(), dashboard_value.clone());
+        }
+        current
+    })
+    .await?;
 
     Ok(())
 }

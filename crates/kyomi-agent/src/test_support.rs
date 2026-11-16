@@ -252,8 +252,7 @@ impl LLMProvider for ScriptedProvider {
         &self,
         messages: &[Message],
         tools: &[Tool],
-        _temperature: Option<f32>,
-        _max_tokens: u32,
+        _options: &crate::provider::RequestOptions,
         _user_names: &HashMap<String, String>,
     ) -> kyomi_core::Result<LLMResponse> {
         self.calls
@@ -344,9 +343,9 @@ pub(crate) enum Truncation {
 }
 #[async_trait::async_trait]
 impl LLMProvider for ActualToolsProvider {
-    async fn complete(&self, messages: &[Message], tools: &[Tool], temperature: Option<f32>, max_tokens: u32,
+    async fn complete(&self, messages: &[Message], tools: &[Tool], options: &crate::provider::RequestOptions,
         names: &HashMap<String, String>) -> kyomi_core::Result<LLMResponse> {
-        let mut response = self.inner.complete(messages, tools, temperature, max_tokens, names).await?;
+        let mut response = self.inner.complete(messages, tools, options, names).await?;
         let index = self.index.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let start = index * self.batch;
         let end = (start + self.batch).min(self.requested.len());

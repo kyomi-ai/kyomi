@@ -84,6 +84,41 @@ pub struct AiModelInfo {
     pub completion_cost_per_token: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_length: Option<u64>,
+    /// Reasoning-effort values the model accepts, when the listing source
+    /// reports them (OpenRouter `reasoning.supported_efforts`). Used only to
+    /// populate suggestions; the effort setting itself is free text.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub supported_efforts: Vec<String>,
+    /// The model's own default effort (OpenRouter `reasoning.default_effort`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_effort: Option<String>,
+}
+
+/// The six LLM tuning fields as the user typed them (KYO-972). An empty
+/// string means "not set here" (fall through to the next layer); `omit`
+/// means "send no field"; anything else is a value.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct LlmTuningValues {
+    pub reasoning_effort: String,
+    pub title_reasoning_effort: String,
+    pub watch_reasoning_effort: String,
+    pub temperature: String,
+    pub title_temperature: String,
+    pub watch_temperature: String,
+}
+
+/// Self-hosted LLM tuning as stored for the workspace and as set by the
+/// instance (`LLM_*` env), so the page can show where a value comes from.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct LlmTuningView {
+    /// Resolved provider (`anthropic | openai | gemini`), for suggestions.
+    pub provider: String,
+    pub workspace: LlmTuningValues,
+    pub instance: LlmTuningValues,
+    /// Stored workspace values that are invalid and therefore ignored, as
+    /// `key: reason`. Shown so an admin can fix or clear them.
+    #[serde(default)]
+    pub warnings: Vec<String>,
 }
 
 /// Result of a candidate-config connectivity test.
@@ -130,6 +165,110 @@ pub enum ResolvedAiProviderView {
     /// [`kyomi_agent::create_provider_from_workspace`] would raise at
     /// request time — safe to show verbatim, never contains key material.
     Unconfigured { reason: String },
+}
+
+// ---------------------------------------------------------------------------
+// LLM tuning (reasoning effort / temperature) — self-hosted, KYO-972
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "ssr")]
+fn tuning_values(s: &kyomi_core::llm_sampling::LlmSamplingSettings) -> LlmTuningValues {
+    use kyomi_core::llm_sampling::{effort_text, temperature_text};
+    LlmTuningValues {
+        reasoning_effort: effort_text(s.reasoning_effort.as_ref()),
+        title_reasoning_effort: effort_text(s.title_reasoning_effort.as_ref()),
+        watch_reasoning_effort: effort_text(s.watch_reasoning_effort.as_ref()),
+        temperature: temperature_text(s.temperature.as_ref()),
+        title_temperature: temperature_text(s.title_temperature.as_ref()),
+        watch_temperature: temperature_text(s.watch_temperature.as_ref()),
+    }
+}
+
+/// Read the workspace and instance LLM tuning. Self-hosted admins only.
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
+pub async fn get_llm_tuning() -> Result<LlmTuningView, ServerFnError> {
+    let ac = AuthenticatedContext::extract().await?;
+    if !ac.ctx.config.self_hosted {
+        return Err(ServerFnError::new(
+            "LLM tuning is only configurable on self-hosted deployments.",
+        ));
+    }
+    ac.require(Permission::ManageAiConfig, "Workspace admin access required")?;
+
+    let ws_config = kyomi_auth::workspace_ai_config::load(ac.db(), &ac.ws_id)
+        .await
+        .into_sfn()?;
+    let provider = match resolve_effective_ai_provider(&ws_config, &ac.ctx.config) {
+        ResolvedAiProviderView::Resolved { provider, .. } => provider,
+        ResolvedAiProviderView::Unconfigured { .. } => String::new(),
+    };
+    Ok(LlmTuningView {
+        provider,
+        workspace: tuning_values(&ws_config.sampling),
+        instance: tuning_values(&ac.ctx.config.llm_sampling),
+        warnings: ws_config.sampling_warnings.clone(),
+    })
+}
+
+/// Validate and store the workspace LLM tuning (reasoning effort and
+/// temperature per call profile). Self-hosted admins only.
+///
+/// Each empty field clears its key so the instance `LLM_*` value or the
+/// built-in default applies again. Every non-empty value is validated with
+/// the same parsers the env and the stored-settings reader use, and the whole
+/// request is rejected if any field is invalid (nothing is partially saved).
+/// The write is an atomic edit of `settings` (see
+/// `workspace_service::update_workspace_settings_with`), so it cannot clobber
+/// a concurrent change to another settings key.
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
+pub async fn update_llm_tuning(values: LlmTuningValues) -> Result<(), ServerFnError> {
+    use kyomi_core::llm_sampling::{
+        stored_effort, stored_temperature, WORKSPACE_EFFORT_KEYS, WORKSPACE_TEMPERATURE_KEYS,
+    };
+
+    let ac = AuthenticatedContext::extract().await?;
+    if !ac.ctx.config.self_hosted {
+        return Err(ServerFnError::new(
+            "LLM tuning is only configurable on self-hosted deployments.",
+        ));
+    }
+    ac.require(Permission::ManageAiConfig, "Workspace admin access required")?;
+
+    // Validate everything first; `None` clears the key.
+    let [e0, e1, e2] = [&values.reasoning_effort, &values.title_reasoning_effort, &values.watch_reasoning_effort];
+    let [t0, t1, t2] = [&values.temperature, &values.title_temperature, &values.watch_temperature];
+    let mut edits: Vec<(&'static str, Option<serde_json::Value>)> = Vec::new();
+    for (key, raw) in WORKSPACE_EFFORT_KEYS.into_iter().zip([e0, e1, e2]) {
+        let raw = raw.trim();
+        let stored = if raw.is_empty() {
+            None
+        } else {
+            Some(stored_effort(raw).map_err(|e| ServerFnError::new(format!("{key}: {e}")))?)
+        };
+        edits.push((key, stored));
+    }
+    for (key, raw) in WORKSPACE_TEMPERATURE_KEYS.into_iter().zip([t0, t1, t2]) {
+        let raw = raw.trim();
+        let stored = if raw.is_empty() {
+            None
+        } else {
+            Some(stored_temperature(raw).map_err(|e| ServerFnError::new(format!("{key}: {e}")))?)
+        };
+        edits.push((key, stored));
+    }
+
+    super::workspace::edit_workspace_settings(&ac, |current| {
+        let mut settings = current.clone();
+        for (key, stored) in &edits {
+            settings = Some(match stored {
+                Some(v) => super::workspace::merge_custom_settings(&settings, key, v.clone()),
+                None => super::workspace::clear_custom_settings_key(&settings, key),
+            });
+        }
+        settings.unwrap_or_else(|| serde_json::json!({}))
+    })
+    .await?;
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -1100,6 +1239,15 @@ fn parse_openrouter_models(body: &str) -> Result<Vec<AiModelInfo>, serde_json::E
         pricing: Option<Pricing>,
         #[serde(default)]
         context_length: Option<u64>,
+        #[serde(default)]
+        reasoning: Option<Reasoning>,
+    }
+    #[derive(Deserialize)]
+    struct Reasoning {
+        #[serde(default)]
+        supported_efforts: Vec<String>,
+        #[serde(default)]
+        default_effort: Option<String>,
     }
     #[derive(Deserialize)]
     struct Pricing {
@@ -1131,6 +1279,12 @@ fn parse_openrouter_models(body: &str) -> Result<Vec<AiModelInfo>, serde_json::E
                 prompt_cost_per_token: Some(prompt_cost),
                 completion_cost_per_token: Some(completion_cost),
                 context_length: e.context_length,
+                supported_efforts: e
+                    .reasoning
+                    .as_ref()
+                    .map(|r| r.supported_efforts.clone())
+                    .unwrap_or_default(),
+                default_effort: e.reasoning.and_then(|r| r.default_effort),
             }
         })
         .collect();
@@ -1421,6 +1575,24 @@ mod tests {
     // ---- parse_openrouter_models ----------------------------------------
 
     #[test]
+    fn parse_openrouter_models_extracts_reasoning_efforts_when_present() {
+        let body = r#"{"data": [
+            {"id": "deepseek/deepseek-v4.1-flash-1017",
+             "reasoning": {"mandatory": false, "default_enabled": true,
+                           "supported_efforts": ["max", "high", "low", "none"],
+                           "default_effort": "high"}},
+            {"id": "plain/model"}
+        ]}"#;
+        let models = parse_openrouter_models(body).unwrap();
+        let ds = models.iter().find(|m| m.id.starts_with("deepseek")).unwrap();
+        assert_eq!(ds.supported_efforts, ["max", "high", "low", "none"]);
+        assert_eq!(ds.default_effort.as_deref(), Some("high"));
+        let plain = models.iter().find(|m| m.id == "plain/model").unwrap();
+        assert!(plain.supported_efforts.is_empty());
+        assert_eq!(plain.default_effort, None);
+    }
+
+    #[test]
     fn parse_openrouter_models_extracts_id_name_pricing() {
         let body = r#"{
             "data": [
@@ -1506,6 +1678,8 @@ mod tests {
             base_url: None,
             title_model: None,
             context_window: 0,
+            sampling: Default::default(),
+            sampling_warnings: Vec::new(),
         }
     }
 
