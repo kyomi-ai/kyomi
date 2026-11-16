@@ -1115,7 +1115,8 @@ pub async fn get_executions(
         SELECT id, watch_id, watch_name, mode, workspace_id, session_id,
                started_at, completed_at, status, agent_response, error_message,
                input_tokens, output_tokens, cost_estimate, execution_trace,
-               alert_triggered, notification_id, read_at, deleted_at, deleted_by, created_by
+               alert_triggered, notification_id, read_at, deleted_at, deleted_by, created_by,
+               llm_provider, llm_model, llm_mode, batch_ids, batch_fallback_reason
         FROM watch_executions
         WHERE watch_id = $1
         ORDER BY started_at DESC
@@ -1160,7 +1161,8 @@ pub async fn get_execution_by_id(
         SELECT id, watch_id, watch_name, mode, workspace_id, session_id,
                started_at, completed_at, status, agent_response, error_message,
                input_tokens, output_tokens, cost_estimate, execution_trace,
-               alert_triggered, notification_id, read_at, deleted_at, deleted_by, created_by
+               alert_triggered, notification_id, read_at, deleted_at, deleted_by, created_by,
+               llm_provider, llm_model, llm_mode, batch_ids, batch_fallback_reason
         FROM watch_executions
         WHERE id = $1 AND watch_id = $2
     "#;
@@ -1206,7 +1208,8 @@ pub async fn get_execution_by_id_only(
         SELECT id, watch_id, watch_name, mode, workspace_id, session_id,
                started_at, completed_at, status, agent_response, error_message,
                input_tokens, output_tokens, cost_estimate, execution_trace,
-               alert_triggered, notification_id, read_at, deleted_at, deleted_by, created_by
+               alert_triggered, notification_id, read_at, deleted_at, deleted_by, created_by,
+               llm_provider, llm_model, llm_mode, batch_ids, batch_fallback_reason
         FROM watch_executions
         WHERE id = $1 AND workspace_id = $2 AND created_by = $3
     "#;
@@ -1246,7 +1249,8 @@ pub async fn create_execution(
         RETURNING id, watch_id, watch_name, mode, workspace_id, session_id,
                   started_at, completed_at, status, agent_response, error_message,
                   input_tokens, output_tokens, cost_estimate, execution_trace,
-                  alert_triggered, notification_id, read_at, deleted_at, deleted_by, created_by
+                  alert_triggered, notification_id, read_at, deleted_at, deleted_by, created_by,
+               llm_provider, llm_model, llm_mode, batch_ids, batch_fallback_reason
         "#,
         now = sql_compat::now(is_pg),
         false_val = sql_compat::bool_false(is_pg),
@@ -1314,7 +1318,8 @@ pub async fn complete_execution(
         RETURNING id, watch_id, watch_name, mode, workspace_id, session_id,
                   started_at, completed_at, status, agent_response, error_message,
                   input_tokens, output_tokens, cost_estimate, execution_trace,
-                  alert_triggered, notification_id, read_at, deleted_at, deleted_by, created_by
+                  alert_triggered, notification_id, read_at, deleted_at, deleted_by, created_by,
+               llm_provider, llm_model, llm_mode, batch_ids, batch_fallback_reason
         "#,
         now = sql_compat::now(is_pg),
     );
@@ -1709,6 +1714,7 @@ pub async fn get_alerts_history(
                we.started_at, we.completed_at, we.status, we.agent_response, we.error_message,
                we.input_tokens, we.output_tokens, we.cost_estimate, we.execution_trace,
                we.alert_triggered, we.notification_id, we.read_at, we.deleted_at, we.deleted_by,
+               we.llm_provider, we.llm_model, we.llm_mode, we.batch_ids, we.batch_fallback_reason,
                we.created_by
         FROM watch_executions we
         WHERE we.workspace_id = $1
