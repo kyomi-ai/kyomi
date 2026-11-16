@@ -59,6 +59,7 @@ Human-readable YAML format for defining data visualizations.
 - **[Website Analytics](/docs/analytics)** — Privacy-first analytics
 - **[Slack Integration](/docs/slack)** — Data intelligence in Slack
 - **[MCP Server](/docs/mcp)** — Connect AI coding agents to your data
+- **[Web access](/docs/web-access)** — Let the chat agent search and read the public web
 
 ## Advanced
 
