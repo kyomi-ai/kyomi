@@ -417,14 +417,17 @@ fn register_web_tools_for_run(
         (kyomi_core::web_tools::WebToolKind::Search, &search),
         (kyomi_core::web_tools::WebToolKind::Fetch, &fetch),
     ] {
-        if let Some(cfg) = resolved.enabled()
-            && cfg.kind == kyomi_core::web_tools::WebBackendKind::Anthropic
-        {
-            server_tools.push(crate::web::server_tools::ServerTool {
-                kind,
-                entry: crate::web::server_tools::anthropic_tool_entry(kind, cfg, &settings.caps),
-            });
-        }
+        let Some(cfg) = resolved.enabled() else { continue };
+        let entry = match cfg.kind {
+            kyomi_core::web_tools::WebBackendKind::Anthropic => {
+                crate::web::server_tools::anthropic_tool_entry(kind, cfg, &settings.caps)
+            }
+            kyomi_core::web_tools::WebBackendKind::OpenRouter => {
+                crate::web::server_tools::openrouter_tool_entry(kind, cfg, &settings.caps)
+            }
+            _ => continue,
+        };
+        server_tools.push(crate::web::server_tools::ServerTool { kind, backend: cfg.kind, entry });
     }
     let available = !server_tools.is_empty() || WEB_TOOL_NAMES.iter().any(|n| registry.get_tool(n).is_some());
     WebRunPlan { available, server_tools }
@@ -2476,5 +2479,20 @@ mod tests {
         let plan = register_web_tools_for_run(&mut registry, &app.web_tools, &AgentExecutionConfig::default(), ProviderKind::Anthropic, None);
         assert_eq!(plan.server_tools.len(), 1);
         assert!(registry.get_tool("web_fetch").is_some() && registry.get_tool("web_search").is_none());
+    }
+
+    #[test]
+    fn openrouter_backend_yields_chat_completions_server_tools_only_with_an_openrouter_url() {
+        let app = web_config(&[("WEB_SEARCH_PROVIDER", "openrouter"), ("WEB_FETCH_PROVIDER", "openrouter")]);
+        let mut registry = crate::tools::ToolRegistry::new();
+        let url = Some("https://openrouter.ai/api/v1");
+        let plan = register_web_tools_for_run(&mut registry, &app.web_tools, &AgentExecutionConfig::default(), ProviderKind::OpenAI, url);
+        let types: Vec<&str> = plan.server_tools.iter().map(|t| t.entry["type"].as_str().unwrap()).collect();
+        assert_eq!(types, ["openrouter:web_search", "openrouter:web_fetch"]);
+        assert!(plan.server_tools.iter().all(|t| t.backend == kyomi_core::web_tools::WebBackendKind::OpenRouter));
+        // A plain OpenAI-compatible endpoint cannot run them: absent, not a 400 at runtime.
+        let mut registry = crate::tools::ToolRegistry::new();
+        let plan = register_web_tools_for_run(&mut registry, &app.web_tools, &AgentExecutionConfig::default(), ProviderKind::OpenAI, Some("https://api.openai.com/v1"));
+        assert!(!plan.available);
     }
 }

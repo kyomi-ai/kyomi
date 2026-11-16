@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-//! Provider-executed web tools (`WEB_*_PROVIDER=anthropic`).
+//! Provider-executed web tools (`WEB_*_PROVIDER=anthropic` / `openrouter`).
 //!
 //! Kyomi executes nothing here. The Anthropic adapter adds a server tool to the
 //! request's `tools` array and Anthropic runs it; the response carries
@@ -35,6 +35,8 @@ use super::WebSource;
 #[derive(Debug, Clone, PartialEq)]
 pub struct ServerTool {
     pub kind: WebToolKind,
+    /// Which provider executes it; selects the response parser.
+    pub backend: kyomi_core::web_tools::WebBackendKind,
     pub entry: Value,
 }
 
@@ -69,6 +71,60 @@ pub fn anthropic_tool_entry(tool: WebToolKind, cfg: &WebBackendConfig, caps: &We
         map.insert("allowed_callers".into(), json!(["direct"]));
     }
     entry
+}
+
+/// Build the Chat Completions `tools` entry for OpenRouter's server tools
+/// (`openrouter:web_search` / `openrouter:web_fetch`).
+///
+/// Verified with a live call on 2026-11-16: both are accepted on
+/// `/api/v1/chat/completions` (not only on the Responses API). `parameters` is
+/// the opaque options object (`engine`, `allowed_domains`, `max_results`, ...);
+/// `max_uses` is the per-turn cap and options may lower it, never raise it.
+pub fn openrouter_tool_entry(tool: WebToolKind, cfg: &WebBackendConfig, caps: &WebCaps) -> Value {
+    let cap = match tool {
+        WebToolKind::Search => caps.per_turn_search,
+        WebToolKind::Fetch => caps.per_turn_fetch,
+    };
+    let mut parameters = cfg.options.clone();
+    let requested = parameters.get("max_uses").and_then(Value::as_u64).unwrap_or(u64::from(cap));
+    parameters.insert("max_uses".into(), json!(requested.min(u64::from(cap))));
+    json!({ "type": format!("openrouter:{}", tool.tool_name()), "parameters": parameters })
+}
+
+/// Parse the server-tool activity out of a raw OpenRouter Chat Completions
+/// response. Citations are `message.annotations[{type:"url_citation",
+/// url_citation:{url,title,content}}]` (search only: fetch returns none);
+/// usage is `usage.server_tool_use_details` (`web_search_requests`,
+/// `tool_calls_executed`). No block needs verbatim replay on this API.
+pub fn parse_openrouter(raw: &Value) -> ServerToolActivity {
+    let mut out = ServerToolActivity::default();
+    let details = raw.pointer("/usage/server_tool_use_details");
+    let n = |k: &str| details.and_then(|d| d.get(k)).and_then(Value::as_u64).unwrap_or(0) as u32;
+    out.searches = n("web_search_requests");
+    // Fetches are not reported separately: whatever executed beyond the searches.
+    out.fetches = n("tool_calls_executed").saturating_sub(out.searches);
+    let mut sources = Vec::new();
+    for ann in raw
+        .pointer("/choices/0/message/annotations")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|a| a.get("type").and_then(Value::as_str) == Some("url_citation"))
+    {
+        let Some(c) = ann.get("url_citation") else { continue };
+        if let Some(url) = c.get("url").and_then(Value::as_str) {
+            sources.push(WebSource {
+                title: c.get("title").and_then(Value::as_str).unwrap_or(url).to_string(),
+                url: url.to_string(),
+                // The `content` field is the whole page text; not a snippet.
+                snippet: String::new(),
+                score: None,
+                published: None,
+            });
+        }
+    }
+    out.sources = dedupe(sources);
+    out
 }
 
 /// What the provider did during one response.
@@ -304,6 +360,41 @@ mod tests {
         assert_eq!(a.fetches, 1);
         assert_eq!(a.sources[0].title, "C page");
         assert_eq!(a.errors, ["web_search: max_uses_exceeded"]);
+    }
+
+    fn fixture(name: &str) -> Value {
+        let path = format!("{}/src/web/fixtures/{name}", env!("CARGO_MANIFEST_DIR"));
+        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn openrouter_entries_use_the_chat_completions_server_tool_types() {
+        use kyomi_core::web_tools::WebBackendKind::OpenRouter;
+        let o = json!({"engine": "exa", "max_uses": 99, "allowed_domains": ["a.com"]});
+        let e = openrouter_tool_entry(WebToolKind::Search, &cfg(OpenRouter, o), &caps());
+        assert_eq!(e["type"], "openrouter:web_search");
+        assert_eq!(e["parameters"], json!({"engine": "exa", "max_uses": 5, "allowed_domains": ["a.com"]}));
+        let f = openrouter_tool_entry(WebToolKind::Fetch, &cfg(OpenRouter, json!({})), &caps());
+        assert_eq!(f, json!({"type": "openrouter:web_fetch", "parameters": {"max_uses": 5}}));
+    }
+
+    /// LIVE capture (deepseek/deepseek-chat via OpenRouter, 2026-11-16), trimmed and id-redacted.
+    #[test]
+    fn openrouter_live_search_response_maps_to_sources_and_usage() {
+        let a = parse_openrouter(&fixture("openrouter_search_chat_completion.json"));
+        assert_eq!(a.searches, 1);
+        assert_eq!(a.fetches, 0);
+        assert!(a.provider_content.is_none(), "nothing to replay on Chat Completions");
+        assert!(a.sources.iter().any(|s| s.url == "https://blog.rust-lang.org/releases/"));
+        assert!(a.sources.iter().all(|s| s.snippet.is_empty() && !s.title.is_empty()));
+    }
+
+    /// LIVE capture: a fetch returns no annotations; its usage is `tool_calls_executed`.
+    #[test]
+    fn openrouter_live_fetch_response_counts_a_fetch_and_has_no_sources() {
+        let a = parse_openrouter(&fixture("openrouter_fetch_chat_completion.json"));
+        assert_eq!((a.searches, a.fetches), (0, 1));
+        assert!(a.sources.is_empty());
     }
 
     #[test]

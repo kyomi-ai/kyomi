@@ -1238,7 +1238,10 @@ impl CustomAgent {
         if self.config.server_tools.is_empty() {
             return Default::default();
         }
-        let activity = crate::web::server_tools::parse_anthropic(&response.raw_response);
+        let activity = match self.config.server_tools.first().map(|t| t.backend) {
+            Some(kyomi_core::web_tools::WebBackendKind::OpenRouter) => crate::web::server_tools::parse_openrouter(&response.raw_response),
+            _ => crate::web::server_tools::parse_anthropic(&response.raw_response),
+        };
         let ctx = &self.tool_context;
         for (tool, calls) in [
             (kyomi_core::web_tools::WebToolKind::Search, activity.searches),
@@ -1247,13 +1250,13 @@ impl CustomAgent {
             if calls == 0 {
                 continue;
             }
-            info!(provider = "anthropic", tool = tool.tool_name(), billable_calls = calls, "provider web tool used");
+            info!(backend = ?self.config.server_tools.first().map(|t| t.backend), tool = tool.tool_name(), billable_calls = calls, "provider web tool used");
             if let Err(e) = crate::web::caps::add_usage(&ctx.kv, &ctx.workspace_id, tool, calls).await {
                 warn!(error = %e, "failed to record web tool usage");
             }
         }
         for error in &activity.errors {
-            warn!(provider = "anthropic", error = %error, "provider web tool reported an error");
+            warn!(error = %error, "provider web tool reported an error");
         }
         self.web_sources.extend(activity.sources.iter().cloned());
         activity
@@ -3474,6 +3477,7 @@ Second chart:\n{CHARTML_STRIPPED_NOTE}\nDone."
             max_iterations: 6,
             server_tools: vec![crate::web::server_tools::ServerTool {
                 kind: kyomi_core::web_tools::WebToolKind::Search,
+                backend: kyomi_core::web_tools::WebBackendKind::Anthropic,
                 entry: serde_json::json!({"type": "web_search_20250305", "name": "web_search", "max_uses": 5}),
             }],
             ..Default::default()
@@ -3570,5 +3574,31 @@ Second chart:\n{CHARTML_STRIPPED_NOTE}\nDone."
         let cap = ctx.config.web_tools.caps.workspace_monthly;
         crate::web::caps::add_usage(&ctx.kv, &ctx.workspace_id, kyomi_core::web_tools::WebToolKind::Search, cap).await.unwrap();
         assert!(agent.request_options_for_call().await.server_tools.is_empty());
+    }
+
+    #[tokio::test]
+    async fn openrouter_usage_and_sources_are_recorded_from_the_live_shaped_response() {
+        let raw: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(format!("{}/src/web/fixtures/openrouter_search_chat_completion.json", env!("CARGO_MANIFEST_DIR"))).unwrap(),
+        )
+        .unwrap();
+        let response = crate::types::LLMResponse {
+            raw_response: raw,
+            content: "answer".into(),
+            finish_reason: "stop".into(),
+            usage: Default::default(),
+            tool_calls: None,
+            cost: None,
+            thinking_content: None,
+        };
+        let mut config = server_tool_agent_config();
+        config.server_tools[0].backend = kyomi_core::web_tools::WebBackendKind::OpenRouter;
+        let (mut agent, _calls) = scripted_agent_with_config(config, vec![Reply::Response(response)], Reply::Text("x".into())).await;
+        let answer = agent.chat("hi", CancellationToken::new(), None, None, None).await.unwrap();
+        assert!(answer.contains("**Sources**") && answer.contains("blog.rust-lang.org"), "{answer}");
+        let ctx = &agent.tool_context;
+        let caps = kyomi_core::web_tools::WebCaps { workspace_monthly: 1, ..Default::default() };
+        let refusal = crate::web::caps::check_monthly(&ctx.kv, &caps, &ctx.workspace_id, kyomi_core::web_tools::WebToolKind::Search).await.unwrap();
+        assert!(refusal.is_err());
     }
 }
