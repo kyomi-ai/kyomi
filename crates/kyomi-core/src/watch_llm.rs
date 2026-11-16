@@ -188,6 +188,9 @@ pub struct ResolvedWatchLlm {
     /// `Some` when the watches have their own provider; `None` = use the main
     /// LLM connection.
     pub connection: Option<WatchConnection>,
+    /// Whether `connection` came from the workspace override (the workspace's
+    /// own key, billed to the workspace) rather than the instance env.
+    pub connection_from_workspace: bool,
     /// Model for watches. With no `connection` and `None`, the main model.
     pub model: Option<String>,
     pub mode: WatchLlmMode,
@@ -220,6 +223,7 @@ pub fn resolve_watch_llm(
     };
     ResolvedWatchLlm {
         connection,
+        connection_from_workspace: connection_layer.is_some_and(|l| std::ptr::eq(l, workspace)),
         model,
         mode: [workspace, env]
             .into_iter()
@@ -391,6 +395,7 @@ mod tests {
         let c = r.connection.expect("connection");
         assert_eq!(c.provider, "anthropic");
         assert_eq!(c.api_key, "ws-key");
+        assert!(r.connection_from_workspace);
         assert_eq!(c.base_url, None, "the env base URL must not leak onto the workspace provider");
         assert_eq!(r.model.as_deref(), Some("ws-model"));
     }

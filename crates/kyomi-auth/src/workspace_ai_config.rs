@@ -112,6 +112,11 @@ pub struct WorkspaceAiConfig {
     /// `key: reason` entry each). Surfaced on the AI settings page so an admin
     /// can repair them; never fatal.
     pub sampling_warnings: Vec<String>,
+    /// Workspace override of the watch LLM connection and mode (KYO-973),
+    /// with the API key decrypted. Applied only on self-hosted deployments.
+    pub watch_llm: kyomi_core::watch_llm::WatchLlmSettings,
+    /// Stored watch LLM values that failed validation and were ignored.
+    pub watch_llm_warnings: Vec<String>,
 }
 
 impl WorkspaceAiConfig {
@@ -192,6 +197,7 @@ struct WorkspaceAiRow {
     ai_provider: String,
     ai_api_key_encrypted: Option<String>,
     ai_base_url: Option<String>,
+    watch_ai_api_key_encrypted: Option<String>,
     settings: Option<serde_json::Value>,
 }
 
@@ -216,7 +222,8 @@ pub async fn load(
     let row = kyomi_core::db_fetch_optional!(
         db,
         WorkspaceAiRow,
-        "SELECT ai_provider, ai_api_key_encrypted, ai_base_url, settings \
+        "SELECT ai_provider, ai_api_key_encrypted, ai_base_url, \
+                watch_ai_api_key_encrypted, settings \
          FROM workspaces WHERE workspace_id = $1",
         workspace_id
     )?
@@ -255,6 +262,28 @@ pub async fn load(
         );
     }
 
+    let (mut watch_llm, mut watch_llm_warnings) =
+        kyomi_core::watch_llm::read_workspace_watch_llm(&row.settings);
+    if let Some(ct) = row.watch_ai_api_key_encrypted.as_deref() {
+        // A key that cannot be decrypted is dropped with a warning rather than
+        // failing every LLM call in the workspace: watches then report the
+        // incomplete connection, chat is unaffected.
+        match workspace_secrets::is_available()
+            .then(|| workspace_secrets::decrypt_secret(ct))
+        {
+            Some(Ok(key)) => watch_llm.api_key = Some(key),
+            Some(Err(e)) => watch_llm_warnings.push(format!("watch LLM API key: {e}")),
+            None => watch_llm_warnings
+                .push("watch LLM API key: workspace secrets encryption is unavailable".into()),
+        }
+    }
+    for warning in &watch_llm_warnings {
+        tracing::debug!(
+            workspace_id = %workspace_id,
+            "ignoring invalid stored watch LLM value: {warning}"
+        );
+    }
+
     Ok(WorkspaceAiConfig {
         provider,
         model,
@@ -264,6 +293,8 @@ pub async fn load(
         context_window,
         sampling,
         sampling_warnings,
+        watch_llm,
+        watch_llm_warnings,
     })
 }
 
@@ -300,7 +331,8 @@ pub async fn update(
     let row = kyomi_core::db_fetch_optional!(
         db,
         WorkspaceAiRow,
-        "SELECT ai_provider, ai_api_key_encrypted, ai_base_url, settings \
+        "SELECT ai_provider, ai_api_key_encrypted, ai_base_url, \
+                watch_ai_api_key_encrypted, settings \
          FROM workspaces WHERE workspace_id = $1",
         workspace_id
     )?
@@ -605,6 +637,8 @@ mod tests {
         context_window: 0,
         sampling: Default::default(),
         sampling_warnings: Vec::new(),
+        watch_llm: Default::default(),
+        watch_llm_warnings: Vec::new(),
         };
         assert!(!cfg.is_byok());
     }
@@ -625,6 +659,8 @@ mod tests {
             context_window: 0,
             sampling: Default::default(),
         sampling_warnings: Vec::new(),
+        watch_llm: Default::default(),
+        watch_llm_warnings: Vec::new(),
             };
             assert!(cfg.is_byok(), "expected BYOK for {p:?}");
         }

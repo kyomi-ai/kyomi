@@ -89,6 +89,8 @@ mod tests {
             context_window: 0,
             sampling,
             sampling_warnings: Vec::new(),
+            watch_llm: Default::default(),
+            watch_llm_warnings: Vec::new(),
         }
     }
 

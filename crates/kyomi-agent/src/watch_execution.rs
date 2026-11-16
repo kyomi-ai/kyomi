@@ -566,7 +566,7 @@ pub fn build_watch_system_prompt(
 /// context, recent alerts and queries the first attempt used. Falling back to
 /// the chat prompt (`system_prompt: None`) would drop the schema the retry is
 /// being asked to satisfy and point the agent at tools this subset excludes.
-fn build_watch_retry_config(
+pub(crate) fn build_watch_retry_config(
     session_id: &str,
     user_id: &str,
     workspace_id: &str,
@@ -574,12 +574,36 @@ fn build_watch_retry_config(
     creator_workspace_roles: Vec<kyomi_core::enums::WorkspaceRole>,
     correction_prompt: String,
 ) -> AgentExecutionConfig {
+    build_watch_agent_config(
+        session_id,
+        user_id,
+        workspace_id,
+        correction_prompt,
+        system_prompt,
+        creator_workspace_roles,
+        UserMessagePersistence::AdapterPersists(None),
+    )
+}
+
+/// The one place a watch turn's [`AgentExecutionConfig`] is built, shared by
+/// the main run and the JSON-correction retry so both carry the Watch LLM
+/// profile (KYO-973): provider, model, effort and temperature for a watch
+/// cannot differ between them.
+pub(crate) fn build_watch_agent_config(
+    session_id: &str,
+    user_id: &str,
+    workspace_id: &str,
+    message: String,
+    system_prompt: String,
+    creator_workspace_roles: Vec<kyomi_core::enums::WorkspaceRole>,
+    user_message_persistence: UserMessagePersistence,
+) -> AgentExecutionConfig {
     AgentExecutionConfig {
         session_id: session_id.to_string(),
         user_id: user_id.to_string(),
         workspace_id: workspace_id.to_string(),
-        message: correction_prompt,
-        model_name: None,
+        message,
+        model_name: None, // the Watch profile selects the model (see `watch_llm`)
         temperature: Some(0.7),
         llm_profile: kyomi_core::llm_sampling::LlmProfile::Watch,
         is_shared_conversation: false,
@@ -595,12 +619,14 @@ fn build_watch_retry_config(
         max_total_tokens: Some(MAX_WATCH_TOTAL_TOKENS),
         max_tokens: MAX_WATCH_OUTPUT_TOKENS,
         component: "kyomi_watch".into(),
-        user_message_persistence: UserMessagePersistence::AdapterPersists(None),
+        user_message_persistence,
         assistant_message_persistence: AssistantMessagePersistence::AdapterInserts(None),
         conversation_history: None,
         user_display_name: "Kyomi Watch".to_string(),
         context_window: 0,
         workspace_roles: creator_workspace_roles,
+        // Watch execution has no single open document — see
+        // `ToolContext::document_id`.
         document_id: None,
     }
 }
@@ -1189,48 +1215,24 @@ async fn execute_watch_inner(
     );
 
     // 9. Run agent via execute_agent_chat with limited tool set
-    let tools_subset: Vec<String> = WATCH_TOOLS.iter().map(|s| s.to_string()).collect();
-
-    let agent_config = AgentExecutionConfig {
-        session_id: session_id.clone(),
-        user_id: watch.created_by.clone(),
-        workspace_id: watch.workspace_id.clone(),
-        message: watch.prompt.clone(),
-        model_name: None, // use default model
-        temperature: Some(0.7),
-        llm_profile: kyomi_core::llm_sampling::LlmProfile::Watch,
-        is_shared_conversation: false,
-        context_type: "kyomi_watch".into(),
-        workspace_user_ids: None,
-        cancel_token: CancellationToken::new(),
-        current_time_user_tz: None,
-        message_source: Some("Kyomi Watch".into()),
-        system_prompt: Some(enhanced_system_prompt.clone()),
-        tools_subset: Some(tools_subset),
-        max_iterations: MAX_WATCH_ITERATIONS,
-        max_duration: Some(MAX_WATCH_DURATION),
-        max_total_tokens: Some(MAX_WATCH_TOTAL_TOKENS),
-        max_tokens: MAX_WATCH_OUTPUT_TOKENS,
-        component: "kyomi_watch".into(),
-        // CallerPersisted, not AdapterPersists(None): `prepare_watch_dispatch`
-        // above already made the pre-written row durable. The LLM still
-        // receives the watch prompt for this turn — `CustomAgent::chat()` pushes
-        // `message` into the in-flight message list regardless of the persistence
-        // variant — but `caller_persisted_id()` returns `Some(user_message_id)`
-        // for `CallerPersisted` (unlike `AdapterPersists`, which returns `None`
-        // regardless of its inner id), so `should_persist_new_message` recognises
-        // that in-flight message as the same row already on disk and skips
-        // writing it again.
-        user_message_persistence: watch_dispatch.user_message_persistence,
-        assistant_message_persistence: AssistantMessagePersistence::AdapterInserts(None),
-        conversation_history: None,
-        user_display_name: "Kyomi Watch".to_string(),
-        context_window: 0,
-        workspace_roles: creator_workspace_roles.clone(),
-        // Watch execution has no single open document — see
-        // `ToolContext::document_id`.
-        document_id: None,
-    };
+    // CallerPersisted, not AdapterPersists(None): `prepare_watch_dispatch`
+    // above already made the pre-written row durable. The LLM still
+    // receives the watch prompt for this turn — `CustomAgent::chat()` pushes
+    // `message` into the in-flight message list regardless of the persistence
+    // variant — but `caller_persisted_id()` returns `Some(user_message_id)`
+    // for `CallerPersisted` (unlike `AdapterPersists`, which returns `None`
+    // regardless of its inner id), so `should_persist_new_message` recognises
+    // that in-flight message as the same row already on disk and skips
+    // writing it again.
+    let agent_config = build_watch_agent_config(
+        &session_id,
+        &watch.created_by,
+        &watch.workspace_id,
+        watch.prompt.clone(),
+        enhanced_system_prompt.clone(),
+        creator_workspace_roles.clone(),
+        watch_dispatch.user_message_persistence,
+    );
 
     let lazy_embedding = kyomi_embed::LazyEmbedding::loaded(embedding.clone());
     let agent_result = execute_agent_chat(

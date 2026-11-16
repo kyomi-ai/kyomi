@@ -51,7 +51,7 @@ pub(crate) const API_USAGE_LOG_INSERT_SQL: &str = "INSERT INTO api_usage_log \
 use crate::agent::{AgentConfig, CustomAgent};
 use crate::prompt;
 use crate::provider::{
-    create_provider_from_workspace, resolve_provider_config, ProviderKind,
+    create_provider, create_provider_from_workspace, resolve_provider_config, ProviderKind,
 };
 use crate::thinking::AgentThinkingTracker;
 use crate::tools::{create_default_registry, ToolContext, ToolFilter};
@@ -408,8 +408,6 @@ pub async fn execute_agent_chat(
         if let Some(ref model) = config.model_name {
             ws_config.model = Some(model.clone());
         }
-        let is_byok = ws_config.is_byok() && app_config.self_hosted;
-        let client = create_provider_from_workspace(&ws_config, app_config)?;
         // Resolved once per execution so the value is stable for the whole
         // conversation turn (effort changes invalidate Anthropic's prompt
         // cache).
@@ -420,30 +418,48 @@ pub async fn execute_agent_chat(
             config.temperature,
             false,
         );
-        let provider_kind = match ws_config.provider {
-            kyomi_auth::workspace_ai_config::WorkspaceAiProvider::Kyomi
-            | kyomi_auth::workspace_ai_config::WorkspaceAiProvider::Anthropic => {
-                ProviderKind::Anthropic
-            }
-            kyomi_auth::workspace_ai_config::WorkspaceAiProvider::OpenAI => ProviderKind::OpenAI,
-            kyomi_auth::workspace_ai_config::WorkspaceAiProvider::Gemini => ProviderKind::Gemini,
-        };
-        // For Kyomi-mode workspaces, the effective provider kind reflects
-        // whatever the server env keys resolve to (which may be OpenAI or
-        // Gemini for self-hosted tenants). Re-read it from the resolved
-        // fallback in that case so usage logs attribute to the right vendor.
-        let provider_kind = if matches!(
-            ws_config.provider,
-            kyomi_auth::workspace_ai_config::WorkspaceAiProvider::Kyomi
-        ) || !app_config.self_hosted
+        if config.llm_profile == kyomi_core::llm_sampling::LlmProfile::Watch
+            && config.model_name.is_none()
         {
-            resolve_provider_config(app_config)
-                .map(|c| c.provider)
-                .unwrap_or(provider_kind)
+            // Watches may use their own provider / model / key (KYO-973).
+            // Every watch turn, including the JSON-correction retry, takes
+            // this path because both carry the Watch profile.
+            let selection = crate::watch_llm::resolve_watch_selection(&ws_config, app_config)?;
+            let kind = selection.provider_config.provider;
+            let client = create_provider(selection.provider_config)?;
+            (client, kind, selection.workspace_billed, sampling)
         } else {
-            provider_kind
-        };
-        (client, provider_kind, is_byok, sampling)
+            let is_byok = ws_config.is_byok() && app_config.self_hosted;
+            let client = create_provider_from_workspace(&ws_config, app_config)?;
+            let provider_kind = match ws_config.provider {
+                kyomi_auth::workspace_ai_config::WorkspaceAiProvider::Kyomi
+                | kyomi_auth::workspace_ai_config::WorkspaceAiProvider::Anthropic => {
+                    ProviderKind::Anthropic
+                }
+                kyomi_auth::workspace_ai_config::WorkspaceAiProvider::OpenAI => {
+                    ProviderKind::OpenAI
+                }
+                kyomi_auth::workspace_ai_config::WorkspaceAiProvider::Gemini => {
+                    ProviderKind::Gemini
+                }
+            };
+            // For Kyomi-mode workspaces, the effective provider kind reflects
+            // whatever the server env keys resolve to (which may be OpenAI or
+            // Gemini for self-hosted tenants). Re-read it from the resolved
+            // fallback in that case so usage logs attribute to the right vendor.
+            let provider_kind = if matches!(
+                ws_config.provider,
+                kyomi_auth::workspace_ai_config::WorkspaceAiProvider::Kyomi
+            ) || !app_config.self_hosted
+            {
+                resolve_provider_config(app_config)
+                    .map(|c| c.provider)
+                    .unwrap_or(provider_kind)
+            } else {
+                provider_kind
+            };
+            (client, provider_kind, is_byok, sampling)
+        }
     };
     // Read the authoritative model name from the provider (not from config defaults).
     let model_name = client.model().to_string();
