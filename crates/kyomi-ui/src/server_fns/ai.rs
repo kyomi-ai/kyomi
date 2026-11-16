@@ -222,7 +222,6 @@ pub async fn get_llm_tuning() -> Result<LlmTuningView, ServerFnError> {
 /// a concurrent change to another settings key.
 #[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn update_llm_tuning(values: LlmTuningValues) -> Result<(), ServerFnError> {
-    use super::IntoServerFnErrorCore as _;
     use kyomi_core::llm_sampling::{
         stored_effort, stored_temperature, WORKSPACE_EFFORT_KEYS, WORKSPACE_TEMPERATURE_KEYS,
     };
@@ -258,25 +257,17 @@ pub async fn update_llm_tuning(values: LlmTuningValues) -> Result<(), ServerFnEr
         edits.push((key, stored));
     }
 
-    let found = kyomi_auth::workspace_service::update_workspace_settings_with(
-        ac.db(),
-        &ac.ws_id,
-        |current| {
-            let mut settings = current.clone();
-            for (key, stored) in &edits {
-                settings = Some(match stored {
-                    Some(v) => super::workspace::merge_custom_settings(&settings, key, v.clone()),
-                    None => super::workspace::clear_custom_settings_key(&settings, key),
-                });
-            }
-            Ok(settings.unwrap_or_else(|| serde_json::json!({})))
-        },
-    )
-    .await
-    .into_sfn_core()?;
-    if !found {
-        return Err(ServerFnError::new("Workspace not found"));
-    }
+    super::workspace::edit_workspace_settings(&ac, |current| {
+        let mut settings = current.clone();
+        for (key, stored) in &edits {
+            settings = Some(match stored {
+                Some(v) => super::workspace::merge_custom_settings(&settings, key, v.clone()),
+                None => super::workspace::clear_custom_settings_key(&settings, key),
+            });
+        }
+        settings.unwrap_or_else(|| serde_json::json!({}))
+    })
+    .await?;
     Ok(())
 }
 

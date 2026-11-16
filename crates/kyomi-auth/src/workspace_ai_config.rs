@@ -247,7 +247,9 @@ pub async fn load(
     let (sampling, sampling_warnings) =
         kyomi_core::llm_sampling::read_workspace_sampling(&row.settings);
     for warning in &sampling_warnings {
-        tracing::warn!(
+        // Debug, not warn: `load` runs on every LLM call and the admin-facing
+        // report is the warning list on Settings -> AI.
+        tracing::debug!(
             workspace_id = %workspace_id,
             "ignoring invalid stored LLM tuning value: {warning}"
         );

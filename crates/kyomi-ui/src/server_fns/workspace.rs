@@ -126,6 +126,32 @@ fn custom_settings_get<'a>(
         .and_then(|cs| cs.get(key))
 }
 
+/// Atomically edit the workspace's settings JSON as the authenticated admin.
+///
+/// `edit` is re-run if another writer changes the settings between the read
+/// and the write, so it must be a pure function of the settings it is given.
+/// Using this (rather than read, edit, whole-blob replace) keeps one setting's
+/// save from overwriting another's — see
+/// `workspace_service::update_workspace_settings_with`.
+#[cfg(feature = "ssr")]
+pub(crate) async fn edit_workspace_settings(
+    ac: &AuthenticatedContext,
+    edit: impl Fn(&Option<serde_json::Value>) -> serde_json::Value,
+) -> Result<(), ServerFnError> {
+    let found = kyomi_auth::workspace_service::update_workspace_settings_with(
+        ac.db(),
+        &ac.ws_id,
+        |current| Ok(edit(current)),
+    )
+    .await
+    .into_sfn_core()?;
+    if found {
+        Ok(())
+    } else {
+        Err(ServerFnError::new("Workspace not found"))
+    }
+}
+
 /// Remove a single key from `settings.custom_settings`, leaving all other
 /// keys intact. Returns the modified settings JSON.
 ///
@@ -246,32 +272,14 @@ pub async fn update_workspace_model(
     let ac = AuthenticatedContext::extract().await?;
     ac.require(Permission::ManageWorkspaceSettings, "Workspace admin access required")?;
 
-    let workspace = kyomi_auth::workspace_service::get_workspace_full(ac.db(), &ac.ws_id)
-        .await
-        .into_sfn_core()?
-        .ok_or_else(|| ServerFnError::new("Workspace not found"))?;
-
-    let mut updated_settings = merge_custom_settings(
-        &workspace.settings,
-        "default_model",
-        serde_json::json!(model),
-    );
-
-    if let Some(cw) = context_window {
-        updated_settings = merge_custom_settings(
-            &Some(updated_settings),
-            "context_window",
-            serde_json::json!(cw),
-        );
-    }
-
-    kyomi_auth::workspace_service::update_workspace_settings(
-        ac.db(),
-        &ac.ws_id,
-        &updated_settings,
-    )
-    .await
-    .into_sfn_core()?;
+    edit_workspace_settings(&ac, |settings| {
+        let mut updated = merge_custom_settings(settings, "default_model", serde_json::json!(model));
+        if let Some(cw) = context_window {
+            updated = merge_custom_settings(&Some(updated), "context_window", serde_json::json!(cw));
+        }
+        updated
+    })
+    .await?;
 
     Ok(())
 }
@@ -287,28 +295,18 @@ pub async fn update_workspace_title_model(model: String) -> Result<(), ServerFnE
     let ac = AuthenticatedContext::extract().await?;
     ac.require(Permission::ManageWorkspaceSettings, "Workspace admin access required")?;
 
-    let workspace = kyomi_auth::workspace_service::get_workspace_full(ac.db(), &ac.ws_id)
-        .await
-        .into_sfn_core()?
-        .ok_or_else(|| ServerFnError::new("Workspace not found"))?;
-
     let trimmed = model.trim();
 
     // An empty value clears the override — remove the key from custom_settings
     // so the fallback (cheapest model) kicks in again.
-    let updated_settings = if trimmed.is_empty() {
-        clear_custom_settings_key(&workspace.settings, "title_model")
-    } else {
-        merge_custom_settings(&workspace.settings, "title_model", serde_json::json!(trimmed))
-    };
-
-    kyomi_auth::workspace_service::update_workspace_settings(
-        ac.db(),
-        &ac.ws_id,
-        &updated_settings,
-    )
-    .await
-    .into_sfn_core()?;
+    edit_workspace_settings(&ac, |settings| {
+        if trimmed.is_empty() {
+            clear_custom_settings_key(settings, "title_model")
+        } else {
+            merge_custom_settings(settings, "title_model", serde_json::json!(trimmed))
+        }
+    })
+    .await?;
 
     Ok(())
 }
@@ -319,30 +317,16 @@ pub async fn update_workspace_chartml_config(palette: String) -> Result<(), Serv
     let ac = AuthenticatedContext::extract().await?;
     ac.require(Permission::ManageWorkspaceSettings, "Workspace admin access required")?;
 
-    let workspace = kyomi_auth::workspace_service::get_workspace_full(ac.db(), &ac.ws_id)
-        .await
-        .into_sfn_core()?
-        .ok_or_else(|| ServerFnError::new("Workspace not found"))?;
-
     let config_value = serde_json::json!({
         "type": "config",
         "version": 1,
         "style": palette
     });
 
-    let updated_settings = merge_custom_settings(
-        &workspace.settings,
-        "chartml_config",
-        config_value,
-    );
-
-    kyomi_auth::workspace_service::update_workspace_settings(
-        ac.db(),
-        &ac.ws_id,
-        &updated_settings,
-    )
-    .await
-    .into_sfn_core()?;
+    edit_workspace_settings(&ac, |settings| {
+        merge_custom_settings(settings, "chartml_config", config_value.clone())
+    })
+    .await?;
 
     Ok(())
 }

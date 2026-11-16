@@ -312,7 +312,7 @@ pub fn read_workspace_sampling(
             None => Err(InvalidSetting("must be a string".into())),
         };
         parsed
-            .map_err(|e| warnings.push(format!("{key}: {e}")))
+            .map_err(|e| warnings.push(format!("{key}: {e} (stored: {v})")))
             .ok()
     };
     let reasoning_effort = effort("reasoning_effort");
@@ -328,7 +328,7 @@ pub fn read_workspace_sampling(
             ))),
         };
         parsed
-            .map_err(|e| warnings.push(format!("{key}: {e}")))
+            .map_err(|e| warnings.push(format!("{key}: {e} (stored: {v})")))
             .ok()
     };
     let temperature = temp("temperature");
