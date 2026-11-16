@@ -215,37 +215,88 @@ pub async fn run_usage(db: &DbPool, execution_id: i32) -> kyomi_core::Result<Cal
     })
 }
 
-/// Take the right to bill this run's usage. True at most once per run, and
-/// only for the instance that holds the run's lease, so a displaced driver can
-/// never bill a partial set of calls.
-pub async fn claim_usage_billing(
+/// Who a run's usage is billed to, and how.
+pub struct UsageBill<'a> {
+    /// The `INSERT INTO api_usage_log ...` statement (parameters `$1..$12`).
+    pub insert_sql: &'a str,
+    pub user_id: &'a str,
+    pub workspace_id: &'a str,
+    pub session_id: &'a str,
+    pub provider: &'a str,
+    pub model: &'a str,
+    pub component: &'a str,
+}
+
+/// Bill a batch-mode run's usage exactly once: claim the billing, sum the run's
+/// call usage and write the `api_usage_log` row **in one transaction**. A crash
+/// or abort at any point rolls the whole thing back (the run can still be
+/// billed later) and a committed bill can never be repeated, so usage is
+/// neither lost to a half-done claim nor billed twice. Only the instance that
+/// holds the run's live lease can bill, so a displaced driver never bills a
+/// partial run. `amounts` maps the summed usage to `(cost_estimate,
+/// provider_cost_usd)`. Returns whether this call billed.
+pub async fn bill_run_once(
     db: &DbPool,
     execution_id: i32,
     owner: &str,
     now: DateTime<Utc>,
+    bill: &UsageBill<'_>,
+    amounts: impl Fn(CallUsage) -> (f64, Option<f64>),
 ) -> kyomi_core::Result<bool> {
-    let res = kyomi_core::db_execute!(
-        db,
-        "UPDATE watch_executions SET usage_billed_at = $1 \
-         WHERE id = $2 AND usage_billed_at IS NULL AND lease_owner = $3 AND llm_mode = 'batch'",
-        now,
-        execution_id,
-        owner
-    )
-    .map_err(|e| db_err("claim usage billing", e))?;
-    Ok(res.rows_affected() == 1)
-}
-
-/// Give the billing claim back when the usage could not be written, so a later
-/// attempt can bill instead of the run being lost.
-pub async fn release_usage_billing(db: &DbPool, execution_id: i32) -> kyomi_core::Result<()> {
-    kyomi_core::db_execute!(
-        db,
-        "UPDATE watch_executions SET usage_billed_at = NULL WHERE id = $1",
-        execution_id
-    )
-    .map_err(|e| db_err("release usage billing", e))?;
-    Ok(())
+    kyomi_core::db_with_pool!(db, |p| {
+        let mut tx = p.begin().await.map_err(|e| db_err("begin billing", e))?;
+        let claimed = sqlx::query(
+            "UPDATE watch_executions SET usage_billed_at = $1 \
+             WHERE id = $2 AND usage_billed_at IS NULL AND lease_owner = $3 \
+               AND lease_expires_at > $1 AND llm_mode = 'batch'",
+        )
+        .bind(now)
+        .bind(execution_id)
+        .bind(owner)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| db_err("claim usage billing", e))?
+        .rows_affected()
+            == 1;
+        if !claimed {
+            return Ok(false);
+        }
+        let row: (i64, i64, f64) = sqlx::query_as(
+            "SELECT COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0), \
+                    COALESCE(SUM(cost_usd), 0.0) \
+             FROM watch_batch_calls WHERE execution_id = $1",
+        )
+        .bind(execution_id)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|e| db_err("sum run usage", e))?;
+        let usage = CallUsage {
+            input_tokens: i32::try_from(row.0).unwrap_or(i32::MAX),
+            output_tokens: i32::try_from(row.1).unwrap_or(i32::MAX),
+            cost_usd: (row.2 > 0.0).then_some(row.2),
+        };
+        if usage.input_tokens > 0 || usage.output_tokens > 0 {
+            let (billed_cost, provider_cost_usd) = amounts(usage);
+            sqlx::query(bill.insert_sql)
+                .bind(bill.user_id)
+                .bind(bill.workspace_id)
+                .bind(bill.session_id)
+                .bind(now)
+                .bind(bill.provider)
+                .bind(bill.model)
+                .bind(usage.input_tokens)
+                .bind(usage.output_tokens)
+                .bind(usage.input_tokens.saturating_add(usage.output_tokens))
+                .bind(billed_cost)
+                .bind(bill.component)
+                .bind(provider_cost_usd)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| db_err("write usage", e))?;
+        }
+        tx.commit().await.map_err(|e| db_err("commit billing", e))?;
+        Ok(true)
+    })
 }
 
 /// Keep the realtime response that replaced a failed or abandoned batch, so a
@@ -728,6 +779,14 @@ mod tests {
             .id
     }
 
+    /// A further batch run of the already-seeded watch `w1`.
+    async fn another_batch_run(db: &DbPool, owner: &str, lease_for: Duration) -> i32 {
+        let e = crate::watch_service::create_execution(db, "w1", "W", "ws1", kyomi_core::WatchMode::Alert, "u1").await.unwrap();
+        let now = Utc::now();
+        record_run_llm(db, e.id, &RunLlm { provider: "anthropic", model: "m", mode: "batch", deadline: Some(now + Duration::hours(3)), fallback_reason: None, lease: Some((owner, now + lease_for)) }).await.unwrap();
+        e.id
+    }
+
     async fn batch_run(db: &DbPool, owner: &str, lease_for: Duration) -> i32 {
         let id = execution(db).await;
         let now = Utc::now();
@@ -1020,11 +1079,32 @@ mod tests {
         assert_eq!((total.input_tokens, total.output_tokens, total.cost_usd), (35, 14, Some(0.001)));
         assert_eq!(run_usage(&db, 999_999).await.unwrap(), CallUsage::default());
 
-        // Only the lease owner can claim, and only once; a failed write can hand the claim back.
-        assert!(!claim_usage_billing(&db, id, "someone-else", Utc::now()).await.unwrap(), "a displaced driver must not bill");
-        assert!(claim_usage_billing(&db, id, "me", Utc::now()).await.unwrap());
-        assert!(!claim_usage_billing(&db, id, "me", Utc::now()).await.unwrap(), "a run is billed once, however many attempts it took");
-        release_usage_billing(&db, id).await.unwrap();
-        assert!(claim_usage_billing(&db, id, "me", Utc::now()).await.unwrap(), "a released claim can be taken again");
+        // Billing is one transaction: claim + sum + write. Only the live lease owner can bill, once.
+        const INSERT: &str = "INSERT INTO api_usage_log \
+             (user_id, workspace_id, session_id, timestamp, provider, model, input_tokens, output_tokens, total_tokens, \
+              cache_creation_input_tokens, cache_read_input_tokens, cost_estimate, component, provider_cost_usd) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 0, 0, $10, $11, $12)";
+        let bill = UsageBill { insert_sql: INSERT, user_id: "u1", workspace_id: "ws1", session_id: "s", provider: "anthropic", model: "m", component: "kyomi_watch" };
+        let amounts = |u: CallUsage| (u.cost_usd.unwrap_or(0.0) * 1.1, None);
+        let now = Utc::now();
+        assert!(!bill_run_once(&db, id, "someone-else", now, &bill, amounts).await.unwrap(), "a displaced driver must not bill");
+        let rows = |db: &DbPool| { let db = db.clone(); async move { sqlx::query_as::<_, (i64, i64)>("SELECT input_tokens, output_tokens FROM api_usage_log").fetch_all(sqlite_pool(&db)).await.unwrap() } };
+        assert!(rows(&db).await.is_empty(), "a refused claim writes nothing");
+        assert!(bill_run_once(&db, id, "me", now, &bill, amounts).await.unwrap());
+        assert_eq!(rows(&db).await, vec![(35, 14)]);
+        assert!(!bill_run_once(&db, id, "me", now, &bill, amounts).await.unwrap(), "a run is billed once, however many attempts it took");
+        assert_eq!(rows(&db).await.len(), 1);
+
+        // A lapsed lease cannot bill either.
+        let id2 = another_batch_run(&db, "me", Duration::seconds(-5)).await;
+        assert!(!bill_run_once(&db, id2, "me", Utc::now(), &bill, amounts).await.unwrap());
+
+        // A failed write rolls the claim back, so the run can still be billed.
+        let id3 = another_batch_run(&db, "me", Duration::seconds(120)).await;
+        let c = begin_call(&db, &KEY, id3, 0, "h", "anthropic", "m").await.unwrap();
+        finish_call(&db, &KEY, &c.call_id, BatchCallState::Succeeded, Some(&serde_json::json!({})), CallUsage { input_tokens: 3, output_tokens: 1, cost_usd: None }, None).await.unwrap();
+        let broken = UsageBill { insert_sql: "INSERT INTO no_such_table VALUES ($1)", ..bill };
+        assert!(bill_run_once(&db, id3, "me", Utc::now(), &broken, amounts).await.is_err());
+        assert!(bill_run_once(&db, id3, "me", Utc::now(), &bill, amounts).await.unwrap(), "the failed attempt left no claim behind");
     }
 }

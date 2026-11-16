@@ -377,49 +377,12 @@ pub(crate) fn billed_amounts(is_byok: bool, total_cost: f64) -> (f64, Option<f64
     }
 }
 
-/// Write one `api_usage_log` row for a whole batch-mode watch run (KYO-973).
-/// Called once per run, at completion, with the usage summed from its call
-/// rows, so a run that was resumed or retried is neither double-billed nor
-/// missing the calls of an attempt that died.
-pub(crate) async fn log_batch_run_usage(
-    db: &DbPool,
-    run: &BatchRunBilling<'_>,
-    usage: kyomi_auth::watch_batch_service::CallUsage,
-) -> kyomi_core::Result<()> {
-    if usage.input_tokens <= 0 && usage.output_tokens <= 0 {
-        return Ok(());
-    }
-    let (billed_cost, provider_cost_usd) = billed_amounts(run.is_byok, usage.cost_usd.unwrap_or(0.0));
-    if let Err(e) = kyomi_core::db_execute!(
-        db,
-        API_USAGE_LOG_INSERT_SQL,
-        run.user_id,
-        run.workspace_id,
-        run.session_id,
-        chrono::Utc::now(),
-        run.provider,
-        run.model,
-        usage.input_tokens,
-        usage.output_tokens,
-        usage.input_tokens.saturating_add(usage.output_tokens),
-        billed_cost,
-        run.component,
-        provider_cost_usd
-    ) {
-        return Err(kyomi_core::Error::Internal(format!("failed to log batch run usage: {e}")));
-    }
-    Ok(())
-}
+/// The `api_usage_log` insert, for the batch-run billing transaction.
+pub(crate) const BATCH_RUN_USAGE_INSERT_SQL: &str = API_USAGE_LOG_INSERT_SQL;
 
-/// Who a batch-mode run's usage is billed to.
-pub(crate) struct BatchRunBilling<'a> {
-    pub user_id: &'a str,
-    pub workspace_id: &'a str,
-    pub session_id: &'a str,
-    pub provider: &'a str,
-    pub model: &'a str,
-    pub component: &'a str,
-    pub is_byok: bool,
+/// `(cost_estimate, provider_cost_usd)` for a batch run's summed usage.
+pub(crate) fn batch_run_amounts(is_byok: bool) -> impl Fn(kyomi_auth::watch_batch_service::CallUsage) -> (f64, Option<f64>) {
+    move |usage| billed_amounts(is_byok, usage.cost_usd.unwrap_or(0.0))
 }
 
 /// Execute the agent chat loop for a single user message.

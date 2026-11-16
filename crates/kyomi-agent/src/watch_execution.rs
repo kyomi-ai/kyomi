@@ -1044,11 +1044,11 @@ struct BillingTarget {
 }
 
 /// Bill a batch-mode run once, with one `api_usage_log` row summing every call
-/// of the run across all attempts, restarts and retries. Only the instance
-/// that holds the run's lease can claim the billing, so a displaced driver
-/// never bills a partial run. The claim is handed back when the usage cannot be
-/// written, so the run is not lost to a transient error; a crash between the
-/// claim and the write can still lose one run's usage (never double-bill it).
+/// of the run across all attempts, restarts and retries. The claim, the sum and
+/// the write are one transaction (`watch_batch_service::bill_run_once`), so a
+/// crash or abort cannot lose or repeat a bill, and only the instance holding
+/// the run's live lease can bill, so a displaced driver never bills a partial
+/// run. A transient failure is logged and the run is simply not billed.
 async fn bill_batch_run(db: &DbPool, watch: &Watch, execution_id: i32, run: &RunSetup) {
     let Some((provider, model, is_byok, session_id)) = run
         .billing
@@ -1058,37 +1058,27 @@ async fn bill_batch_run(db: &DbPool, watch: &Watch, execution_id: i32, run: &Run
     else {
         return;
     };
-    match watch_batch_service::claim_usage_billing(db, execution_id, crate::batch_run::instance_id(), Utc::now()).await {
-        Ok(true) => {}
-        Ok(false) => return,
-        Err(e) => {
-            warn!(execution_id, error = %e, "Failed to claim billing for a batch run");
-            return;
-        }
-    }
-    let written = async {
-        let usage = watch_batch_service::run_usage(db, execution_id).await?;
-        crate::execution::log_batch_run_usage(
-            db,
-            &crate::execution::BatchRunBilling {
-                user_id: &watch.created_by,
-                workspace_id: &watch.workspace_id,
-                session_id: &session_id,
-                provider: &provider,
-                model: &model,
-                component: "kyomi_watch",
-                is_byok,
-            },
-            usage,
-        )
-        .await
-    }
-    .await;
-    if let Err(e) = written {
-        warn!(execution_id, error = %e, "Failed to bill a batch run; releasing the claim");
-        if let Err(e) = watch_batch_service::release_usage_billing(db, execution_id).await {
-            warn!(execution_id, error = %e, "Failed to release the billing claim");
-        }
+    let bill = watch_batch_service::UsageBill {
+        insert_sql: crate::execution::BATCH_RUN_USAGE_INSERT_SQL,
+        user_id: &watch.created_by,
+        workspace_id: &watch.workspace_id,
+        session_id: &session_id,
+        provider: &provider,
+        model: &model,
+        component: "kyomi_watch",
+    };
+    if let Err(e) = watch_batch_service::bill_run_once(
+        db,
+        execution_id,
+        crate::batch_run::instance_id(),
+        Utc::now(),
+        &bill,
+        crate::execution::batch_run_amounts(is_byok),
+    )
+    .await
+    {
+        // The transaction rolled back: nothing was claimed or written.
+        warn!(execution_id, error = %e, "Failed to bill a batch run");
     }
 }
 

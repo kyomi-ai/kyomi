@@ -203,10 +203,14 @@ impl BatchingProvider {
         // The answer and what it cost are kept in one write, so a crash cannot
         // keep one without the other and a second driver's answer to the same
         // position is neither kept nor billed.
-        if let Some(call) = call
-            && let Err(e) = store::attach_fallback_response(&self.ctx.db, &self.ctx.encryption_key, &call.call_id, &response.raw_response, usage_of(&response)).await
-        {
-            warn!(execution_id = self.ctx.execution_id, error = %e, "failed to keep the realtime fallback response");
+        if let Some(call) = call {
+            match store::attach_fallback_response(&self.ctx.db, &self.ctx.encryption_key, &call.call_id, &response.raw_response, usage_of(&response)).await {
+                Ok(true) => {}
+                // Another driver answered this position first; its answer and
+                // usage are the ones kept (this driver is being displaced).
+                Ok(false) => warn!(execution_id = self.ctx.execution_id, call_id = %call.call_id, "realtime answer not kept: the call was already answered"),
+                Err(e) => warn!(execution_id = self.ctx.execution_id, error = %e, "failed to keep the realtime fallback response"),
+            }
         }
         Ok(response)
     }
@@ -398,7 +402,9 @@ impl LLMProvider for BatchingProvider {
         match outcome {
             Some(BatchPoll::Succeeded(response)) => match batch.parse_response(&response) {
                 Ok(parsed) => {
-                    store::finish_call(&self.ctx.db, key, &call.call_id, BatchCallState::Succeeded, Some(&response), usage_of(&parsed), None).await?;
+                    if !store::finish_call(&self.ctx.db, key, &call.call_id, BatchCallState::Succeeded, Some(&response), usage_of(&parsed), None).await? {
+                        warn!(execution_id = self.ctx.execution_id, call_id = %call.call_id, "batch result not stored: the call was already decided");
+                    }
                     Ok(parsed)
                 }
                 Err(e) => {
