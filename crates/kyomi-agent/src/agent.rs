@@ -142,10 +142,21 @@ pub(crate) const WRAP_UP_FAILED_MESSAGE: &str =
 /// entry as the most urgent one.
 const BUDGET_NOTICE_TENTHS: [u32; 2] = [7, 9];
 
-/// Stop a turn after this many consecutive failed tool calls. Tool failures
-/// (including rejected arguments and unknown outcomes) are returned to the
-/// model so it can repair; this bound prevents an unbounded error loop.
+/// Stop a turn after this many consecutive failed tool calls whose outcome is
+/// NOT a definite pre-effect rejection (unknown or failed outcomes). Tool
+/// failures are returned to the model so it can repair; this bound prevents an
+/// unbounded error loop.
 const MAX_CONSECUTIVE_TOOL_FAILURES: usize = 5;
+
+/// Stop a turn after this many consecutive failed tool calls whose domain
+/// outcome is `Rejected`: the runtime has established the call had no effect
+/// and the model may repair and retry (for example a SQL analysis error).
+/// Fixing a hard query legitimately takes several such repairs, each with a
+/// different call, so this budget is larger than
+/// [`MAX_CONSECUTIVE_TOOL_FAILURES`]. A genuinely stuck model repeating the
+/// same call is still caught by [`MAX_SAME_FAILING_TOOL_CALLS`], and the turn's
+/// iteration and duration budgets still apply.
+const MAX_CONSECUTIVE_REJECTED_TOOL_FAILURES: usize = 10;
 
 /// Stop a turn when the same tool call (name + arguments) fails this many times,
 /// even when other successful calls reset the general failure count. A success
@@ -601,6 +612,7 @@ impl CustomAgent {
         // Bounded error-loop guard: tool failures are returned to the model,
         // but repeated failures must not run forever.
         let mut consecutive_tool_failures = 0usize;
+        let mut consecutive_rejected_failures = 0usize;
         let mut same_call_failures: HashMap<String, (usize, String)> = HashMap::new();
         let mut last_tool_error = String::new();
 
@@ -842,6 +854,7 @@ impl CustomAgent {
                     self.execute_tool(tool_call).await
                 };
                 let succeeded = outcome.succeeded();
+                let rejected = !succeeded && outcome.domain == agent_runtime::DomainOutcome::Rejected;
                 let result = outcome.text;
                 self.state.messages.push(Message::tool_result(
                     &tool_call.id,
@@ -853,12 +866,17 @@ impl CustomAgent {
                 }
                 if succeeded {
                     consecutive_tool_failures = 0;
+                    consecutive_rejected_failures = 0;
                     // A success clears this call's repeat count; other calls'
                     // counts survive so alternating failures cannot evade the
                     // same-call guard.
                     same_call_failures.remove(&tool_call_fingerprint(tool_call));
                 } else {
-                    consecutive_tool_failures += 1;
+                    if rejected {
+                        consecutive_rejected_failures += 1;
+                    } else {
+                        consecutive_tool_failures += 1;
+                    }
                     last_tool_error = result.clone();
                     let entry = same_call_failures
                         .entry(tool_call_fingerprint(tool_call))
@@ -893,6 +911,7 @@ impl CustomAgent {
                 .map(|(count, error)| (*count, error.as_str()))
                 .unwrap_or((0, ""));
             if consecutive_tool_failures >= MAX_CONSECUTIVE_TOOL_FAILURES
+                || consecutive_rejected_failures >= MAX_CONSECUTIVE_REJECTED_TOOL_FAILURES
                 || repeated_call_failures >= MAX_SAME_FAILING_TOOL_CALLS
             {
                 let guard_error = if repeated_call_failures >= MAX_SAME_FAILING_TOOL_CALLS {
@@ -901,7 +920,7 @@ impl CustomAgent {
                     last_tool_error.as_str()
                 };
                 let message = tool_failure_guard_message(
-                    consecutive_tool_failures,
+                    consecutive_tool_failures + consecutive_rejected_failures,
                     repeated_call_failures,
                     guard_error,
                 );

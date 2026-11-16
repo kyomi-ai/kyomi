@@ -3830,6 +3830,23 @@ mod tests {
         }
     }
 
+    /// Fails every call with a definite pre-effect rejection (`BadRequest`),
+    /// like a SQL analysis error the model can repair by changing its query.
+    struct RejectingTool {
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::tools::AgentTool for RejectingTool {
+        fn name(&self) -> &str { "rejecting_tool" }
+        fn description(&self) -> &str { "Repairable-rejection fixture" }
+        fn parameters_schema(&self) -> serde_json::Value { serde_json::json!({"type":"object","properties":{}}) }
+        async fn execute(&self, _: serde_json::Value, _: &crate::tools::ToolContext) -> kyomi_core::Result<String> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err(kyomi_core::Error::BadRequest("Unknown identifier".into()))
+        }
+    }
+
     struct SucceedingTool {
         calls: Arc<std::sync::atomic::AtomicUsize>,
     }
@@ -3945,7 +3962,9 @@ mod tests {
     #[tokio::test]
     async fn consecutive_failing_tool_calls_stop_with_human_message() {
         let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let tool = Arc::new(FailingTool { kind: FailureKind::BadRequest, calls: calls.clone() });
+        // ServerError is an unknown-outcome failure (not a definite rejection),
+        // so it keeps the strict five-failure budget.
+        let tool = Arc::new(FailingTool { kind: FailureKind::ServerError, calls: calls.clone() });
         let requested = (0..6).map(|n| ("failing_tool", serde_json::json!({"n": n}))).collect();
         let (result, outcomes, _, _) = run_tool_script(requested, |registry| { registry.register(tool); }, false).await;
         let answer = result.unwrap();
@@ -3954,6 +3973,95 @@ mod tests {
         assert!(answer.contains("5 consecutive tool calls failed"), "{answer}");
         assert!(answer.contains("I did not retry automatically"), "{answer}");
         assert!(!answer.contains("tool outcome is unknown after execution"), "{answer}");
+    }
+
+    /// KYO-970: a model repairing a hard query makes several *different*
+    /// repairable mistakes in a row. Four distinct rejections followed by one
+    /// unknown-outcome failure is real progress, not a loop, and must not end
+    /// the turn (the 2026-11-15 production sequence).
+    #[tokio::test]
+    async fn distinct_repairable_rejections_do_not_exhaust_the_strict_budget() {
+        let rejecting_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let failing_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let rejecting = Arc::new(RejectingTool { calls: rejecting_calls.clone() });
+        let failing = Arc::new(FailingTool { kind: FailureKind::ServerError, calls: failing_calls.clone() });
+        let mut requested: Vec<(&'static str, serde_json::Value)> =
+            (0..4).map(|n| ("rejecting_tool", serde_json::json!({"n": n}))).collect();
+        requested.push(("failing_tool", serde_json::json!({"n": 99})));
+        let (result, outcomes, _, _) = run_tool_script(
+            requested,
+            |registry| { registry.register(rejecting); registry.register(failing); },
+            false,
+        ).await;
+        let answer = result.unwrap();
+        assert_eq!(rejecting_calls.load(std::sync::atomic::Ordering::SeqCst), 4);
+        assert_eq!(failing_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(outcomes.len(), 5, "all five calls must run");
+        assert!(!answer.contains("consecutive tool calls failed"), "{answer}");
+        assert_eq!(answer, "Handled the tool error");
+    }
+
+    /// The two budgets are independent: four unknown-outcome failures (below
+    /// the strict five) plus nine rejections (below ten) must not stop the turn.
+    #[tokio::test]
+    async fn strict_and_repairable_budgets_are_counted_separately() {
+        let rejecting_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let failing_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let rejecting = Arc::new(RejectingTool { calls: rejecting_calls.clone() });
+        let failing = Arc::new(FailingTool { kind: FailureKind::ServerError, calls: failing_calls.clone() });
+        let mut requested: Vec<(&'static str, serde_json::Value)> = Vec::new();
+        for n in 0..4 { requested.push(("failing_tool", serde_json::json!({"n": n}))); }
+        for n in 0..9 { requested.push(("rejecting_tool", serde_json::json!({"n": n}))); }
+        let (result, outcomes, _, _) = run_tool_script(
+            requested,
+            |registry| { registry.register(rejecting); registry.register(failing); },
+            false,
+        ).await;
+        let answer = result.unwrap();
+        // The replay harness caps visible events at 100, so count executions on
+        // the tools themselves rather than through `outcomes`.
+        let _ = outcomes;
+        assert_eq!(failing_calls.load(std::sync::atomic::Ordering::SeqCst), 4);
+        assert_eq!(rejecting_calls.load(std::sync::atomic::Ordering::SeqCst), 9);
+        assert_eq!(answer, "Handled the tool error");
+    }
+
+    /// The larger rejection budget is still finite: ten consecutive distinct
+    /// repairable rejections end the turn with the human message.
+    #[tokio::test]
+    async fn ten_consecutive_repairable_rejections_stop_with_human_message() {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let rejecting = Arc::new(RejectingTool { calls: calls.clone() });
+        let requested = (0..12).map(|n| ("rejecting_tool", serde_json::json!({"n": n}))).collect();
+        let (result, outcomes, _, _) = run_tool_script(requested, |registry| { registry.register(rejecting); }, false).await;
+        let answer = result.unwrap();
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 10, "stop after ten repairable rejections");
+        assert_eq!(outcomes.len(), 10);
+        assert!(answer.contains("10 consecutive tool calls failed"), "{answer}");
+        assert!(answer.contains("I did not retry automatically"), "{answer}");
+    }
+
+    /// A success clears both consecutive counters.
+    #[tokio::test]
+    async fn a_success_resets_both_consecutive_failure_budgets() {
+        let rejecting_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let succeeding_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let rejecting = Arc::new(RejectingTool { calls: rejecting_calls.clone() });
+        let succeeding = Arc::new(SucceedingTool { calls: succeeding_calls.clone() });
+        let mut requested: Vec<(&'static str, serde_json::Value)> = Vec::new();
+        for n in 0..9 { requested.push(("rejecting_tool", serde_json::json!({"n": n}))); }
+        requested.push(("succeeding_tool", serde_json::json!({})));
+        for n in 100..109 { requested.push(("rejecting_tool", serde_json::json!({"n": n}))); }
+        let (result, outcomes, _, _) = run_tool_script(
+            requested,
+            |registry| { registry.register(rejecting); registry.register(succeeding); },
+            false,
+        ).await;
+        let answer = result.unwrap();
+        let _ = outcomes; // replay harness caps visible events at 100; count executions on the tools
+        assert_eq!(rejecting_calls.load(std::sync::atomic::Ordering::SeqCst), 18);
+        assert_eq!(succeeding_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(answer, "Handled the tool error");
     }
 
     #[tokio::test]
