@@ -187,21 +187,39 @@ pub struct WebToolsSettings {
     /// `WEB_FETCH_BLOCKED_DOMAINS`: the `builtin` fetcher never fetches these
     /// domains (or their subdomains). Checked before the allow list.
     pub fetch_blocked_domains: Vec<String>,
-    /// Cap variables that were set but are not non-negative integers; reported by
+    /// Cap variables that were set but are not non-negative integers, and domain-list
+    /// entries that are not bare domain names; reported by
     /// [`validate`](Self::validate) instead of silently falling back to a default.
     pub invalid_caps: Vec<String>,
 }
 
-/// Parse a comma-separated domain list: lower-cased, trimmed, with a leading `*.` or
-/// `.` removed. A listed domain matches itself and all its subdomains.
-fn domain_list(raw: Option<String>) -> Vec<String> {
-    raw.map(|r| {
-        r.split(',')
-            .map(|d| d.trim().trim_start_matches("*.").trim_start_matches('.').to_lowercase())
-            .filter(|d| !d.is_empty())
-            .collect()
-    })
-    .unwrap_or_default()
+/// Parse a comma-separated domain list into normalised bare domains (lower-case,
+/// IDN converted to punycode, trailing dot and a leading `*.` / `.` removed). A listed
+/// domain matches itself and all its subdomains. Entries that can never match a URL
+/// host (a scheme, path, port, space, other wildcard, or not a valid host name) are
+/// reported through `invalid` so a deny entry cannot silently fail open; a variable
+/// that is set but yields no valid entry is invalid too (an empty allow list would
+/// otherwise mean "allow everything").
+fn domain_list(var: &str, raw: Option<String>, invalid: &mut Vec<String>) -> Vec<String> {
+    let Some(raw) = raw else { return Vec::new() };
+    let mut out = Vec::new();
+    for entry in raw.split(',').map(str::trim).filter(|e| !e.is_empty()) {
+        let bare = entry.trim_start_matches("*.").trim_start_matches('.').trim_end_matches('.');
+        let bad = bare.is_empty() || bare.contains(['/', ':', '@', '*', '?', '#', ' ']);
+        let host = if bad {
+            None
+        } else {
+            url::Url::parse(&format!("http://{bare}/")).ok().and_then(|u| u.host_str().map(str::to_string))
+        };
+        match host {
+            Some(h) if h.contains('.') || !h.chars().all(|c| c.is_ascii_digit()) => out.push(h),
+            _ => invalid.push(format!("{var} entry {entry:?}")),
+        }
+    }
+    if out.is_empty() {
+        invalid.push(format!("{var} has no valid domain"));
+    }
+    out
 }
 
 impl Default for WebToolsSettings {
@@ -245,6 +263,8 @@ impl WebToolsSettings {
             }
         };
         let mut invalid_caps = Vec::new();
+        let fetch_allowed_domains = domain_list("WEB_FETCH_ALLOWED_DOMAINS", non_empty("WEB_FETCH_ALLOWED_DOMAINS"), &mut invalid_caps);
+        let fetch_blocked_domains = domain_list("WEB_FETCH_BLOCKED_DOMAINS", non_empty("WEB_FETCH_BLOCKED_DOMAINS"), &mut invalid_caps);
         let mut cap = |k: &str, default: u32| match non_empty(k) {
             None => default,
             Some(v) => v.parse().unwrap_or_else(|_| {
@@ -264,8 +284,8 @@ impl WebToolsSettings {
             fetch: backend(WebToolKind::Fetch),
             caps,
             invalid_caps,
-            fetch_allowed_domains: domain_list(non_empty("WEB_FETCH_ALLOWED_DOMAINS")),
-            fetch_blocked_domains: domain_list(non_empty("WEB_FETCH_BLOCKED_DOMAINS")),
+            fetch_allowed_domains,
+            fetch_blocked_domains,
             in_unattended_runs: non_empty("WEB_TOOLS_UNATTENDED")
                 .is_some_and(|v| matches!(v.to_lowercase().as_str(), "1" | "true" | "yes")),
         }
@@ -314,9 +334,10 @@ impl WebToolsSettings {
     /// registered and not offered to the model. An *explicit* choice that is
     /// incompatible with the LLM provider is an error, not a disable.
     ///
-    /// A Kyomi-executed backend without an API key is an error, and so is an
-    /// API key / base URL without a provider (partial config), mirroring
-    /// `LLM_PROVIDER` / `LLM_API_KEY`.
+    /// A Kyomi-executed backend without an API key is an error. An API key / base URL
+    /// without a provider (partial config) is not: it resolves to
+    /// [`ResolvedBackend::Incomplete`] (a warning, tool absent), mirroring how the
+    /// LLM provider treats a partial `LLM_PROVIDER` / `LLM_API_KEY`.
     pub fn resolve(&self, tool: WebToolKind, llm: LlmFacts<'_>) -> crate::Result<ResolvedBackend> {
         let s = self.settings(tool);
         let p = tool.env_prefix();
@@ -388,7 +409,8 @@ impl WebToolsSettings {
     pub fn validate(&self, llm: LlmFacts<'_>) -> crate::Result<(ResolvedBackend, ResolvedBackend)> {
         if !self.invalid_caps.is_empty() {
             return Err(crate::Error::Internal(format!(
-                "{} must be a non-negative integer",
+                "invalid web tool setting(s): {} (caps must be non-negative integers; domain lists \
+                 must be comma-separated bare domain names)",
                 self.invalid_caps.join(", ")
             )));
         }
@@ -508,6 +530,21 @@ mod tests {
         assert_eq!(fetch.blocked_domains, ["evil.example"]);
         let search = s.resolve(WebToolKind::Search, ANTHROPIC).unwrap();
         assert!(search.enabled().unwrap().allowed_domains.is_empty());
+    }
+
+    #[test]
+    fn domain_lists_are_normalised_and_unmatchable_entries_fail_validation() {
+        let ok = settings(&[("WEB_FETCH_PROVIDER", "builtin"), ("WEB_FETCH_BLOCKED_DOMAINS", "bücher.de, Evil.COM., *.sub.example.org")]);
+        assert_eq!(ok.fetch_blocked_domains, ["xn--bcher-kva.de", "evil.com", "sub.example.org"]);
+        assert!(ok.validate(ANTHROPIC).is_ok());
+        for bad in ["https://evil.com", "evil.com:8080", "evil.com/path", "ev il.com", "a*b.com", ",", " , "] {
+            let s = settings(&[("WEB_FETCH_PROVIDER", "builtin"), ("WEB_FETCH_BLOCKED_DOMAINS", bad)]);
+            let err = s.validate(ANTHROPIC).unwrap_err().to_string();
+            assert!(err.contains("WEB_FETCH_BLOCKED_DOMAINS"), "{bad:?}: {err}");
+        }
+        // An allow list that parsed to nothing would mean "allow everything": rejected.
+        let s = settings(&[("WEB_FETCH_ALLOWED_DOMAINS", ",")]);
+        assert!(s.validate(ANTHROPIC).unwrap_err().to_string().contains("WEB_FETCH_ALLOWED_DOMAINS"));
     }
 
     #[test]

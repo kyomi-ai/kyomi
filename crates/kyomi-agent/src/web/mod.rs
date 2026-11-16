@@ -234,9 +234,10 @@ impl WebCallRecord {
 }
 
 /// Startup validation against the instance LLM config (`LLM_PROVIDER` /
-/// `LLM_BASE_URL`): an incompatible or half-configured web backend fails the
-/// server start with a clear message instead of a 400 at runtime. Logs the
-/// outcome per tool at info level.
+/// `LLM_BASE_URL`): an incompatible backend, a keyed backend without a key, or an
+/// invalid setting fails the server start with a clear message instead of a 400 at
+/// runtime. A key/base URL without a provider is only a warning (tool unavailable).
+/// Logs the outcome per tool.
 pub fn validate_startup(config: &kyomi_core::Config) -> kyomi_core::Result<()> {
     let (provider, base_url) = match crate::provider::resolve_provider_config(config) {
         Ok(c) => (c.provider.to_string(), c.base_url),
@@ -246,6 +247,17 @@ pub fn validate_startup(config: &kyomi_core::Config) -> kyomi_core::Result<()> {
     };
     let facts = kyomi_core::web_tools::LlmFacts { provider: &provider, base_url: base_url.as_deref() };
     let (search, fetch) = config.web_tools.validate(facts)?;
+    if let Some(cfg) = fetch.enabled()
+        && cfg.kind != kyomi_core::web_tools::WebBackendKind::Builtin
+        && (!cfg.allowed_domains.is_empty() || !cfg.blocked_domains.is_empty())
+    {
+        // The lists are enforced only by Kyomi's own fetcher: a vendor or provider fetches
+        // from its own network. Say so instead of letting a block list silently do nothing.
+        tracing::warn!(
+            backend = %cfg.kind,
+            "WEB_FETCH_ALLOWED_DOMAINS / WEB_FETCH_BLOCKED_DOMAINS are not enforced for this fetch backend; they only apply to WEB_FETCH_PROVIDER=builtin (use the backend's own `*_OPTIONS` domain controls)"
+        );
+    }
     for (tool, outcome) in [("web_search", &search), ("web_fetch", &fetch)] {
         match outcome {
             kyomi_core::web_tools::ResolvedBackend::Enabled(c) => {

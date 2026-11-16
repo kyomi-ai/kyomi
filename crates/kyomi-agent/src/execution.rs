@@ -2519,4 +2519,12 @@ mod tests {
         let chat_subset = AgentExecutionConfig { tools_subset: subset, ..AgentExecutionConfig::default() };
         assert!(registered(&app, &chat_subset, ProviderKind::OpenAI).is_empty());
     }
+
+    #[test]
+    fn a_key_without_a_provider_leaves_the_tool_absent_for_the_run() {
+        let app = web_config(&[("WEB_SEARCH_API_KEY", "k")]);
+        let mut registry = crate::tools::ToolRegistry::new();
+        let plan = register_web_tools_for_run(&mut registry, &app.web_tools, &AgentExecutionConfig::default(), ProviderKind::Anthropic, None);
+        assert!(!plan.available && registry.get_tool("web_search").is_none());
+    }
 }

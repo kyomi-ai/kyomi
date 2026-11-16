@@ -21,7 +21,7 @@ Set the backend for search and for fetch separately.
 | Value | Runs | Notes |
 |---|---|---|
 | `tavily`, `linkup` | Kyomi calls the vendor's API | Needs `WEB_SEARCH_API_KEY` / `WEB_FETCH_API_KEY`. Works with any LLM provider. |
-| `builtin` (fetch only) | Kyomi fetches the page itself | Public internet addresses only; private, loopback and cloud-metadata addresses, redirects to them and non-HTTP(S) URLs are refused. `WEB_FETCH_ALLOWED_DOMAINS` / `WEB_FETCH_BLOCKED_DOMAINS` restrict which domains it may fetch. |
+| `builtin` (fetch only) | Kyomi fetches the page itself | Public internet addresses only; private, loopback and cloud-metadata addresses, redirects to them and non-HTTP(S) URLs are refused. `WEB_FETCH_ALLOWED_DOMAINS` / `WEB_FETCH_BLOCKED_DOMAINS` restrict which domains it may fetch (bare domain names; an invalid entry stops the server at startup; they apply only to `builtin`, and the server warns at startup if they are set with another fetch backend). |
 | `anthropic` | Anthropic runs the tool | Requires `LLM_PROVIDER=anthropic`. |
 | `openrouter` | OpenRouter runs the tool | Requires an `openrouter.ai` `LLM_BASE_URL`. |
 | `none` | | Disabled. |
