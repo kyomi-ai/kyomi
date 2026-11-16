@@ -506,7 +506,12 @@ fn handle_tools_list(registry: &ToolRegistry) -> Value {
         include_only: None,
     };
 
-    let tools = registry.get_tools(&filter);
+    // Internal-only tools (web search/fetch, KYO-969) are never served over MCP.
+    let tools: Vec<_> = registry
+        .get_tools(&filter)
+        .into_iter()
+        .filter(|tool| !tool.is_internal_only())
+        .collect();
     let mcp_tools: Vec<Value> = tools
         .iter()
         .map(|tool| {
@@ -538,6 +543,15 @@ fn handle_tools_list(registry: &ToolRegistry) -> Value {
     json!({ "tools": mcp_tools })
 }
 
+/// Look up a tool callable over MCP. An internal-only tool (web search/fetch,
+/// KYO-969) is indistinguishable from a nonexistent one.
+fn lookup_mcp_tool<'a>(
+    registry: &'a ToolRegistry,
+    name: &str,
+) -> Option<&'a std::sync::Arc<dyn kyomi_agent::AgentTool>> {
+    registry.get_tool(name).filter(|t| !t.is_internal_only())
+}
+
 /// Handle `tools/call` — execute a tool and return the result.
 async fn handle_tools_call(
     msg_id: Option<Value>,
@@ -559,7 +573,7 @@ async fn handle_tools_call(
         return JsonRpcResponse::error(msg_id, -32602, "Missing tool name");
     }
 
-    let tool = match registry.get_tool(tool_name) {
+    let tool = match lookup_mcp_tool(registry, tool_name) {
         Some(t) => t,
         None => {
             return JsonRpcResponse::error(
@@ -1158,6 +1172,55 @@ mod tests {
             32,
             "MCP should have 32 tools (36 total - 4 copilot-only)"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Internal-only tools (KYO-969)
+    // -----------------------------------------------------------------------
+
+    /// A registry with the web tools registered, as chat has it when a
+    /// Kyomi-executed backend is configured.
+    fn registry_with_web_tools() -> ToolRegistry {
+        use kyomi_core::web_tools::{ResolvedBackend, WebBackendConfig, WebBackendKind, WebCaps};
+        let enabled = |kind| {
+            ResolvedBackend::Enabled(WebBackendConfig {
+                kind,
+                api_key: Some("test-key".into()),
+                base_url: None,
+                options: Default::default(),
+            })
+        };
+        let mut registry = create_default_registry();
+        kyomi_agent::tools::web::register_web_tools(
+            &mut registry,
+            &enabled(WebBackendKind::Tavily),
+            &enabled(WebBackendKind::Builtin),
+            &WebCaps::default(),
+        )
+        .unwrap();
+        assert!(registry.get_tool("web_search").is_some() && registry.get_tool("web_fetch").is_some());
+        registry
+    }
+
+    #[test]
+    fn mcp_tools_list_excludes_web_search_and_fetch() {
+        let result = handle_tools_list(&registry_with_web_tools());
+        let names: Vec<&str> = result["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["name"].as_str().unwrap())
+            .collect();
+        assert!(!names.contains(&"web_search") && !names.contains(&"web_fetch"), "{names:?}");
+        assert!(names.contains(&"query_datasource"), "other tools are unaffected");
+    }
+
+    #[test]
+    fn mcp_tools_call_cannot_reach_web_search_and_fetch() {
+        let registry = registry_with_web_tools();
+        assert!(lookup_mcp_tool(&registry, "web_search").is_none());
+        assert!(lookup_mcp_tool(&registry, "web_fetch").is_none());
+        assert!(lookup_mcp_tool(&registry, "query_datasource").is_some());
     }
 
     // -----------------------------------------------------------------------

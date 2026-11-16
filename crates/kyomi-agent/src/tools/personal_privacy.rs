@@ -47,6 +47,9 @@ impl AgentTool for NativePrivacyTool {
     fn is_mcp_only(&self) -> bool {
         self.0.is_mcp_only()
     }
+    fn is_internal_only(&self) -> bool {
+        self.0.is_internal_only()
+    }
     fn annotations(&self) -> Option<crate::types::ToolAnnotations> {
         self.0.annotations()
     }

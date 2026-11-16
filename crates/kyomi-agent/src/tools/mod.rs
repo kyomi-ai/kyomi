@@ -28,6 +28,7 @@ pub mod knowledge;
 pub mod query_utils;
 pub mod resources;
 pub mod validate_chartml;
+pub mod web;
 pub mod watch;
 pub mod workspace;
 
@@ -195,6 +196,13 @@ pub trait AgentTool: Send + Sync {
 
     /// Whether this tool is only exposed via MCP.
     fn is_mcp_only(&self) -> bool {
+        false
+    }
+
+    /// Whether this tool is internal to Kyomi's own agent and must never be
+    /// listed or callable through the MCP server (KYO-969: web search/fetch
+    /// spend Kyomi's paid quota and send queries to third parties).
+    fn is_internal_only(&self) -> bool {
         false
     }
 
