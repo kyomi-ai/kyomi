@@ -45,6 +45,7 @@ pub mod pdf_export;
 pub mod pdf_typst;
 pub mod prompt;
 pub mod provider;
+pub mod sampling;
 pub mod scheduler;
 // Slack message processor moved to enterprise/kyomi-slack crate (Phase 12).
 #[cfg(test)]
@@ -69,7 +70,7 @@ pub use tools::{
 };
 pub use provider::{
     create_provider, create_provider_from_workspace, resolve_provider_config, LLMProvider,
-    LLMProviderConfig, ProviderKind,
+    LLMProviderConfig, ProviderKind, RequestOptions,
 };
 pub use types::*;
 pub use catalog_scheduler::CatalogRefreshScheduler;

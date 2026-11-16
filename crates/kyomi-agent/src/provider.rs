@@ -30,6 +30,83 @@ use crate::types::{LLMResponse, Message, Tool};
 // Trait
 // ---------------------------------------------------------------------------
 
+/// Per-request generation options shared by every provider.
+///
+/// `temperature` and `reasoning_effort` are sent only when `Some`; `None`
+/// omits the field from the request body entirely (KYO-972). `reasoning_effort`
+/// is an opaque string passed to the provider unchanged — each adapter decides
+/// the wire field and whether a numeric value is sent as a number.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RequestOptions {
+    /// Sampling temperature; `None` omits the field.
+    pub temperature: Option<f32>,
+    /// Reasoning effort / thinking level; `None` omits the field.
+    pub reasoning_effort: Option<String>,
+    /// Maximum tokens to generate (reasoning tokens count against it).
+    pub max_tokens: u32,
+}
+
+impl RequestOptions {
+    /// Options with no temperature and no reasoning effort.
+    pub fn new(max_tokens: u32) -> Self {
+        Self { temperature: None, reasoning_effort: None, max_tokens }
+    }
+
+    /// Builder: set the temperature.
+    pub fn with_temperature(mut self, temperature: Option<f32>) -> Self {
+        self.temperature = temperature;
+        self
+    }
+
+    /// Builder: set the reasoning effort.
+    pub fn with_reasoning_effort(mut self, effort: Option<String>) -> Self {
+        self.reasoning_effort = effort;
+        self
+    }
+}
+
+/// Whether a response stopped on the token limit with nothing usable in it:
+/// no text and no tool calls. With reasoning enabled the hidden reasoning
+/// tokens count against `max_tokens`, so a small budget can be consumed
+/// entirely before any answer is produced.
+pub fn reasoning_exhausted_budget(response: &LLMResponse) -> bool {
+    matches!(response.finish_reason.as_str(), "length" | "max_tokens")
+        && response.content.trim().is_empty()
+        && response.tool_calls.as_ref().is_none_or(|c| c.is_empty())
+}
+
+/// Log per-call reasoning usage so effort can be tuned from real data, and
+/// warn when reasoning consumed the whole `max_tokens` budget (KYO-972).
+pub fn log_reasoning_usage(
+    provider: &str,
+    model: &str,
+    options: &RequestOptions,
+    response: &LLMResponse,
+) {
+    tracing::info!(
+        provider,
+        model,
+        reasoning_effort = ?options.reasoning_effort,
+        temperature = ?options.temperature,
+        output_tokens = response.usage.output_tokens,
+        reasoning_tokens = response.usage.reasoning_tokens,
+        max_tokens = options.max_tokens,
+        "LLM call reasoning usage"
+    );
+    if reasoning_exhausted_budget(response) {
+        tracing::warn!(
+            provider,
+            model,
+            reasoning_effort = ?options.reasoning_effort,
+            reasoning_tokens = response.usage.reasoning_tokens,
+            max_tokens = options.max_tokens,
+            finish_reason = %response.finish_reason,
+            "LLM response is empty and hit max_tokens: reasoning likely consumed the whole token budget; \
+             raise max_tokens or lower the reasoning effort"
+        );
+    }
+}
+
 /// Trait that all LLM providers must implement.
 ///
 /// The signature mirrors `AnthropicClient::complete` — provider implementations
@@ -42,8 +119,7 @@ pub trait LLMProvider: Send + Sync {
         &self,
         messages: &[Message],
         tools: &[Tool],
-        temperature: Option<f32>,
-        max_tokens: u32,
+        options: &RequestOptions,
         user_names: &HashMap<String, String>,
     ) -> kyomi_core::Result<LLMResponse>;
 
@@ -191,11 +267,10 @@ impl LLMProvider for AnthropicClient {
         &self,
         messages: &[Message],
         tools: &[Tool],
-        temperature: Option<f32>,
-        max_tokens: u32,
+        options: &RequestOptions,
         user_names: &HashMap<String, String>,
     ) -> kyomi_core::Result<LLMResponse> {
-        AnthropicClient::complete(self, messages, tools, temperature, max_tokens, user_names).await
+        AnthropicClient::complete(self, messages, tools, options, user_names).await
     }
 
     fn model(&self) -> &str {
@@ -214,11 +289,10 @@ impl LLMProvider for OpenAIProvider {
         &self,
         messages: &[Message],
         tools: &[Tool],
-        temperature: Option<f32>,
-        max_tokens: u32,
+        options: &RequestOptions,
         user_names: &HashMap<String, String>,
     ) -> kyomi_core::Result<LLMResponse> {
-        OpenAIProvider::complete(self, messages, tools, temperature, max_tokens, user_names).await
+        OpenAIProvider::complete(self, messages, tools, options, user_names).await
     }
 
     fn model(&self) -> &str {
@@ -236,11 +310,10 @@ impl LLMProvider for GeminiProvider {
         &self,
         messages: &[Message],
         tools: &[Tool],
-        temperature: Option<f32>,
-        max_tokens: u32,
+        options: &RequestOptions,
         user_names: &HashMap<String, String>,
     ) -> kyomi_core::Result<LLMResponse> {
-        GeminiProvider::complete(self, messages, tools, temperature, max_tokens, user_names).await
+        GeminiProvider::complete(self, messages, tools, options, user_names).await
     }
 
     fn model(&self) -> &str {
@@ -646,6 +719,7 @@ mod tests {
             base_url: None,
             title_model: None,
             context_window: 0,
+            sampling: Default::default(),
         };
 
         let provider = create_provider_from_workspace(&ws, &fallback)
@@ -669,6 +743,7 @@ mod tests {
             base_url: None,
             title_model: None,
             context_window: 0,
+            sampling: Default::default(),
         };
 
         let provider = create_provider_from_workspace(&ws, &fallback).unwrap();
@@ -695,6 +770,7 @@ mod tests {
             base_url: None,
             title_model: None,
             context_window: 0,
+            sampling: Default::default(),
         };
 
         let provider = create_provider_from_workspace(&ws, &fallback)
@@ -716,6 +792,7 @@ mod tests {
             base_url: None,
             title_model: None,
             context_window: 0,
+            sampling: Default::default(),
         };
 
         let provider = create_provider_from_workspace(&ws, &fallback).unwrap();
@@ -736,6 +813,7 @@ mod tests {
             base_url: None,
             title_model: None,
             context_window: 0,
+            sampling: Default::default(),
         };
 
         let err = match create_provider_from_workspace(&ws, &fallback) {
@@ -766,6 +844,7 @@ mod tests {
             base_url: None,
             title_model: None,
             context_window: 0,
+            sampling: Default::default(),
         };
 
         // SaaS mode should ignore BYOK and use server config
@@ -850,5 +929,36 @@ mod tests {
         let names = HashMap::new();
         let result = format_user_message(&msg, &names);
         assert_eq!(result, "[User (abc)]: hello");
+    }
+}
+
+#[cfg(test)]
+mod reasoning_usage_tests {
+    use super::*;
+    use crate::types::AgentTokenUsage;
+
+    fn response(content: &str, finish: &str, tool_calls: Option<Vec<crate::types::ToolCall>>) -> LLMResponse {
+        LLMResponse {
+            raw_response: serde_json::Value::Null,
+            content: content.into(),
+            finish_reason: finish.into(),
+            usage: AgentTokenUsage::default(),
+            tool_calls,
+            cost: None,
+            thinking_content: None,
+        }
+    }
+
+    #[test]
+    fn empty_length_stop_means_reasoning_ate_the_budget() {
+        assert!(reasoning_exhausted_budget(&response("", "length", None)));
+        assert!(reasoning_exhausted_budget(&response("  ", "max_tokens", None)));
+    }
+
+    #[test]
+    fn normal_or_partial_answers_are_not_flagged() {
+        assert!(!reasoning_exhausted_budget(&response("", "stop", None)));
+        assert!(!reasoning_exhausted_budget(&response("partial", "length", None)));
+        assert!(!reasoning_exhausted_budget(&response("", "end_turn", None)));
     }
 }

@@ -1726,8 +1726,7 @@ mod tests {
             &self,
             _messages: &[Message],
             _tools: &[crate::types::Tool],
-            _temperature: Option<f32>,
-            _max_tokens: u32,
+            _options: &crate::provider::RequestOptions,
             _user_names: &std::collections::HashMap<String, String>,
         ) -> kyomi_core::Result<crate::types::LLMResponse> {
             unimplemented!("load_context() never calls the LLM provider")
@@ -1765,8 +1764,7 @@ mod tests {
             &self,
             _messages: &[Message],
             _tools: &[crate::types::Tool],
-            _temperature: Option<f32>,
-            _max_tokens: u32,
+            _options: &crate::provider::RequestOptions,
             _user_names: &std::collections::HashMap<String, String>,
         ) -> kyomi_core::Result<crate::types::LLMResponse> {
             Ok(crate::types::LLMResponse {
@@ -1801,8 +1799,7 @@ mod tests {
             &self,
             _messages: &[Message],
             _tools: &[crate::types::Tool],
-            _temperature: Option<f32>,
-            _max_tokens: u32,
+            _options: &crate::provider::RequestOptions,
             _user_names: &std::collections::HashMap<String, String>,
         ) -> kyomi_core::Result<crate::types::LLMResponse> {
             Err(kyomi_core::Error::Internal(self.message.to_string()))
@@ -3402,9 +3399,9 @@ mod tests {
     }
     #[async_trait::async_trait]
     impl crate::provider::LLMProvider for AwaitedProvider {
-        async fn complete(&self, messages: &[Message], tools: &[crate::types::Tool], temperature: Option<f32>, max_tokens: u32,
+        async fn complete(&self, messages: &[Message], tools: &[crate::types::Tool], options: &crate::provider::RequestOptions,
             names: &std::collections::HashMap<String,String>) -> kyomi_core::Result<crate::types::LLMResponse> {
-            let mut response = self.inner.complete(messages, tools, temperature, max_tokens, names).await?;
+            let mut response = self.inner.complete(messages, tools, options, names).await?;
             let index = self.index.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             if self.query_rejected && index > 0 {
                 assert!(messages.iter().any(|message| message.role == crate::types::MessageRole::Tool
@@ -3710,9 +3707,9 @@ mod tests {
     }
     #[async_trait::async_trait]
     impl crate::provider::LLMProvider for ActualToolsProvider {
-        async fn complete(&self, messages: &[Message], tools: &[crate::types::Tool], temperature: Option<f32>, max_tokens: u32,
+        async fn complete(&self, messages: &[Message], tools: &[crate::types::Tool], options: &crate::provider::RequestOptions,
             names: &std::collections::HashMap<String,String>) -> kyomi_core::Result<crate::types::LLMResponse> {
-            let mut response = self.inner.complete(messages, tools, temperature, max_tokens, names).await?;
+            let mut response = self.inner.complete(messages, tools, options, names).await?;
             let index = self.index.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             if let Some((name, arguments)) = self.requested.get(index) {
                 let arguments_error = (self.truncated && index == 0)

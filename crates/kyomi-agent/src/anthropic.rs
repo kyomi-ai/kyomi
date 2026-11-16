@@ -15,6 +15,7 @@ use std::collections::HashMap;
 use serde_json::json;
 use tracing::{debug, info, warn};
 
+use crate::provider::RequestOptions;
 use crate::types::{AgentTokenUsage, LLMResponse, Message, MessageRole, Tool, ToolCall};
 
 // ---------------------------------------------------------------------------
@@ -219,13 +220,12 @@ impl AnthropicClient {
         system_prompt: Option<serde_json::Value>,
         anthropic_messages: Vec<serde_json::Value>,
         tools: &[Tool],
-        temperature: Option<f32>,
-        max_tokens: u32,
+        options: &RequestOptions,
     ) -> serde_json::Value {
         let mut body = json!({
             "model": model,
             "messages": anthropic_messages,
-            "max_tokens": max_tokens,
+            "max_tokens": options.max_tokens,
         });
 
         if let Some(system) = system_prompt {
@@ -236,8 +236,17 @@ impl AnthropicClient {
             body["tools"] = json!(Self::convert_tools_to_anthropic(tools));
         }
 
-        if let Some(temp) = temperature {
+        if let Some(temp) = options.temperature {
             body["temperature"] = json!(temp);
+        }
+
+        // Effort is passed through unchanged. Do NOT send
+        // `thinking: {type: "enabled", budget_tokens}` — current models
+        // reject it (adaptive thinking only); effort is the control.
+        // Anthropic effort values are names, so a numeric value is still a
+        // string here and the API's own error is surfaced if it is refused.
+        if let Some(effort) = &options.reasoning_effort {
+            body["output_config"] = json!({"effort": effort});
         }
 
         // Request-level prompt caching — Anthropic automatically places the
@@ -257,8 +266,7 @@ impl AnthropicClient {
     /// # Arguments
     /// * `messages` - Conversation history.
     /// * `tools` - Available tools (may be empty).
-    /// * `temperature` - Sampling temperature (0.0-1.0); `None` uses model default.
-    /// * `max_tokens` - Maximum tokens to generate.
+    /// * `options` - Temperature, reasoning effort and max tokens; `None` fields are omitted.
     /// * `user_names` - Map of user_id -> display name for user attribution.
     ///
     /// # Errors
@@ -268,8 +276,7 @@ impl AnthropicClient {
         &self,
         messages: &[Message],
         tools: &[Tool],
-        temperature: Option<f32>,
-        max_tokens: u32,
+        options: &RequestOptions,
         user_names: &HashMap<String, String>,
     ) -> kyomi_core::Result<LLMResponse> {
         let (system_prompt, anthropic_messages) =
@@ -281,8 +288,7 @@ impl AnthropicClient {
             system_prompt,
             anthropic_messages,
             tools,
-            temperature,
-            max_tokens,
+            options,
         );
 
         debug!(
@@ -302,7 +308,9 @@ impl AnthropicClient {
         maybe_log_llm("response", &response_json);
 
         // Parse response.
-        Self::parse_response(&self.base.model, &response_json)
+        let response = Self::parse_response(&self.base.model, &response_json)?;
+        crate::provider::log_reasoning_usage("anthropic", &self.base.model, options, &response);
+        Ok(response)
     }
 
     /// Send a single HTTP request to the Anthropic Messages API.
@@ -503,7 +511,13 @@ impl AnthropicClient {
                 .and_then(|u| u.get("cache_read_input_tokens"))
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0) as u32,
-            reasoning_tokens: 0,
+            // `usage.output_tokens_details.thinking_tokens`: a subset of
+            // `output_tokens`, reported when the model thinks.
+            reasoning_tokens: usage
+                .and_then(|u| u.get("output_tokens_details"))
+                .and_then(|d| d.get("thinking_tokens"))
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0) as u32,
         }
     }
 }
@@ -660,8 +674,7 @@ mod tests {
             None,
             vec![json!({"role": "user", "content": "hi"})],
             &[],
-            None,
-            1024,
+            &crate::provider::RequestOptions::new(1024),
         );
 
         assert!(
@@ -682,8 +695,7 @@ mod tests {
             None,
             vec![json!({"role": "user", "content": "hi"})],
             &tools,
-            None,
-            1024,
+            &crate::provider::RequestOptions::new(1024),
         );
 
         let sent = body["tools"]
@@ -1295,5 +1307,63 @@ mod tests {
         )
         .unwrap();
         assert_eq!(client.model(), DEFAULT_MODEL);
+    }
+
+    // -- KYO-972: temperature / reasoning effort wire shape -------------------
+
+    fn body_with(options: &RequestOptions) -> serde_json::Value {
+        AnthropicClient::build_request_body(
+            "claude-test",
+            None,
+            vec![json!({"role": "user", "content": "hi"})],
+            &[],
+            options,
+        )
+    }
+
+    #[test]
+    fn unset_effort_and_temperature_send_neither_field() {
+        let body = body_with(&RequestOptions::new(1024));
+        assert!(body.get("output_config").is_none(), "{body}");
+        assert!(body.get("temperature").is_none(), "{body}");
+        assert!(body.get("thinking").is_none(), "{body}");
+    }
+
+    #[test]
+    fn effort_is_sent_as_output_config_effort_unchanged() {
+        for v in ["low", "xhigh", "max", "a-new-level", "50"] {
+            let body = body_with(&RequestOptions::new(1024).with_reasoning_effort(Some(v.into())));
+            assert_eq!(body["output_config"], json!({"effort": v}), "{v}");
+            assert!(body.get("thinking").is_none(), "must never send thinking.budget_tokens");
+        }
+    }
+
+    #[test]
+    fn temperature_number_is_sent_and_none_omits_it() {
+        let body = body_with(&RequestOptions::new(1024).with_temperature(Some(0.25)));
+        assert_eq!(body["temperature"], json!(0.25));
+        let body = body_with(&RequestOptions::new(1024).with_temperature(None));
+        assert!(body.get("temperature").is_none());
+    }
+}
+
+#[cfg(test)]
+mod reasoning_usage_tests {
+    use super::*;
+
+    #[test]
+    fn thinking_tokens_are_read_from_output_tokens_details() {
+        let usage = AnthropicClient::parse_usage(&serde_json::json!({
+            "usage": {"input_tokens": 10, "output_tokens": 90,
+                      "output_tokens_details": {"thinking_tokens": 60}}
+        }));
+        assert_eq!(usage.reasoning_tokens, 60);
+        assert_eq!(usage.output_tokens, 90);
+    }
+
+    #[test]
+    fn missing_details_means_zero_thinking_tokens() {
+        let usage = AnthropicClient::parse_usage(&serde_json::json!({"usage": {"output_tokens": 5}}));
+        assert_eq!(usage.reasoning_tokens, 0);
     }
 }

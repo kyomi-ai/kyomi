@@ -313,6 +313,88 @@ pub async fn update_workspace_title_model(model: String) -> Result<(), ServerFnE
     Ok(())
 }
 
+/// Validate and store the workspace LLM tuning (reasoning effort and
+/// temperature per call profile). Self-hosted admins only.
+///
+/// Each empty field clears its key so the instance `LLM_*` value or the
+/// built-in default applies again. Every non-empty value is validated with
+/// the same parsers the env and the stored-settings reader use, and the whole
+/// request is rejected if any field is invalid (nothing is partially saved).
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
+pub async fn update_llm_tuning(
+    values: crate::server_fns::ai::LlmTuningValues,
+) -> Result<(), ServerFnError> {
+    use kyomi_core::llm_sampling::{parse_reasoning_effort, parse_temperature, Setting, OMIT_KEYWORD};
+
+    let ac = AuthenticatedContext::extract().await?;
+    if !ac.ctx.config.self_hosted {
+        return Err(ServerFnError::new(
+            "LLM tuning is only configurable on self-hosted deployments.",
+        ));
+    }
+    ac.require(Permission::ManageAiConfig, "Workspace admin access required")?;
+
+    let workspace = kyomi_auth::workspace_service::get_workspace_full(ac.db(), &ac.ws_id)
+        .await
+        .into_sfn_core()?
+        .ok_or_else(|| ServerFnError::new("Workspace not found"))?;
+
+    let mut settings = workspace.settings.clone();
+    let efforts = [
+        ("reasoning_effort", &values.reasoning_effort),
+        ("title_reasoning_effort", &values.title_reasoning_effort),
+        ("watch_reasoning_effort", &values.watch_reasoning_effort),
+    ];
+    let temps = [
+        ("temperature", &values.temperature),
+        ("title_temperature", &values.title_temperature),
+        ("watch_temperature", &values.watch_temperature),
+    ];
+    for (key, raw) in efforts {
+        let raw = raw.trim();
+        let next = if raw.is_empty() {
+            clear_custom_settings_key(&settings, key)
+        } else {
+            let stored = match parse_reasoning_effort(raw)
+                .map_err(|e| ServerFnError::new(format!("{key}: {e}")))?
+            {
+                Setting::Omit => OMIT_KEYWORD.to_string(),
+                Setting::Value(v) => v,
+            };
+            merge_custom_settings(&settings, key, serde_json::json!(stored))
+        };
+        settings = Some(next);
+    }
+    for (key, raw) in temps {
+        let raw = raw.trim();
+        let next = if raw.is_empty() {
+            clear_custom_settings_key(&settings, key)
+        } else {
+            let stored = match parse_temperature(raw)
+                .map_err(|e| ServerFnError::new(format!("{key}: {e}")))?
+            {
+                Setting::Omit => serde_json::json!(OMIT_KEYWORD),
+                // Round-trip through the user's own text so 0.3 stays 0.3
+                // rather than the f32 widening to 0.30000001192...
+                Setting::Value(_) => serde_json::json!(raw.parse::<f64>().unwrap_or_default()),
+            };
+            merge_custom_settings(&settings, key, stored)
+        };
+        settings = Some(next);
+    }
+    let updated_settings = settings.unwrap_or_else(|| serde_json::json!({}));
+
+    kyomi_auth::workspace_service::update_workspace_settings(
+        ac.db(),
+        &ac.ws_id,
+        &updated_settings,
+    )
+    .await
+    .into_sfn_core()?;
+
+    Ok(())
+}
+
 /// Update the workspace ChartML config (chart palette). Requires admin role.
 #[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn update_workspace_chartml_config(palette: String) -> Result<(), ServerFnError> {

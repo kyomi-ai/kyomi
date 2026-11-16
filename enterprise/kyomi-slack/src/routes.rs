@@ -1926,7 +1926,8 @@ async fn run_slack_query(
         workspace_id: workspace_id.to_string(),
         message: message.to_string(),
         model_name: None, // use default
-        temperature: 0.7,
+        temperature: Some(0.7),
+        llm_profile: kyomi_core::llm_sampling::LlmProfile::Chat,
         is_shared_conversation: is_shared,
         context_type: "slack".into(),
         workspace_user_ids: None,

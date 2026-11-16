@@ -252,8 +252,7 @@ impl LLMProvider for ScriptedProvider {
         &self,
         messages: &[Message],
         tools: &[Tool],
-        _temperature: Option<f32>,
-        _max_tokens: u32,
+        _options: &crate::provider::RequestOptions,
         _user_names: &HashMap<String, String>,
     ) -> kyomi_core::Result<LLMResponse> {
         self.calls

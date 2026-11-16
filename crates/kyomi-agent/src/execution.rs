@@ -68,7 +68,12 @@ pub struct AgentExecutionConfig {
     pub workspace_id: String,
     pub message: String,
     pub model_name: Option<String>,
-    pub temperature: f32,
+    /// This call site's historical temperature, used when neither the
+    /// workspace nor `LLM_*` env configures one. `None` omits the field.
+    /// The effective value is resolved in [`execute_agent_chat`] (KYO-972).
+    pub temperature: Option<f32>,
+    /// Which tuning profile applies: interactive chat, or a watch run.
+    pub llm_profile: kyomi_core::llm_sampling::LlmProfile,
     pub is_shared_conversation: bool,
     pub context_type: String,
     pub workspace_user_ids: Option<Vec<String>>,
@@ -147,7 +152,8 @@ impl Default for AgentExecutionConfig {
             workspace_id: String::new(),
             message: String::new(),
             model_name: None,
-            temperature: 0.7,
+            temperature: Some(0.7),
+            llm_profile: kyomi_core::llm_sampling::LlmProfile::Chat,
             is_shared_conversation: false,
             context_type: "chat".into(),
             workspace_user_ids: None,
@@ -334,19 +340,24 @@ async fn sender_display_names(
 /// [`build_tool_context`] extraction just above — so the mapping of the
 /// per-surface guards (`max_iterations`, `max_duration`, `max_total_tokens`,
 /// `max_tokens`; see KYO-345 and KYO-534) and `temperature` from
-/// [`AgentExecutionConfig`] onto [`AgentConfig`] can be pinned by a unit
+/// [`AgentExecutionConfig`] (and the resolved sampling values) onto [`AgentConfig`] can be pinned by a unit
 /// test without exercising the rest of the async agent loop (LLM calls, DB
 /// writes, etc.). `tool_filter` is computed by the caller from
 /// `config.context_type`/`config.tools_subset` and passed in rather than
 /// recomputed here, since that decision isn't part of what this function
 /// exists to prove.
-fn build_agent_config(config: &AgentExecutionConfig, tool_filter: ToolFilter) -> AgentConfig {
+fn build_agent_config(
+    config: &AgentExecutionConfig,
+    tool_filter: ToolFilter,
+    sampling: &kyomi_core::llm_sampling::ResolvedSampling,
+) -> AgentConfig {
     AgentConfig {
         max_iterations: config.max_iterations,
         max_duration: config.max_duration,
         max_total_tokens: config.max_total_tokens,
         max_tokens: config.max_tokens,
-        temperature: Some(config.temperature),
+        temperature: sampling.temperature,
+        reasoning_effort: sampling.reasoning_effort.clone(),
         tool_filter,
         ..Default::default()
     }
@@ -382,7 +393,7 @@ pub async fn execute_agent_chat(
     };
 
     // 2. Create LLM provider via the BYOK-aware factory.
-    let (client, provider_kind, is_byok) = {
+    let (client, provider_kind, is_byok, sampling) = {
         let mut ws_config =
             kyomi_auth::workspace_ai_config::load(db, &config.workspace_id)
                 .await
@@ -399,6 +410,16 @@ pub async fn execute_agent_chat(
         }
         let is_byok = ws_config.is_byok() && app_config.self_hosted;
         let client = create_provider_from_workspace(&ws_config, app_config)?;
+        // Resolved once per execution so the value is stable for the whole
+        // conversation turn (effort changes invalidate Anthropic's prompt
+        // cache).
+        let sampling = crate::sampling::resolve_for_call(
+            config.llm_profile,
+            &ws_config,
+            app_config,
+            config.temperature,
+            false,
+        );
         let provider_kind = match ws_config.provider {
             kyomi_auth::workspace_ai_config::WorkspaceAiProvider::Kyomi
             | kyomi_auth::workspace_ai_config::WorkspaceAiProvider::Anthropic => {
@@ -422,7 +443,7 @@ pub async fn execute_agent_chat(
         } else {
             provider_kind
         };
-        (client, provider_kind, is_byok)
+        (client, provider_kind, is_byok, sampling)
     };
     // Read the authoritative model name from the provider (not from config defaults).
     let model_name = client.model().to_string();
@@ -463,7 +484,7 @@ pub async fn execute_agent_chat(
         }
     };
 
-    let agent_config = build_agent_config(&config, tool_filter);
+    let agent_config = build_agent_config(&config, tool_filter, &sampling);
 
     // 4. Create tool registry (filtered by tools_subset if provided).
     let registry = Arc::new(create_default_registry());
@@ -946,6 +967,7 @@ async fn generate_title_inner(
     }
 
     let client = create_provider_from_workspace(&ws_config, app_config)?;
+    let options = crate::sampling::background_options(&ws_config, app_config, 0.3, 512);
 
     let user_turn = format!(
         "First message of the conversation (title its topic, do not answer it):\n\"\"\"\n{first_message}\n\"\"\"",
@@ -959,7 +981,7 @@ async fn generate_title_inner(
 
     // Use a generous token budget to accommodate models that use chain-of-thought
     // thinking (e.g. Qwen3) — the thinking tokens are stripped in parse_response.
-    let response = client.complete(&messages, &tools, Some(0.3), 512, &user_names).await?;
+    let response = client.complete(&messages, &tools, &options, &user_names).await?;
 
     // Clean up the title: remove quotes, hashes, trim, and truncate to fit
     // the DB column (varchar 255).
@@ -1218,6 +1240,8 @@ async fn generate_dashboard_summary_inner(
     }
 
     let client = create_provider_from_workspace(&ws_config, app_config)?;
+    let options = crate::sampling::background_options(&ws_config, app_config, 0.3, 512);
+    let tag_options = crate::sampling::background_options(&ws_config, app_config, 0.0, 256);
 
     let doc_type_label = if doc_type == "knowledge" { "document" } else { "dashboard" };
     let system_prompt = format!(
@@ -1241,7 +1265,7 @@ async fn generate_dashboard_summary_inner(
         crate::types::Message::user(&user_message),
     ];
 
-    let response = client.complete(&messages, &[], Some(0.3), 512, &HashMap::new()).await?;
+    let response = client.complete(&messages, &[], &options, &HashMap::new()).await?;
 
     let mut summary = response.content.trim().trim_matches('"').trim().to_string();
     if summary.is_empty() { return Ok(()); }
@@ -1332,7 +1356,7 @@ async fn generate_dashboard_summary_inner(
             ];
 
             let tag_response = client
-                .complete(&tag_messages, &[], Some(0.0), 256, &HashMap::new())
+                .complete(&tag_messages, &[], &tag_options, &HashMap::new())
                 .await;
 
             match tag_response {
@@ -1691,7 +1715,7 @@ mod tests {
     #[test]
     fn agent_execution_config_defaults() {
         let config = AgentExecutionConfig::default();
-        assert_eq!(config.temperature, 0.7);
+        assert_eq!(config.temperature, Some(0.7));
         assert_eq!(config.max_iterations, 25);
         assert_eq!(config.max_duration, Some(Duration::from_secs(15 * 60)));
         assert_eq!(config.max_total_tokens, Some(1_500_000));
@@ -1751,7 +1775,7 @@ mod tests {
         assert_eq!(config.workspace_id, "");
         assert_eq!(config.message, "");
         assert!(config.model_name.is_none());
-        assert!((config.temperature - 0.7).abs() < f32::EPSILON);
+        assert_eq!(config.temperature, Some(0.7));
         assert!(!config.is_shared_conversation);
         assert_eq!(config.context_type, "chat");
         assert!(config.workspace_user_ids.is_none());
@@ -1785,7 +1809,8 @@ mod tests {
             workspace_id: "ws-789".into(),
             message: "Show me revenue".into(),
             model_name: Some("claude-haiku-4-5-20251001".into()),
-            temperature: 0.3,
+            temperature: Some(0.3),
+            llm_profile: kyomi_core::llm_sampling::LlmProfile::Chat,
             is_shared_conversation: true,
             context_type: "copilot".into(),
             workspace_user_ids: Some(vec!["user-456".into(), "user-abc".into()]),
@@ -2254,7 +2279,7 @@ mod tests {
             max_duration: Some(Duration::from_secs(123)),
             max_total_tokens: Some(654_321),
             max_tokens: 9_999,
-            temperature: 0.42,
+            temperature: Some(0.42),
             ..AgentExecutionConfig::default()
         };
         let tool_filter = ToolFilter {
@@ -2263,7 +2288,11 @@ mod tests {
             include_only: None,
         };
 
-        let agent_config = build_agent_config(&config, tool_filter);
+        let sampling = kyomi_core::llm_sampling::ResolvedSampling {
+            reasoning_effort: Some("max".into()),
+            temperature: Some(0.42),
+        };
+        let agent_config = build_agent_config(&config, tool_filter, &sampling);
 
         assert_eq!(agent_config.max_iterations, 7);
         assert_eq!(agent_config.max_duration, Some(Duration::from_secs(123)));
@@ -2274,5 +2303,6 @@ mod tests {
              (KYO-534) — this is the seam client.complete() actually reads"
         );
         assert_eq!(agent_config.temperature, Some(0.42));
+        assert_eq!(agent_config.reasoning_effort.as_deref(), Some("max"));
     }
 }

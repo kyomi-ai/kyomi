@@ -103,6 +103,11 @@ pub struct WorkspaceAiConfig {
     /// Context window size for the configured model in tokens (0 = unknown).
     /// Stored in `settings.custom_settings.context_window`.
     pub context_window: u32,
+    /// Workspace reasoning-effort / temperature overrides from
+    /// `settings.custom_settings` (KYO-972). Applied only on self-hosted
+    /// deployments, like `default_model`: SaaS servers control the model and
+    /// its tuning entirely.
+    pub sampling: kyomi_core::llm_sampling::LlmSamplingSettings,
 }
 
 impl WorkspaceAiConfig {
@@ -164,6 +169,10 @@ pub enum WorkspaceAiConfigError {
     /// [`crate::workspace_secrets`].
     #[error(transparent)]
     Secret(#[from] WorkspaceSecretError),
+
+    /// A stored reasoning-effort / temperature value failed validation.
+    #[error("invalid stored LLM setting: {0}")]
+    InvalidSampling(#[from] kyomi_core::llm_sampling::InvalidSetting),
 
     /// Wraps a serde_json failure serialising the settings JSON blob.
     #[error("settings JSON serialisation failed: {0}")]
@@ -235,6 +244,7 @@ pub async fn load(
     };
 
     let context_window = read_context_window(&row.settings);
+    let sampling = kyomi_core::llm_sampling::read_workspace_sampling(&row.settings)?;
 
     Ok(WorkspaceAiConfig {
         provider,
@@ -243,6 +253,7 @@ pub async fn load(
         base_url,
         title_model,
         context_window,
+        sampling,
     })
 }
 
@@ -582,6 +593,7 @@ mod tests {
             base_url: None,
             title_model: None,
         context_window: 0,
+        sampling: Default::default(),
         };
         assert!(!cfg.is_byok());
     }
@@ -600,6 +612,7 @@ mod tests {
                 base_url: None,
                 title_model: None,
             context_window: 0,
+            sampling: Default::default(),
             };
             assert!(cfg.is_byok(), "expected BYOK for {p:?}");
         }

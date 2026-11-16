@@ -14,6 +14,7 @@ use std::collections::HashMap;
 use serde_json::json;
 use tracing::{debug, info, warn};
 
+use crate::provider::RequestOptions;
 use crate::types::{AgentTokenUsage, LLMResponse, Message, MessageRole, Tool, ToolCall};
 
 // ---------------------------------------------------------------------------
@@ -213,13 +214,12 @@ impl OpenAIProvider {
         model: &str,
         openai_messages: Vec<serde_json::Value>,
         tools: &[Tool],
-        temperature: Option<f32>,
-        max_tokens: u32,
+        options: &RequestOptions,
     ) -> serde_json::Value {
         let mut body = json!({
             "model": model,
             "messages": openai_messages,
-            "max_tokens": max_tokens,
+            "max_tokens": options.max_tokens,
         });
 
         // Omit tools field entirely if empty — some OpenAI-compatible APIs
@@ -228,8 +228,20 @@ impl OpenAIProvider {
             body["tools"] = json!(Self::convert_tools_to_openai(tools));
         }
 
-        if let Some(temp) = temperature {
+        if let Some(temp) = options.temperature {
             body["temperature"] = json!(temp);
+        }
+
+        // Top-level `reasoning_effort` (OpenAI, OpenRouter, DeepSeek and most
+        // compatible gateways). Passed through unchanged: a plain integer
+        // (e.g. a 1-100 scale) is sent as a JSON number, anything else as the
+        // string given. Unset omits the field, so backends that reject
+        // unknown fields are unaffected.
+        if let Some(effort) = &options.reasoning_effort {
+            body["reasoning_effort"] = match effort.parse::<i64>() {
+                Ok(n) => json!(n),
+                Err(_) => json!(effort),
+            };
         }
 
         body
@@ -244,8 +256,7 @@ impl OpenAIProvider {
     /// # Arguments
     /// * `messages` - Conversation history.
     /// * `tools` - Available tools (may be empty).
-    /// * `temperature` - Sampling temperature; `None` uses model default.
-    /// * `max_tokens` - Maximum tokens to generate.
+    /// * `options` - Temperature, reasoning effort and max tokens; `None` fields are omitted.
     /// * `user_names` - Map of user_id -> display name for user attribution.
     ///
     /// # Errors
@@ -255,8 +266,7 @@ impl OpenAIProvider {
         &self,
         messages: &[Message],
         tools: &[Tool],
-        temperature: Option<f32>,
-        max_tokens: u32,
+        options: &RequestOptions,
         user_names: &HashMap<String, String>,
     ) -> kyomi_core::Result<LLMResponse> {
         let openai_messages = Self::convert_messages_to_openai(messages, user_names);
@@ -266,8 +276,7 @@ impl OpenAIProvider {
             &self.base.model,
             openai_messages,
             tools,
-            temperature,
-            max_tokens,
+            options,
         );
 
         debug!(
@@ -282,6 +291,7 @@ impl OpenAIProvider {
 
         // Parse response.
         let response = Self::parse_response(&self.base.model, &response_json)?;
+        crate::provider::log_reasoning_usage("openai", &self.base.model, options, &response);
 
         Ok(response)
     }
@@ -754,8 +764,7 @@ mod tests {
             "gpt-test",
             vec![json!({"role": "user", "content": "hi"})],
             &[],
-            None,
-            1024,
+            &crate::provider::RequestOptions::new(1024),
         );
 
         assert!(
@@ -775,8 +784,7 @@ mod tests {
             "gpt-test",
             vec![json!({"role": "user", "content": "hi"})],
             &tools,
-            None,
-            1024,
+            &crate::provider::RequestOptions::new(1024),
         );
 
         let sent = body["tools"]
@@ -1500,5 +1508,46 @@ mod tests {
         });
         let response = OpenAIProvider::parse_response("meta-llama/llama-3-8b", &response).unwrap();
         assert_eq!(response.cost, Some(0.0));
+    }
+
+    // -- KYO-972: temperature / reasoning effort wire shape -------------------
+
+    fn body_with(options: &RequestOptions) -> serde_json::Value {
+        OpenAIProvider::build_request_body(
+            "gpt-test",
+            vec![json!({"role": "user", "content": "hi"})],
+            &[],
+            options,
+        )
+    }
+
+    #[test]
+    fn unset_effort_and_temperature_send_neither_field() {
+        let body = body_with(&RequestOptions::new(1024));
+        for key in ["reasoning_effort", "reasoning", "temperature"] {
+            assert!(body.get(key).is_none(), "{key} must be omitted: {body}");
+        }
+    }
+
+    #[test]
+    fn named_and_unrecognised_effort_pass_through_as_strings() {
+        for v in ["low", "max", "xhigh", "none", "brand-new-level"] {
+            let body = body_with(&RequestOptions::new(1024).with_reasoning_effort(Some(v.into())));
+            assert_eq!(body["reasoning_effort"], json!(v), "{v}");
+        }
+    }
+
+    #[test]
+    fn numeric_effort_is_sent_as_a_number() {
+        let body = body_with(&RequestOptions::new(1024).with_reasoning_effort(Some("50".into())));
+        assert_eq!(body["reasoning_effort"], json!(50));
+    }
+
+    #[test]
+    fn temperature_number_is_sent_and_none_omits_it() {
+        let body = body_with(&RequestOptions::new(1024).with_temperature(Some(0.1)));
+        assert_eq!(body["temperature"], json!(0.1f32));
+        let body = body_with(&RequestOptions::new(1024).with_temperature(None));
+        assert!(body.get("temperature").is_none());
     }
 }

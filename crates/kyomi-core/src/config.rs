@@ -255,6 +255,14 @@ pub struct Config {
     /// Uses the cheapest model for the provider when absent.
     pub llm_title_model: Option<String>,
 
+    /// Instance-default reasoning effort / temperature per call profile
+    /// (`LLM_REASONING_EFFORT`, `LLM_TITLE_REASONING_EFFORT`,
+    /// `LLM_WATCH_REASONING_EFFORT`, `LLM_TEMPERATURE`,
+    /// `LLM_TITLE_TEMPERATURE`, `LLM_WATCH_TEMPERATURE`). Unset fields send
+    /// nothing extra; `omit` explicitly omits the field. See
+    /// [`crate::llm_sampling`].
+    pub llm_sampling: crate::llm_sampling::LlmSamplingSettings,
+
     // ── Stripe ──────────────────────────────────────────────────────────
     /// Stripe secret key (sk_test_ or sk_live_).
     /// Optional — server starts without it (no billing features).
@@ -497,6 +505,7 @@ impl Config {
             llm_base_url: env::var("LLM_BASE_URL").ok(),
             llm_context_window: 0,
             llm_title_model: env::var("LLM_TITLE_MODEL").ok(),
+            llm_sampling: llm_sampling_from_env(),
             stripe_secret_key: env::var("STRIPE_SECRET_KEY").ok(),
             stripe_publishable_key: env::var("STRIPE_PUBLISHABLE_KEY").ok(),
             stripe_webhook_secret: env::var("STRIPE_WEBHOOK_SECRET").ok(),
@@ -580,6 +589,7 @@ impl Config {
             llm_base_url: None,
             llm_context_window: 0,
             llm_title_model: None,
+            llm_sampling: crate::llm_sampling::LlmSamplingSettings::default(),
             stripe_secret_key: None,
             stripe_publishable_key: None,
             stripe_webhook_secret: None,
@@ -633,6 +643,31 @@ impl Config {
     /// Returns true if an LLM provider is configured (AI features available).
     pub fn llm_configured(&self) -> bool {
         self.anthropic_api_key.is_some() || self.llm_api_key.is_some()
+    }
+}
+
+/// Read an optional env var and parse it; an invalid value aborts startup with
+/// the variable name rather than being silently ignored.
+fn optional_parsed_env<T>(
+    key: &str,
+    parse: fn(&str) -> Result<T, crate::llm_sampling::InvalidSetting>,
+) -> Option<T> {
+    match env::var(key) {
+        Ok(raw) if raw.trim().is_empty() => None,
+        Ok(raw) => Some(parse(&raw).unwrap_or_else(|e| panic!("{key}: {e}"))),
+        Err(_) => None,
+    }
+}
+
+fn llm_sampling_from_env() -> crate::llm_sampling::LlmSamplingSettings {
+    use crate::llm_sampling::{parse_reasoning_effort as effort, parse_temperature as temp};
+    crate::llm_sampling::LlmSamplingSettings {
+        reasoning_effort: optional_parsed_env("LLM_REASONING_EFFORT", effort),
+        title_reasoning_effort: optional_parsed_env("LLM_TITLE_REASONING_EFFORT", effort),
+        watch_reasoning_effort: optional_parsed_env("LLM_WATCH_REASONING_EFFORT", effort),
+        temperature: optional_parsed_env("LLM_TEMPERATURE", temp),
+        title_temperature: optional_parsed_env("LLM_TITLE_TEMPERATURE", temp),
+        watch_temperature: optional_parsed_env("LLM_WATCH_TEMPERATURE", temp),
     }
 }
 

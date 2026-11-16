@@ -1,13 +1,15 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-//! AI settings page — read-only self-hosted AI configuration reference.
+//! AI settings page — self-hosted AI configuration reference, plus the one
+//! in-app control: LLM tuning (reasoning effort and temperature, KYO-972).
 //!
 //! Self-hosted admins only. AI provider and model configuration on
 //! self-hosted deployments is environment-driven (set on the server, not in
 //! the app) — this page shows what actually resolved (via
 //! `get_resolved_ai_provider`) plus the relevant environment variables and
-//! their precedence, but exposes no controls, since there is nothing here
-//! for an in-app control to do. In SaaS mode Kyomi manages AI for the
+//! their precedence. Reasoning effort and temperature are the exception:
+//! they are tuned per workspace here (`settings.custom_settings`) and
+//! override the instance `LLM_*` defaults. In SaaS mode Kyomi manages AI for the
 //! workspace and there is no user-facing configuration; navigating here
 //! redirects to profile. On self-hosted, only workspace admins/owners
 //! (`Permission::ManageAiConfig` — the same permission the workspace AI
@@ -21,10 +23,14 @@ use leptos_router::components::Redirect;
 use kyomi_types::Permission;
 
 use crate::components::{
-    Alert, AlertDescription, AlertTitle, AlertVariant, Card, CardContent, Skeleton, StatusBadge,
-    StatusBadgeVariant,
+    ActionStatus, Alert, AlertDescription, AlertTitle, AlertVariant, Button, Card, CardContent,
+    Skeleton, StatusBadge, StatusBadgeVariant, INPUT_CLASS,
 };
-use crate::server_fns::ai::{get_resolved_ai_provider, ResolvedAiProviderView};
+use crate::server_fns::ai::{
+    get_llm_tuning, get_resolved_ai_provider, list_openrouter_models, LlmTuningValues,
+    LlmTuningView, ResolvedAiProviderView,
+};
+use crate::server_fns::workspace::update_llm_tuning;
 use crate::server_fns::context::UserContext;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -78,7 +84,7 @@ pub fn AiPage() -> impl IntoView {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Self-hosted admin view — informational only, no controls.
+// Self-hosted admin view — environment reference plus the LLM tuning card.
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[component]
@@ -86,13 +92,14 @@ fn SelfHostedView() -> impl IntoView {
     view! {
         <div class="space-y-6">
             <ResolvedProviderPanel/>
+            <LlmTuningCard/>
             <Card>
                 <CardContent>
                     <div class="space-y-4 p-2">
                         <div>
                             <h2 class="text-xl font-display text-foreground">"Configuration"</h2>
                             <p class="text-sm text-muted-foreground">
-                                "AI provider and model are set on the server via environment variables \u{2014} there is no in-app control to change them."
+                                "AI provider and model are set on the server via environment variables \u{2014} there is no in-app control to change them. Reasoning effort and temperature can be tuned above."
                             </p>
                         </div>
                         <Alert variant=AlertVariant::Info>
@@ -253,5 +260,197 @@ fn ResolvedProviderPanel() -> impl IntoView {
                 </div>
             </CardContent>
         </Card>
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// LLM tuning — reasoning effort and temperature (KYO-972)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Reasoning-effort suggestions for a provider. Suggestions only: the field is
+/// free text and the value is passed to the provider unchanged, because the
+/// vocabulary differs per provider and model and keeps changing.
+fn provider_effort_suggestions(provider: &str) -> Vec<String> {
+    let list: &[&str] = match provider {
+        "anthropic" => &["low", "medium", "high", "xhigh", "max"],
+        "gemini" => &["minimal", "low", "medium", "high", "1024"],
+        _ => &["none", "minimal", "low", "medium", "high", "xhigh", "max"],
+    };
+    list.iter().map(|s| (*s).to_string()).collect()
+}
+
+const TEMPERATURE_SUGGESTIONS: &[&str] = &["omit", "0", "0.1", "0.3", "0.7", "1"];
+
+#[component]
+fn TuningField(
+    label: &'static str,
+    hint: &'static str,
+    value: RwSignal<String>,
+    placeholder: String,
+    list_id: &'static str,
+) -> impl IntoView {
+    view! {
+        <label class="block space-y-1">
+            <span class="text-sm text-foreground">{label}</span>
+            <input
+                type="text"
+                class=INPUT_CLASS
+                list=list_id
+                placeholder=placeholder
+                autocomplete="off"
+                prop:value=move || value.get()
+                on:input=move |ev| value.set(event_target_value(&ev))
+            />
+            <span class="block text-xs text-muted-foreground">{hint}</span>
+        </label>
+    }
+}
+
+#[component]
+fn LlmTuningCard() -> impl IntoView {
+    let tuning = Resource::new(|| (), |_| get_llm_tuning());
+    // Model-specific effort suggestions from OpenRouter, when that is the
+    // backend. Errors and empty lists degrade to the static suggestions.
+    let models = Resource::new(|| (), |_| list_openrouter_models(false));
+    let resolved = Resource::new(|| (), |_| get_resolved_ai_provider());
+
+    view! {
+        <Card>
+            <CardContent>
+                <div class="space-y-4 p-2">
+                    <div>
+                        <h2 class="text-xl font-display text-foreground">"LLM Tuning"</h2>
+                        <p class="text-sm text-muted-foreground">
+                            "Reasoning effort and temperature for this workspace. Leave a field empty to use the instance default (shown as the placeholder); type "
+                            <code class="px-1 py-0.5 bg-muted rounded-md text-xs font-mono">"omit"</code>
+                            " to send no value, which some models require."
+                        </p>
+                    </div>
+                    <Transition fallback=move || view! { <Skeleton class="h-40 w-full"/> }>
+                        {move || Suspend::new(async move {
+                            match tuning.await {
+                                Ok(view_data) => {
+                                    let model_id = match resolved.await {
+                                        Ok(ResolvedAiProviderView::Resolved { model, .. }) => model,
+                                        _ => None,
+                                    };
+                                    let model_efforts = models
+                                        .await
+                                        .ok()
+                                        .and_then(|list| {
+                                            list.into_iter().find(|m| Some(&m.id) == model_id.as_ref())
+                                        })
+                                        .map(|m| (m.supported_efforts, m.default_effort));
+                                    view! { <LlmTuningForm data=view_data model_efforts/> }.into_any()
+                                }
+                                Err(e) => view! {
+                                    <Alert variant=AlertVariant::Error>
+                                        <AlertTitle>"Couldn't load LLM tuning"</AlertTitle>
+                                        <AlertDescription>{e.to_string()}</AlertDescription>
+                                    </Alert>
+                                }.into_any(),
+                            }
+                        })}
+                    </Transition>
+                </div>
+            </CardContent>
+        </Card>
+    }
+}
+
+#[component]
+fn LlmTuningForm(
+    data: LlmTuningView,
+    model_efforts: Option<(Vec<String>, Option<String>)>,
+) -> impl IntoView {
+    let LlmTuningView { provider, workspace, instance } = data;
+
+    let (mut efforts, default_effort) = match model_efforts {
+        Some((supported, default)) if !supported.is_empty() => (supported, default),
+        _ => (provider_effort_suggestions(&provider), None),
+    };
+    efforts.push("omit".to_string());
+
+    let reasoning = RwSignal::new(workspace.reasoning_effort.clone());
+    let title_reasoning = RwSignal::new(workspace.title_reasoning_effort.clone());
+    let watch_reasoning = RwSignal::new(workspace.watch_reasoning_effort.clone());
+    let temperature = RwSignal::new(workspace.temperature.clone());
+    let title_temperature = RwSignal::new(workspace.title_temperature.clone());
+    let watch_temperature = RwSignal::new(workspace.watch_temperature.clone());
+
+    let placeholder = |instance_value: &str, fallback: &str| {
+        if instance_value.is_empty() {
+            fallback.to_string()
+        } else {
+            format!("{instance_value} (instance)")
+        }
+    };
+    let effort_default = match &default_effort {
+        Some(d) => format!("model default: {d}"),
+        None => "provider default".to_string(),
+    };
+    let ph_reasoning = placeholder(&instance.reasoning_effort, &effort_default);
+    let ph_title_reasoning = placeholder(&instance.title_reasoning_effort, "low with a title model, else none");
+    let ph_watch_reasoning = placeholder(&instance.watch_reasoning_effort, "same as chat");
+    let ph_temperature = placeholder(&instance.temperature, "0.7 (chat), 0.1 (copilot)");
+    let ph_title_temperature = placeholder(&instance.title_temperature, "0.3");
+    let ph_watch_temperature = placeholder(&instance.watch_temperature, "same as chat");
+
+    let save = Action::new(|values: &LlmTuningValues| {
+        let values = values.clone();
+        async move { update_llm_tuning(values).await }
+    });
+    let on_save = move |_| {
+        save.dispatch(LlmTuningValues {
+            reasoning_effort: reasoning.get_untracked(),
+            title_reasoning_effort: title_reasoning.get_untracked(),
+            watch_reasoning_effort: watch_reasoning.get_untracked(),
+            temperature: temperature.get_untracked(),
+            title_temperature: title_temperature.get_untracked(),
+            watch_temperature: watch_temperature.get_untracked(),
+        });
+    };
+
+    let save_error = move || {
+        save.value().get().and_then(|r| r.err()).map(|e| e.to_string())
+    };
+
+    view! {
+        <datalist id="llm-effort-suggestions">
+            {efforts.into_iter().map(|v| view! { <option value=v></option> }).collect_view()}
+        </datalist>
+        <datalist id="llm-temperature-suggestions">
+            {TEMPERATURE_SUGGESTIONS.iter().map(|v| view! { <option value=*v></option> }).collect_view()}
+        </datalist>
+        <div class="grid gap-4 sm:grid-cols-2">
+            <TuningField label="Reasoning effort \u{2014} chat"
+                hint="Passed to the provider unchanged."
+                value=reasoning placeholder=ph_reasoning list_id="llm-effort-suggestions"/>
+            <TuningField label="Temperature \u{2014} chat"
+                hint="A number from 0 to 2, or omit."
+                value=temperature placeholder=ph_temperature list_id="llm-temperature-suggestions"/>
+            <TuningField label="Reasoning effort \u{2014} watches"
+                hint="Scheduled watch runs."
+                value=watch_reasoning placeholder=ph_watch_reasoning list_id="llm-effort-suggestions"/>
+            <TuningField label="Temperature \u{2014} watches"
+                hint="Scheduled watch runs."
+                value=watch_temperature placeholder=ph_watch_temperature list_id="llm-temperature-suggestions"/>
+            <TuningField label="Reasoning effort \u{2014} titles and summaries"
+                hint="Cheap background calls."
+                value=title_reasoning placeholder=ph_title_reasoning list_id="llm-effort-suggestions"/>
+            <TuningField label="Temperature \u{2014} titles and summaries"
+                hint="Cheap background calls."
+                value=title_temperature placeholder=ph_title_temperature list_id="llm-temperature-suggestions"/>
+        </div>
+        {move || save_error().map(|msg| view! {
+            <Alert variant=AlertVariant::Error>
+                <AlertTitle>"Not saved"</AlertTitle>
+                <AlertDescription>{msg}</AlertDescription>
+            </Alert>
+        })}
+        <div class="flex items-center gap-3">
+            <Button on:click=on_save>"Save"</Button>
+            <ActionStatus action=save/>
+        </div>
     }
 }
