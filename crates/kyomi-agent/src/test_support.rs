@@ -313,3 +313,162 @@ impl LLMProvider for ScriptedProvider {
         "scripted-model"
     }
 }
+
+// ---------------------------------------------------------------------------
+// Shared tool-failure fixtures (KYO-970): used by the agent loop's tests in
+// `agent.rs` (legacy, non-runtime path) and `adapter.rs` (durable runtime path).
+// ---------------------------------------------------------------------------
+
+/// An [`LLMProvider`] that overrides a [`ScriptedProvider`]'s tool calls with a
+/// scripted list: response `i` carries `requested[i*batch..(i+1)*batch]`, then the
+/// inner provider's text reply. Used to drive real tool outcomes through the
+/// durable `ChatAgentAdapter::chat()` path.
+pub(crate) struct ActualToolsProvider {
+    pub(crate) inner: ScriptedProvider,
+    pub(crate) requested: Vec<(&'static str, serde_json::Value)>,
+    pub(crate) index: std::sync::atomic::AtomicUsize,
+    pub(crate) truncation: Truncation,
+    /// Tool calls returned per model response (1 for every pre-existing test).
+    pub(crate) batch: usize,
+}
+
+/// Which returned tool calls carry an unparsable-arguments error.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Truncation {
+    /// None of them.
+    Never,
+    /// Only the first call of the first response (the pre-existing `truncated` flag).
+    FirstCall,
+    /// Every call of every response.
+    EveryCall,
+}
+#[async_trait::async_trait]
+impl LLMProvider for ActualToolsProvider {
+    async fn complete(&self, messages: &[Message], tools: &[Tool], temperature: Option<f32>, max_tokens: u32,
+        names: &HashMap<String, String>) -> kyomi_core::Result<LLMResponse> {
+        let mut response = self.inner.complete(messages, tools, temperature, max_tokens, names).await?;
+        let index = self.index.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let start = index * self.batch;
+        let end = (start + self.batch).min(self.requested.len());
+        if start < end {
+            let truncate = |offset: usize| match self.truncation {
+                Truncation::Never => false,
+                Truncation::FirstCall => index == 0 && offset == 0,
+                Truncation::EveryCall => true,
+            };
+            let calls: Vec<ToolCall> = self.requested[start..end]
+                .iter()
+                .enumerate()
+                .map(|(offset, (name, arguments))| ToolCall {
+                    id: format!("provider-call-{}", start + offset),
+                    name: (*name).into(),
+                    arguments: arguments.clone(),
+                    arguments_error: truncate(offset)
+                        .then(|| "arguments could not be parsed as JSON (finish_reason=max_tokens): EOF".to_string()),
+                })
+                .collect();
+            if calls.iter().any(|call| call.arguments_error.is_some()) {
+                response.finish_reason = "max_tokens".into();
+            }
+            response.tool_calls = Some(calls);
+        }
+        Ok(response)
+    }
+    fn model(&self) -> &str { "actual-tool-outcome-fixture" }
+}
+
+/// The outcome a [`FailingTool`] produces: the failure classes a tool can report,
+/// plus one success, so tests can pin how each is classified and budgeted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FailureKind {
+    BadRequest,
+    ServerError,
+    Timeout,
+    UnknownResult,
+    Panic,
+    ResultPanic,
+    TransportError,
+    NotFound,
+    Forbidden,
+    BadRequestAfterEffect,
+    MutatingUnknown,
+    RejectedResult,
+    Succeeded,
+}
+
+/// A tool that fails (or succeeds) in the way its [`FailureKind`] selects, counting
+/// invocations. `name` lets one test registry hold several failure classes.
+pub(crate) struct FailingTool {
+    pub(crate) kind: FailureKind,
+    pub(crate) name: &'static str,
+    pub(crate) calls: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+#[async_trait::async_trait]
+impl AgentTool for FailingTool {
+    fn name(&self) -> &str { self.name }
+    fn description(&self) -> &str { "Failure-class fixture" }
+    fn parameters_schema(&self) -> serde_json::Value { serde_json::json!({"type":"object","properties":{}}) }
+    fn bad_request_is_pre_effect(&self) -> bool {
+        self.kind != FailureKind::BadRequestAfterEffect
+    }
+    fn result_domain_outcome(&self, text: &str) -> agent_runtime::DomainOutcome {
+        if self.kind == FailureKind::ResultPanic {
+            panic!("result classification exploded");
+        }
+        if self.kind == FailureKind::UnknownResult {
+            agent_runtime::DomainOutcome::Unknown
+        } else if text.contains("\"error\"") || text.contains("\"valid\":false") {
+            agent_runtime::DomainOutcome::Rejected
+        } else {
+            agent_runtime::DomainOutcome::Succeeded
+        }
+    }
+    async fn execute(&self, _: serde_json::Value, ctx: &ToolContext) -> kyomi_core::Result<String> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        match self.kind {
+            FailureKind::BadRequest => Err(kyomi_core::Error::BadRequest("Missing required parameter 'x'".into())),
+            FailureKind::ServerError => Err(kyomi_core::Error::ServiceUnavailable("provider server exploded".into())),
+            FailureKind::Timeout => Err(kyomi_core::Error::ServiceUnavailable("timed out waiting for provider".into())),
+            FailureKind::UnknownResult => Ok("{\"error\":\"timeout after commit; unknown_after_commit\"}".into()),
+            FailureKind::Panic => panic!("tool exploded"),
+            FailureKind::ResultPanic => Ok("{\"ok\":true}".into()),
+            FailureKind::TransportError => Err(kyomi_core::Error::DatasourceConnection("connection reset by peer".into())),
+            FailureKind::NotFound => Err(kyomi_core::Error::NotFound("datasource 'missing' not found".into())),
+            FailureKind::Forbidden => Err(kyomi_core::Error::Forbidden("document scope denied".into())),
+            FailureKind::BadRequestAfterEffect => {
+                kyomi_core::db_execute!(&ctx.db, "UPDATE workspaces SET name='mutated once' WHERE workspace_id = $1", &ctx.workspace_id).unwrap();
+                Err(kyomi_core::Error::BadRequest("partial effect then validation failed".into()))
+            }
+            FailureKind::MutatingUnknown => {
+                kyomi_core::db_execute!(&ctx.db, "UPDATE workspaces SET name='mutated once' WHERE workspace_id = $1", &ctx.workspace_id).unwrap();
+                Err(kyomi_core::Error::ServiceUnavailable("mutated then lost acknowledgement".into()))
+            }
+            FailureKind::RejectedResult => Ok("{\"valid\":false}".into()),
+            FailureKind::Succeeded => Ok("{\"ok\":true}".into()),
+        }
+    }
+}
+
+/// A [`FailingTool`] that rejects every call with a definite pre-effect rejection
+/// (`BadRequest`), like a SQL analysis error the model can repair.
+pub(crate) fn rejecting_tool(calls: &Arc<std::sync::atomic::AtomicUsize>) -> Arc<FailingTool> {
+    Arc::new(FailingTool { kind: FailureKind::BadRequest, name: "rejecting_tool", calls: calls.clone() })
+}
+
+/// A tool that always succeeds, counting invocations (used to prove a success
+/// resets a consecutive-failure budget).
+pub(crate) struct SucceedingTool {
+    pub(crate) calls: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+#[async_trait::async_trait]
+impl AgentTool for SucceedingTool {
+    fn name(&self) -> &str { "succeeding_tool" }
+    fn description(&self) -> &str { "Succeeding fixture" }
+    fn parameters_schema(&self) -> serde_json::Value { serde_json::json!({"type":"object","properties":{}}) }
+    async fn execute(&self, _: serde_json::Value, _: &ToolContext) -> kyomi_core::Result<String> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok("{\"ok\":true}".into())
+    }
+}
