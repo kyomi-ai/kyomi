@@ -163,6 +163,11 @@ const MAX_CONSECUTIVE_TOOL_FAILURES: usize = 5;
 /// [`MAX_CONSECUTIVE_TOOL_FAILURES`]. A genuinely stuck model repeating the
 /// same call is still caught by [`MAX_SAME_FAILING_TOOL_CALLS`], and the turn's
 /// iteration and duration budgets still apply.
+///
+/// Only rejections that come from executing a real tool with parsed arguments
+/// qualify. An unknown tool name or unparsable/truncated arguments are rejected
+/// before any tool runs and give the model nothing to repair incrementally, so
+/// they keep the strict [`MAX_CONSECUTIVE_TOOL_FAILURES`] budget.
 const MAX_CONSECUTIVE_REJECTED_TOOL_FAILURES: usize = 10;
 
 /// Stop a turn when the same tool call (name + arguments) fails this many times,
@@ -861,7 +866,12 @@ impl CustomAgent {
                     self.execute_tool(tool_call).await
                 };
                 let succeeded = outcome.succeeded();
-                let rejected = outcome.domain == agent_runtime::DomainOutcome::Rejected;
+                // Repairable rejection: a real tool ran with parsed arguments and
+                // definitely had no effect. Unknown-tool and bad-arguments
+                // rejections keep the strict budget (see the constant's docs).
+                let rejected = outcome.domain == agent_runtime::DomainOutcome::Rejected
+                    && tool_call.arguments_error.is_none()
+                    && self.registry.get_tool(&tool_call.name).is_some();
                 let result = outcome.text;
                 self.state.messages.push(Message::tool_result(
                     &tool_call.id,
