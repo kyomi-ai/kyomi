@@ -24,8 +24,9 @@ __pycache__/
 .vscode/settings.json
 .cursor/
 
-# Claude Code
-.claude/
+# Claude Code (per-user state ignored; the shared project hook config is tracked)
+.claude/*
+!.claude/settings.json
 
 # Local development data (NOT in version control)
 .data/

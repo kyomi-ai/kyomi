@@ -75,7 +75,7 @@ Work in the worktree your session already has (the Claude desktop app and
 `claude --worktree` create it). **Do not `git worktree add` a second, sibling
 `kyomi-wt-*` tree** — it duplicates cold builds and strands work. Only create one
 by hand when you are in the canonical clone and no session worktree exists.
-First thing in any worktree, run `scripts/worktree-setup.sh`: it links `.env`,
+A `SessionStart` hook in `.claude/settings.json` runs `scripts/worktree-setup.sh` for you at session start (set `WORKTREE_SETUP_SKIP=1` to opt out, e.g. design-only sessions); run it by hand if it did not fire. It links `.env`,
 creates `crates/kyomi-ui/dist`, fast-forwards a stale base to `origin/main`,
 checks sccache, and prints `WORKTREE=` and `PORT=` (3100 + ticket number % 900).
 

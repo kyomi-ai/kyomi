@@ -33,9 +33,14 @@
 # Human-facing status goes to stderr; stdout carries only the two KEY=VALUE
 # lines, so `eval "$(scripts/worktree-setup.sh)"` exports them.
 #
-# Environment: WORKTREE_SETUP_NO_FETCH=1 skips `git fetch` (used by the self-test).
+# Environment: WORKTREE_SETUP_NO_FETCH=1 skips `git fetch` (used by the self-test);
+# WORKTREE_SETUP_SKIP=1 makes the script a no-op.
+# A SessionStart hook in .claude/settings.json runs it at the start of every session.
 # ------------------------------------------------------------------------------
 set -euo pipefail
+
+# Opt out (e.g. a design-only session that never builds): WORKTREE_SETUP_SKIP=1.
+if [ "${WORKTREE_SETUP_SKIP:-0}" = "1" ]; then exit 0; fi
 
 say() { printf 'worktree-setup: %s\n' "$*" >&2; }
 
