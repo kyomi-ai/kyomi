@@ -1193,3 +1193,7 @@ mod tests {
 #[cfg(test)]
 #[path = "scheduler_batch_tests.rs"]
 mod scheduler_batch_tests;
+
+#[cfg(test)]
+#[path = "scheduler_batch_pg_tests.rs"]
+mod scheduler_batch_pg_tests;
