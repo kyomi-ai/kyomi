@@ -255,8 +255,8 @@ impl AnthropicClient {
             body["tools"] = json!(Self::convert_tools_to_anthropic(tools));
         }
 
-        if let Some(temp) = options.temperature {
-            body["temperature"] = json!(temp);
+        if let Some(temp) = &options.temperature {
+            body["temperature"] = temp.clone();
         }
 
         // Effort is passed through unchanged. Do NOT send
@@ -277,9 +277,9 @@ impl AnthropicClient {
         // The API rejects `temperature` other than 1 while thinking is adaptive
         // (verified live), so a configured temperature wins and no `thinking` is
         // sent: models that think only on request (Sonnet 4.6, ...) then keep
-        // working with it. Models that think by default (5.x) need
-        // `LLM_TEMPERATURE=omit` regardless.
-        let temperature_allows_thinking = options.temperature.is_none_or(|t| (t - 1.0).abs() < f32::EPSILON);
+        // working with it. Models that think by default (5.x) reject a configured
+        // temperature other than 1 outright, so do not configure one for them.
+        let temperature_allows_thinking = options.temperature.as_ref().is_none_or(|t| t.as_f64() == Some(1.0));
         if temperature_allows_thinking && crate::anthropic_pricing::supports_adaptive_thinking(model) {
             body["thinking"] = json!({"type": "adaptive", "display": "summarized"});
         }
@@ -354,6 +354,13 @@ impl AnthropicClient {
     pub(crate) async fn post_for_live_test(&self, body: &serde_json::Value) -> LLMResponse {
         let (json, request_id) = self.call_api(body).await.unwrap();
         Self::parse_response(&self.base.model, &json, request_id).unwrap()
+    }
+
+    /// Like `post_for_live_test` but returns the API error (live tests only).
+    #[cfg(test)]
+    pub(crate) async fn try_post_for_live_test(&self, body: &serde_json::Value) -> kyomi_core::Result<LLMResponse> {
+        let (json, request_id) = self.call_api(body).await?;
+        Self::parse_response(&self.base.model, &json, request_id)
     }
 
     /// Send a single HTTP request to the Anthropic Messages API.
@@ -1562,11 +1569,11 @@ mod tests {
     #[test]
     fn a_configured_temperature_other_than_one_suppresses_the_thinking_parameter() {
         let msgs = || vec![json!({"role": "user", "content": "hi"})];
-        let warm = RequestOptions::new(1024).with_temperature(Some(0.25));
+        let warm = RequestOptions::new(1024).with_temperature(Some(json!(0.25)));
         let body = AnthropicClient::build_request_body("claude-sonnet-4-6", None, msgs(), &[], &warm);
         assert!(body.get("thinking").is_none(), "{body}");
         assert_eq!(body["temperature"], json!(0.25));
-        let one = RequestOptions::new(1024).with_temperature(Some(1.0));
+        let one = RequestOptions::new(1024).with_temperature(Some(json!(1.0)));
         let body = AnthropicClient::build_request_body("claude-sonnet-4-6", None, msgs(), &[], &one);
         assert!(body.get("thinking").is_some(), "{body}");
     }
@@ -1582,7 +1589,7 @@ mod tests {
 
     #[test]
     fn temperature_number_is_sent_and_none_omits_it() {
-        let body = body_with(&RequestOptions::new(1024).with_temperature(Some(0.25)));
+        let body = body_with(&RequestOptions::new(1024).with_temperature(Some(json!(0.25))));
         assert_eq!(body["temperature"], json!(0.25));
         let body = body_with(&RequestOptions::new(1024).with_temperature(None));
         assert!(body.get("temperature").is_none());

@@ -261,7 +261,7 @@ pub struct Config {
     /// (`LLM_REASONING_EFFORT`, `LLM_TITLE_REASONING_EFFORT`,
     /// `LLM_WATCH_REASONING_EFFORT`, `LLM_TEMPERATURE`,
     /// `LLM_TITLE_TEMPERATURE`, `LLM_WATCH_TEMPERATURE`). Unset fields send
-    /// nothing extra; `omit` explicitly omits the field. See
+    /// nothing; set values are passed through as given. See
     /// [`crate::llm_sampling`].
     pub llm_sampling: crate::llm_sampling::LlmSamplingSettings,
 
@@ -692,14 +692,20 @@ fn llm_sampling_from_env() -> crate::llm_sampling::LlmSamplingSettings {
 /// Build the instance LLM tuning from a variable lookup (the process
 /// environment in production; a map in tests).
 fn llm_sampling_from(get: impl Fn(&str) -> Option<String>) -> crate::llm_sampling::LlmSamplingSettings {
-    use crate::llm_sampling::{parse_reasoning_effort as effort, parse_temperature as temp};
+    use crate::llm_sampling::parse_reasoning_effort as effort;
+    // Temperature is passed through as set (no validation); empty text is unset.
+    let temp = |key: &str| {
+        get(key)
+            .filter(|raw| !raw.trim().is_empty())
+            .map(|raw| crate::llm_sampling::temperature_value(&raw))
+    };
     crate::llm_sampling::LlmSamplingSettings {
         reasoning_effort: optional_parsed(&get, "LLM_REASONING_EFFORT", effort),
         title_reasoning_effort: optional_parsed(&get, "LLM_TITLE_REASONING_EFFORT", effort),
         watch_reasoning_effort: optional_parsed(&get, "LLM_WATCH_REASONING_EFFORT", effort),
-        temperature: optional_parsed(&get, "LLM_TEMPERATURE", temp),
-        title_temperature: optional_parsed(&get, "LLM_TITLE_TEMPERATURE", temp),
-        watch_temperature: optional_parsed(&get, "LLM_WATCH_TEMPERATURE", temp),
+        temperature: temp("LLM_TEMPERATURE"),
+        title_temperature: temp("LLM_TITLE_TEMPERATURE"),
+        watch_temperature: temp("LLM_WATCH_TEMPERATURE"),
     }
 }
 

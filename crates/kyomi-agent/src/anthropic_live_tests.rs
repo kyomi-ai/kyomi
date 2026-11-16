@@ -224,12 +224,37 @@ async fn haiku_5_5_background_call_with_small_budget_and_thinking() {
 
 /// Live finding (recorded, not a defect of this change): a model that thinks by
 /// default rejects a temperature other than 1 even when `thinking` is not sent,
-/// so the title/summary defaults (0.3 / 0.0) need `LLM_TITLE_TEMPERATURE=omit` there.
+/// so a configured temperature (any value other than 1) fails there; Kyomi sends none unless one is set.
 #[tokio::test]
 #[ignore = "live: spends money"]
 async fn haiku_5_5_rejects_temperature_without_a_thinking_parameter() {
     let client = AnthropicClient::new(key(), Some("claude-haiku-5-5".into())).unwrap();
-    let opts = RequestOptions::new(512).with_temperature(Some(0.25));
+    let opts = RequestOptions::new(512).with_temperature(Some(json!(0.25)));
     let result = client.complete(&[Message::user("Say hi.")], &[], &opts, &HashMap::new()).await;
     eprintln!("haiku-5-5 with temperature 0.25 and no thinking parameter: {:?}", result.as_ref().map(|_| "accepted").map_err(ToString::to_string));
+}
+
+/// Which temperature/thinking combinations the API accepts (recorded for the docs).
+#[tokio::test]
+#[ignore = "live: spends money"]
+async fn temperature_one_matrix() {
+    for model in ["claude-sonnet-5-5", "claude-haiku-5-5"] {
+        let client = AnthropicClient::new(key(), Some(model.into())).unwrap();
+        for (temp, thinking) in [(Some(json!(1.0)), true), (Some(json!(1.0)), false), (None, false), (Some(json!(0.5)), false)] {
+            let mut opts = RequestOptions::new(64);
+            opts.temperature = temp.clone();
+            let msgs = vec![json!({"role": "user", "content": "Say hi."})];
+            let mut body = AnthropicClient::build_request_body(model, None, msgs, &[], &opts);
+            if thinking {
+                body["thinking"] = json!({"type": "adaptive", "display": "summarized"});
+            } else {
+                body.as_object_mut().unwrap().remove("thinking");
+            }
+            let outcome = match client.try_post_for_live_test(&body).await {
+                Ok(r) => format!("200 (cost ${:.6})", r.cost.unwrap_or(0.0)),
+                Err(e) => format!("{e}"),
+            };
+            eprintln!("MATRIX {model} temperature={temp:?} thinking_param={thinking}: {outcome}");
+        }
+    }
 }

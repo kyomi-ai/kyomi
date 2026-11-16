@@ -1,20 +1,30 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-//! Per-run record of every model call's token usage (KYO-974).
+//! The single metering path for every LLM call (KYO-974).
 //!
-//! One `api_usage_log` row is written per agent run (not per model call), so
-//! the run's cache totals and the per-call breakdown are accumulated here as
-//! each response arrives and written with that row.
+//! Every provider the server constructs is a [`MeteredClient`]: each response is
+//! recorded into a [`UsageLedger`] at the moment the provider returns it, and
+//! [`UsageLedger::bill`] writes the `api_usage_log` row (pricing, markup, BYOK
+//! rule, cache totals, per-call breakdown, run-id idempotency) in one place.
+//! Chat runs, watches, copilot, titles, dashboard summaries and collection
+//! tagging all use it; there is no per-call-type billing logic.
+//!
+//! One row is written per `bill` call (a chat run, one title, one summary, one
+//! tagging pass), summing the model calls recorded since the previous `bill`.
 
 use std::sync::{Arc, Mutex};
 
 use serde_json::json;
 
+use async_trait::async_trait;
 use kyomi_core::models::ApiUsageInsert;
+use kyomi_core::DbPool;
+use tracing::error;
 
-use crate::types::{AgentTokenUsage, LLMResponse, ProviderCallDetail};
+use crate::provider::{LLMProvider, RequestOptions};
+use crate::types::{AgentTokenUsage, LLMResponse, Message, ProviderCallDetail, Tool};
 
-/// Shared handle: the agent loop records into it, `execute_agent_chat` reads it.
+/// Shared handle: a [`MeteredClient`] records into it, [`UsageLedger::bill`] reads it.
 #[derive(Clone, Default)]
 pub struct UsageLedger(Arc<Mutex<Vec<CallRecord>>>);
 
@@ -160,6 +170,133 @@ impl UsageLedger {
             "thinking_tokens": t.reasoning_tokens,
             "calls": per_call,
         }))
+    }
+}
+
+/// Where and for whom a [`UsageLedger::bill`] row is written.
+pub struct BillingContext<'a> {
+    pub db: &'a DbPool,
+    pub user_id: &'a str,
+    pub workspace_id: &'a str,
+    /// Chat session, when the call belongs to one (dashboard summaries do not).
+    pub session_id: Option<&'a str>,
+    /// What made the call (`custom_agent`, `title`, `dashboard_summary`, ...).
+    pub component: &'a str,
+    pub provider: &'a str,
+    pub model: &'a str,
+    /// BYOK rows cost Kyomi credits nothing (the real cost is kept for diagnostics).
+    pub is_byok: bool,
+    /// A durable chat run (and the key its store needs): the write is fenced by
+    /// the run's lease and keyed by run id.
+    pub durable: Option<(&'a crate::adapter::DurableRun, &'a [u8; 32])>,
+}
+
+impl UsageLedger {
+    /// Take the calls recorded since the last `bill`, so each call is billed once.
+    fn drain(&self) -> UsageLedger {
+        UsageLedger(Arc::new(Mutex::new(std::mem::take(&mut *self.lock()))))
+    }
+
+    /// Write the `api_usage_log` row for the calls recorded since the last
+    /// `bill`; no row when none used any tokens. The one writer for every call
+    /// type. A durable run's failure propagates (the lease-fenced write is part
+    /// of the run); any other failure means that call is not billed, so it is
+    /// logged with every value needed to rebuild the row.
+    pub async fn bill(&self, ctx: &BillingContext<'_>) -> kyomi_core::Result<()> {
+        let calls = self.drain();
+        let Some(mut usage) = calls.billing_row(ctx.is_byok, ctx.provider, ctx.model, ctx.component) else {
+            return Ok(());
+        };
+        if let Some((run, encryption_key)) = ctx.durable {
+            usage.request_id = Some(run.run_id.as_str().to_string());
+            return kyomi_auth::conversation_events::ConversationStore::new(
+                ctx.db, encryption_key, ctx.user_id, ctx.workspace_id,
+            )
+            .fenced_api_usage(
+                &run.conversation_id, &run.run_id, &run.lease,
+                chrono::Utc::now().timestamp_millis(), &usage,
+            )
+            .await
+            .map_err(|error| kyomi_core::Error::ServiceUnavailable(error.to_string()));
+        }
+        if let Err(e) = kyomi_core::db_execute!(
+            ctx.db,
+            &ApiUsageInsert::insert_sql(matches!(ctx.db, DbPool::Postgres(_))),
+            ctx.user_id,
+            ctx.workspace_id,
+            ctx.session_id,
+            chrono::Utc::now(),
+            &usage.provider,
+            &usage.model,
+            usage.input_tokens,
+            usage.output_tokens,
+            usage.total_tokens,
+            usage.cost_estimate,
+            &usage.component,
+            usage.provider_cost_usd,
+            usage.cache_creation_input_tokens,
+            usage.cache_read_input_tokens,
+            &usage.extra_metadata,
+            None::<&str>
+        ) {
+            error!(
+                error = %e,
+                user_id = %ctx.user_id,
+                workspace_id = %ctx.workspace_id,
+                session_id = ?ctx.session_id,
+                component = %usage.component,
+                model = %usage.model,
+                input_tokens = usage.input_tokens,
+                output_tokens = usage.output_tokens,
+                cache_creation_input_tokens = usage.cache_creation_input_tokens,
+                cache_read_input_tokens = usage.cache_read_input_tokens,
+                cost_estimate = usage.cost_estimate,
+                "BILLING ROW LOST: failed to log API usage to database"
+            );
+        }
+        Ok(())
+    }
+}
+
+/// A provider whose every response is recorded in a [`UsageLedger`]. The only
+/// way the server obtains an LLM provider (`create_provider_from_workspace`
+/// returns this type), so no call can bypass metering.
+pub struct MeteredClient {
+    inner: Box<dyn LLMProvider>,
+    ledger: UsageLedger,
+}
+
+impl MeteredClient {
+    pub fn new(inner: Box<dyn LLMProvider>) -> Self {
+        Self { inner, ledger: UsageLedger::default() }
+    }
+
+    /// A handle to this client's ledger (shared with the client).
+    pub fn ledger(&self) -> UsageLedger {
+        self.ledger.clone()
+    }
+}
+
+#[async_trait]
+impl LLMProvider for MeteredClient {
+    async fn complete(
+        &self,
+        messages: &[Message],
+        tools: &[Tool],
+        options: &RequestOptions,
+        user_names: &std::collections::HashMap<String, String>,
+    ) -> kyomi_core::Result<LLMResponse> {
+        let response = self.inner.complete(messages, tools, options, user_names).await?;
+        self.ledger.record(self.inner.model(), &response);
+        Ok(response)
+    }
+
+    fn model(&self) -> &str {
+        self.inner.model()
+    }
+
+    fn context_window(&self) -> u32 {
+        self.inner.context_window()
     }
 }
 

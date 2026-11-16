@@ -54,6 +54,8 @@ mod test_support;
 #[cfg(test)]
 mod anthropic_billing_tests;
 #[cfg(test)]
+mod metering_guard_tests;
+#[cfg(test)]
 mod anthropic_live_tests;
 pub mod thinking;
 pub mod tools;
@@ -75,7 +77,7 @@ pub use tools::{
     create_default_registry, AgentTool, ToolContext, ToolFilter, ToolRegistry, WATCH_TOOLS,
 };
 pub use provider::{
-    create_provider, create_provider_from_workspace, resolve_provider_config, LLMProvider,
+    create_provider_from_workspace, resolve_provider_config, LLMProvider,
     LLMProviderConfig, ProviderKind, RequestOptions,
 };
 pub use types::*;

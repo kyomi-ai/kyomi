@@ -34,7 +34,7 @@ use crate::adapter::{AssistantMessagePersistence, ChatAgentAdapter, UserMessageP
 use crate::agent::{AgentConfig, CustomAgent};
 use crate::prompt;
 use crate::provider::{
-    create_provider_from_workspace, resolve_provider_config, ProviderKind,
+    create_provider_from_workspace, resolve_provider_config, LLMProvider, ProviderKind,
 };
 use crate::thinking::AgentThinkingTracker;
 use crate::tools::{create_default_registry, ToolContext, ToolFilter};
@@ -51,10 +51,6 @@ pub struct AgentExecutionConfig {
     pub workspace_id: String,
     pub message: String,
     pub model_name: Option<String>,
-    /// This call site's historical temperature, used when neither the
-    /// workspace nor `LLM_*` env configures one. `None` omits the field.
-    /// The effective value is resolved in [`execute_agent_chat`] (KYO-972).
-    pub temperature: Option<f32>,
     /// Which tuning profile applies: interactive chat, or a watch run.
     pub llm_profile: kyomi_core::llm_sampling::LlmProfile,
     pub is_shared_conversation: bool,
@@ -135,7 +131,6 @@ impl Default for AgentExecutionConfig {
             workspace_id: String::new(),
             message: String::new(),
             model_name: None,
-            temperature: Some(0.7),
             llm_profile: kyomi_core::llm_sampling::LlmProfile::Chat,
             is_shared_conversation: false,
             context_type: "chat".into(),
@@ -339,10 +334,68 @@ fn build_agent_config(
         max_duration: config.max_duration,
         max_total_tokens: config.max_total_tokens,
         max_tokens: config.max_tokens,
-        temperature: sampling.temperature,
+        temperature: sampling.temperature.clone(),
         reasoning_effort: sampling.reasoning_effort.clone(),
         tool_filter,
         ..Default::default()
+    }
+}
+
+/// The vendor usage rows are attributed to. For Kyomi-managed (and all SaaS)
+/// workspaces that is whatever the server env keys resolve to (which may be
+/// OpenAI or Gemini for self-hosted tenants), not the workspace's own provider.
+fn effective_provider_kind(
+    ws_config: &kyomi_auth::workspace_ai_config::WorkspaceAiConfig,
+    app_config: &kyomi_core::Config,
+) -> ProviderKind {
+    use kyomi_auth::workspace_ai_config::WorkspaceAiProvider;
+    let from_workspace = match ws_config.provider {
+        WorkspaceAiProvider::Kyomi | WorkspaceAiProvider::Anthropic => ProviderKind::Anthropic,
+        WorkspaceAiProvider::OpenAI => ProviderKind::OpenAI,
+        WorkspaceAiProvider::Gemini => ProviderKind::Gemini,
+    };
+    if matches!(ws_config.provider, WorkspaceAiProvider::Kyomi) || !app_config.self_hosted {
+        resolve_provider_config(app_config)
+            .map(|c| c.provider)
+            .unwrap_or(from_workspace)
+    } else {
+        from_workspace
+    }
+}
+
+/// Who a short background LLM task (title, summary, tagging) runs for.
+struct BackgroundTask<'a> {
+    db: &'a DbPool,
+    ws_config: &'a kyomi_auth::workspace_ai_config::WorkspaceAiConfig,
+    app_config: &'a kyomi_core::Config,
+    user_id: &'a str,
+    workspace_id: &'a str,
+    session_id: Option<&'a str>,
+}
+
+/// Bill the provider calls a background task made since the last bill, through
+/// the same ledger/writer as a chat run (KYO-974).
+async fn bill_background_call(
+    client: &crate::usage_ledger::MeteredClient,
+    task: &BackgroundTask<'_>,
+    component: &str,
+) {
+    let billed = client
+        .ledger()
+        .bill(&crate::usage_ledger::BillingContext {
+            db: task.db,
+            user_id: task.user_id,
+            workspace_id: task.workspace_id,
+            session_id: task.session_id,
+            component,
+            provider: &effective_provider_kind(task.ws_config, task.app_config).to_string(),
+            model: client.model(),
+            is_byok: task.ws_config.is_byok() && task.app_config.self_hosted,
+            durable: None,
+        })
+        .await;
+    if let Err(e) = billed {
+        warn!(error = %e, component, "Failed to bill background LLM call");
     }
 }
 
@@ -400,37 +453,16 @@ pub async fn execute_agent_chat(
             config.llm_profile,
             &ws_config,
             app_config,
-            config.temperature,
             false,
         );
-        let provider_kind = match ws_config.provider {
-            kyomi_auth::workspace_ai_config::WorkspaceAiProvider::Kyomi
-            | kyomi_auth::workspace_ai_config::WorkspaceAiProvider::Anthropic => {
-                ProviderKind::Anthropic
-            }
-            kyomi_auth::workspace_ai_config::WorkspaceAiProvider::OpenAI => ProviderKind::OpenAI,
-            kyomi_auth::workspace_ai_config::WorkspaceAiProvider::Gemini => ProviderKind::Gemini,
-        };
-        // For Kyomi-mode workspaces, the effective provider kind reflects
-        // whatever the server env keys resolve to (which may be OpenAI or
-        // Gemini for self-hosted tenants). Re-read it from the resolved
-        // fallback in that case so usage logs attribute to the right vendor.
-        let provider_kind = if matches!(
-            ws_config.provider,
-            kyomi_auth::workspace_ai_config::WorkspaceAiProvider::Kyomi
-        ) || !app_config.self_hosted
-        {
-            resolve_provider_config(app_config)
-                .map(|c| c.provider)
-                .unwrap_or(provider_kind)
-        } else {
-            provider_kind
-        };
+        let provider_kind = effective_provider_kind(&ws_config, app_config);
         (client, provider_kind, is_byok, sampling)
     };
     // Read the authoritative model name from the provider (not from config defaults).
     let model_name = client.model().to_string();
     let provider_context_window = client.context_window();
+    // Every provider call of this run is recorded here by the metered client (KYO-974).
+    let usage_ledger = client.ledger();
 
 
     // 3. Create agent config with context-appropriate tool filter.
@@ -481,7 +513,7 @@ pub async fn execute_agent_chat(
     // `format_user_message` renders `[Name (userid)]:`, matching the prompt's
     // message-format contract.
     let user_names = sender_display_names(db, &config.user_id).await?;
-    let mut agent = CustomAgent::new(client, agent_config, registry, tool_context, user_names);
+    let mut agent = CustomAgent::new(Box::new(client), agent_config, registry, tool_context, user_names);
 
     // The system prompt must be the first message in the agent's state.
     // Each LLM provider implementation extracts it and maps it to
@@ -514,10 +546,6 @@ pub async fn execute_agent_chat(
         db.clone(),
         encryption_key.clone(),
     );
-
-    // Per-call usage for this run's `api_usage_log` row (KYO-974).
-    let usage_ledger = crate::usage_ledger::UsageLedger::default();
-    adapter.set_usage_ledger(usage_ledger.clone());
 
     // 8. Resolve the assistant message id.
     //    `AssistantMessagePersistence::tag_id()` covers both arms: for
@@ -650,61 +678,22 @@ pub async fn execute_agent_chat(
         (events, ft, Some(usage))
     };
 
-    // 14b. Log usage to api_usage_log for billing. The 10% markup and the BYOK
-    // rule (`cost_estimate = 0`, real cost in `provider_cost_usd`) live in
-    // `UsageLedger::billing_row`. The ledger sees every provider call (incl. the max-iterations wrap-up) and is
-    // the single source for the row's tokens, cost and cache totals (KYO-974).
-    if let Some(mut usage) = usage_ledger.billing_row(
-        is_byok,
-        &provider_kind.to_string(),
-        &model_name,
-        &config.component,
-    ) {
-        if let Some(run) = config.assistant_message_persistence.durable_run() {
-            usage.request_id = Some(run.run_id.as_str().to_string());
-            kyomi_auth::conversation_events::ConversationStore::new(
-                db, encryption_key, &config.user_id, &config.workspace_id,
-            ).fenced_api_usage(
-                &run.conversation_id, &run.run_id, &run.lease,
-                chrono::Utc::now().timestamp_millis(), &usage,
-            ).await.map_err(|error| kyomi_core::Error::ServiceUnavailable(error.to_string()))?;
-        } else if let Err(e) = kyomi_core::db_execute!(
+    // 14b. Bill the run: the metered client recorded every provider call (incl. the
+    // max-iterations wrap-up) and `UsageLedger::bill` is the one writer of
+    // `api_usage_log` rows for every call type (KYO-974).
+    usage_ledger
+        .bill(&crate::usage_ledger::BillingContext {
             db,
-            &kyomi_core::models::ApiUsageInsert::insert_sql(matches!(db, DbPool::Postgres(_))),
-            &config.user_id,
-            &config.workspace_id,
-            &config.session_id as &str,
-            chrono::Utc::now(),
-            &usage.provider,
-            &usage.model,
-            usage.input_tokens,
-            usage.output_tokens,
-            usage.total_tokens,
-            usage.cost_estimate,
-            &usage.component,
-            usage.provider_cost_usd,
-            usage.cache_creation_input_tokens,
-            usage.cache_read_input_tokens,
-            &usage.extra_metadata,
-            None::<&str>
-        ) {
-            // The only legacy billing write: a failure means this run is not billed.
-            // Log everything needed to reconstruct the row by hand.
-            error!(
-                error = %e,
-                user_id = %config.user_id,
-                workspace_id = %config.workspace_id,
-                session_id = %config.session_id,
-                model = %usage.model,
-                input_tokens = usage.input_tokens,
-                output_tokens = usage.output_tokens,
-                cache_creation_input_tokens = usage.cache_creation_input_tokens,
-                cache_read_input_tokens = usage.cache_read_input_tokens,
-                cost_estimate = usage.cost_estimate,
-                "BILLING ROW LOST: failed to log API usage to database"
-            );
-        }
-    }
+            user_id: &config.user_id,
+            workspace_id: &config.workspace_id,
+            session_id: Some(&config.session_id),
+            component: &config.component,
+            provider: &provider_kind.to_string(),
+            model: &model_name,
+            is_byok,
+            durable: config.assistant_message_persistence.durable_run().map(|run| (run, &**encryption_key)),
+        })
+        .await?;
 
     // 14. Finalize the assistant message: attach metadata (model, thinking
     //     events, token usage) and, via `MessageStatus`, the turn's
@@ -889,7 +878,7 @@ fn looks_like_title(s: &str) -> bool {
 }
 
 /// Internal title generation logic.
-async fn generate_title_inner(
+pub(crate) async fn generate_title_inner(
     db: &DbPool,
     ws_manager: &WebSocketManager,
     session_id: &str,
@@ -948,7 +937,7 @@ async fn generate_title_inner(
     }
 
     let client = create_provider_from_workspace(&ws_config, app_config)?;
-    let options = crate::sampling::background_options(&ws_config, app_config, 0.3, 512);
+    let options = crate::sampling::background_options(&ws_config, app_config, 512);
 
     let user_turn = format!(
         "First message of the conversation (title its topic, do not answer it):\n\"\"\"\n{first_message}\n\"\"\"",
@@ -963,6 +952,12 @@ async fn generate_title_inner(
     // Use a generous token budget to accommodate models that use chain-of-thought
     // thinking (e.g. Qwen3) — the thinking tokens are stripped in parse_response.
     let response = client.complete(&messages, &tools, &options, &user_names).await?;
+    bill_background_call(
+        &client,
+        &BackgroundTask { db, ws_config: &ws_config, app_config, user_id, workspace_id, session_id: Some(session_id) },
+        "title",
+    )
+    .await;
 
     // Clean up the title: remove quotes, hashes, trim, and truncate to fit
     // the DB column (varchar 255).
@@ -1221,8 +1216,8 @@ async fn generate_dashboard_summary_inner(
     }
 
     let client = create_provider_from_workspace(&ws_config, app_config)?;
-    let options = crate::sampling::background_options(&ws_config, app_config, 0.3, 512);
-    let tag_options = crate::sampling::background_options(&ws_config, app_config, 0.0, 256);
+    let options = crate::sampling::background_options(&ws_config, app_config, 512);
+    let tag_options = crate::sampling::background_options(&ws_config, app_config, 256);
 
     let doc_type_label = if doc_type == "knowledge" { "document" } else { "dashboard" };
     let system_prompt = format!(
@@ -1247,6 +1242,15 @@ async fn generate_dashboard_summary_inner(
     ];
 
     let response = client.complete(&messages, &[], &options, &HashMap::new()).await?;
+    let background = BackgroundTask {
+        db,
+        ws_config: &ws_config,
+        app_config,
+        user_id,
+        workspace_id,
+        session_id: None,
+    };
+    bill_background_call(&client, &background, "dashboard_summary").await;
 
     let mut summary = response.content.trim().trim_matches('"').trim().to_string();
     if summary.is_empty() { return Ok(()); }
@@ -1339,6 +1343,7 @@ async fn generate_dashboard_summary_inner(
             let tag_response = client
                 .complete(&tag_messages, &[], &tag_options, &HashMap::new())
                 .await;
+            bill_background_call(&client, &background, "collection_tag").await;
 
             match tag_response {
                 Ok(response) => {
@@ -1662,7 +1667,6 @@ mod tests {
     #[test]
     fn agent_execution_config_defaults() {
         let config = AgentExecutionConfig::default();
-        assert_eq!(config.temperature, Some(0.7));
         assert_eq!(config.max_iterations, 25);
         assert_eq!(config.max_duration, Some(Duration::from_secs(15 * 60)));
         assert_eq!(config.max_total_tokens, Some(1_500_000));
@@ -1722,7 +1726,6 @@ mod tests {
         assert_eq!(config.workspace_id, "");
         assert_eq!(config.message, "");
         assert!(config.model_name.is_none());
-        assert_eq!(config.temperature, Some(0.7));
         assert!(!config.is_shared_conversation);
         assert_eq!(config.context_type, "chat");
         assert!(config.workspace_user_ids.is_none());
@@ -1756,7 +1759,6 @@ mod tests {
             workspace_id: "ws-789".into(),
             message: "Show me revenue".into(),
             model_name: Some("claude-haiku-4-5-20251001".into()),
-            temperature: Some(0.3),
             llm_profile: kyomi_core::llm_sampling::LlmProfile::Chat,
             is_shared_conversation: true,
             context_type: "copilot".into(),
@@ -2226,7 +2228,6 @@ mod tests {
             max_duration: Some(Duration::from_secs(123)),
             max_total_tokens: Some(654_321),
             max_tokens: 9_999,
-            temperature: Some(0.42),
             ..AgentExecutionConfig::default()
         };
         let tool_filter = ToolFilter {
@@ -2237,7 +2238,7 @@ mod tests {
 
         let sampling = kyomi_core::llm_sampling::ResolvedSampling {
             reasoning_effort: Some("max".into()),
-            temperature: Some(0.42),
+            temperature: Some(serde_json::json!(0.42)),
         };
         let agent_config = build_agent_config(&config, tool_filter, &sampling);
 
@@ -2249,7 +2250,87 @@ mod tests {
             "AgentExecutionConfig::max_tokens must reach AgentConfig::max_tokens \
              (KYO-534) — this is the seam client.complete() actually reads"
         );
-        assert_eq!(agent_config.temperature, Some(0.42));
+        assert_eq!(agent_config.temperature, Some(serde_json::json!(0.42)));
         assert_eq!(agent_config.reasoning_effort.as_deref(), Some("max"));
+    }
+
+    /// A one-connection-at-a-time HTTP server answering every request with `body`
+    /// as an Anthropic Messages API response; returns its base URL.
+    async fn mock_anthropic(body: serde_json::Value) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let payload = body.to_string();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else { return };
+                let payload = payload.clone();
+                tokio::spawn(async move {
+                    let mut buf = Vec::new();
+                    let mut chunk = [0u8; 4096];
+                    // Read headers, then the declared body, so the client is not cut off mid-write.
+                    loop {
+                        let n = stream.read(&mut chunk).await.unwrap_or(0);
+                        if n == 0 { break; }
+                        buf.extend_from_slice(&chunk[..n]);
+                        let text = String::from_utf8_lossy(&buf).to_string();
+                        if let Some(end) = text.find("\r\n\r\n") {
+                            let len = text[..end].to_ascii_lowercase().split("content-length:").nth(1)
+                                .and_then(|r| r.split("\r\n").next()).and_then(|v| v.trim().parse::<usize>().ok()).unwrap_or(0);
+                            if buf.len() >= end + 4 + len { break; }
+                        }
+                    }
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\nrequest-id: req_mock\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{payload}",
+                        payload.len()
+                    );
+                    let _ = stream.write_all(response.as_bytes()).await;
+                });
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    /// The real `generate_title_inner` call site, against a mock Anthropic API,
+    /// writes exactly one priced `title` usage row that credits/caps count
+    /// (KYO-974: background calls are metered through the same path as chat).
+    #[tokio::test]
+    async fn title_generation_writes_one_metered_usage_row() {
+        let base_url = mock_anthropic(serde_json::json!({
+            "id": "msg_title",
+            "content": [{"type": "text", "text": "Revenue by Region"}],
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 1000, "output_tokens": 20}
+        }))
+        .await;
+        let db = kyomi_test_db::test_pool().await;
+        let DbPool::Sqlite(sq) = &db else { panic!("sqlite fixture") };
+        kyomi_test_db::seed_user(sq, "u1", "u1@example.com").await;
+        kyomi_test_db::seed_workspace(sq, "w1", "u1").await;
+        kyomi_core::db_execute!(&db, "INSERT INTO chat_sessions (session_id,user_id,workspace_id) VALUES ('s1','u1','w1')").unwrap();
+        let mut app_config = kyomi_core::Config::test_config();
+        app_config.llm_provider = Some("anthropic".into());
+        app_config.llm_api_key = Some("test-key".into());
+        app_config.llm_base_url = Some(base_url);
+        app_config.llm_model = Some("claude-haiku-5-5".into());
+        let manager = kyomi_auth::websocket::WebSocketManager::new(None, db.clone());
+
+        generate_title_inner(&db, &manager, "s1", "u1", "w1", "revenue by region?", &app_config)
+            .await
+            .unwrap();
+
+        let rows: Vec<(String, String, Option<String>, i32, f64)> = sqlx::query_as(
+            "SELECT component, model, session_id, input_tokens, cost_estimate FROM api_usage_log",
+        )
+        .fetch_all(sq)
+        .await
+        .unwrap();
+        assert_eq!(rows.len(), 1, "exactly one usage row: {rows:?}");
+        let (component, model, session, input, cost) = &rows[0];
+        assert_eq!((component.as_str(), model.as_str()), ("title", "claude-haiku-5-5"));
+        assert_eq!(session.as_deref(), Some("s1"));
+        assert_eq!(*input, 1000);
+        // Haiku 5.5: 1000*$0.10 + 20*$0.50 = $0.00011, x1.1 markup.
+        assert!((cost - 0.00011 * 1.1).abs() < 1e-9, "priced and marked up: {cost}");
     }
 }

@@ -228,8 +228,8 @@ impl OpenAIProvider {
             body["tools"] = json!(Self::convert_tools_to_openai(tools));
         }
 
-        if let Some(temp) = options.temperature {
-            body["temperature"] = json!(temp);
+        if let Some(temp) = &options.temperature {
+            body["temperature"] = temp.clone();
         }
 
         // Top-level `reasoning_effort` (OpenAI, OpenRouter, DeepSeek and most
@@ -1546,8 +1546,8 @@ mod tests {
 
     #[test]
     fn temperature_number_is_sent_and_none_omits_it() {
-        let body = body_with(&RequestOptions::new(1024).with_temperature(Some(0.1)));
-        assert_eq!(body["temperature"], json!(0.1f32));
+        let body = body_with(&RequestOptions::new(1024).with_temperature(Some(json!(0.1))));
+        assert_eq!(body["temperature"], json!(0.1));
         let body = body_with(&RequestOptions::new(1024).with_temperature(None));
         assert!(body.get("temperature").is_none());
     }

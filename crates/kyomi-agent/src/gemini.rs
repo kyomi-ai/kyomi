@@ -234,8 +234,8 @@ impl GeminiProvider {
         let mut gen_config = json!({
             "maxOutputTokens": options.max_tokens,
         });
-        if let Some(temp) = options.temperature {
-            gen_config["temperature"] = json!(temp);
+        if let Some(temp) = &options.temperature {
+            gen_config["temperature"] = temp.clone();
         }
         if let Some(effort) = &options.reasoning_effort {
             gen_config["thinkingConfig"] = match effort.parse::<i64>() {
@@ -1317,7 +1317,7 @@ mod tests {
 
     #[test]
     fn temperature_number_is_sent_and_none_omits_it() {
-        let g = GeminiProvider::build_generation_config(&RequestOptions::new(512).with_temperature(Some(0.5)));
+        let g = GeminiProvider::build_generation_config(&RequestOptions::new(512).with_temperature(Some(json!(0.5))));
         assert_eq!(g["temperature"], json!(0.5));
         let g = GeminiProvider::build_generation_config(&RequestOptions::new(512).with_temperature(None));
         assert!(g.get("temperature").is_none());

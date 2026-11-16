@@ -36,10 +36,12 @@ use crate::types::{LLMResponse, Message, Tool};
 /// omits the field from the request body entirely (KYO-972). `reasoning_effort`
 /// is an opaque string passed to the provider unchanged — each adapter decides
 /// the wire field and whether a numeric value is sent as a number.
+/// `temperature` is passed through exactly as configured (a JSON number, or a
+/// string left for the provider to reject; KYO-974).
 #[derive(Debug, Clone, PartialEq)]
 pub struct RequestOptions {
-    /// Sampling temperature; `None` omits the field.
-    pub temperature: Option<f32>,
+    /// Sampling temperature as configured; `None` omits the field.
+    pub temperature: Option<serde_json::Value>,
     /// Reasoning effort / thinking level; `None` omits the field.
     pub reasoning_effort: Option<String>,
     /// Maximum tokens to generate (reasoning tokens count against it).
@@ -53,7 +55,7 @@ impl RequestOptions {
     }
 
     /// Builder: set the temperature.
-    pub fn with_temperature(mut self, temperature: Option<f32>) -> Self {
+    pub fn with_temperature(mut self, temperature: Option<serde_json::Value>) -> Self {
         self.temperature = temperature;
         self
     }
@@ -328,7 +330,7 @@ impl LLMProvider for GeminiProvider {
 ///
 /// Supports Anthropic, OpenAI, and Gemini providers. The provider kind
 /// determines which concrete implementation is instantiated.
-pub fn create_provider(
+pub(crate) fn create_provider(
     config: LLMProviderConfig,
 ) -> kyomi_core::Result<Box<dyn LLMProvider>> {
     match config.provider {
@@ -364,7 +366,8 @@ pub fn create_provider(
 // Workspace-scoped factory (BYOK)
 // ---------------------------------------------------------------------------
 
-/// Build an [`LLMProvider`] from a workspace AI config.
+/// Build the metered [`LLMProvider`] for a workspace AI config. Every response
+/// it returns is recorded for billing (see [`crate::usage_ledger`]).
 ///
 /// * **Kyomi mode** (`ws_config.provider == WorkspaceAiProvider::Kyomi`):
 ///   uses the server's env-configured keys and model (`LLM_PROVIDER`,
@@ -374,6 +377,14 @@ pub fn create_provider(
 /// * **BYOK mode** (anthropic / openai / gemini): uses the workspace's
 ///   decrypted API key, model, and optional base URL.
 pub fn create_provider_from_workspace(
+    ws_config: &kyomi_auth::workspace_ai_config::WorkspaceAiConfig,
+    fallback_config: &kyomi_core::Config,
+) -> kyomi_core::Result<crate::usage_ledger::MeteredClient> {
+    build_provider_from_workspace(ws_config, fallback_config)
+        .map(crate::usage_ledger::MeteredClient::new)
+}
+
+fn build_provider_from_workspace(
     ws_config: &kyomi_auth::workspace_ai_config::WorkspaceAiConfig,
     fallback_config: &kyomi_core::Config,
 ) -> kyomi_core::Result<Box<dyn LLMProvider>> {

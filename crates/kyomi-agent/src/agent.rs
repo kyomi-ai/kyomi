@@ -337,8 +337,8 @@ pub struct AgentConfig {
     /// price. Do not "fix" this to include cache reads without re-deriving
     /// the cost model first.
     pub max_total_tokens: Option<u64>,
-    /// Sampling temperature (0.0-1.0). `None` omits the field.
-    pub temperature: Option<f32>,
+    /// Sampling temperature, passed through as configured. `None` omits the field.
+    pub temperature: Option<serde_json::Value>,
     /// Reasoning effort passed to the provider unchanged. `None` omits it.
     pub reasoning_effort: Option<String>,
     /// Maximum tokens to generate per LLM call.
@@ -359,7 +359,7 @@ impl AgentConfig {
     /// The per-request generation options this config asks providers for.
     pub fn request_options(&self) -> crate::provider::RequestOptions {
         crate::provider::RequestOptions::new(self.max_tokens)
-            .with_temperature(self.temperature)
+            .with_temperature(self.temperature.clone())
             .with_reasoning_effort(self.reasoning_effort.clone())
     }
 }
@@ -477,8 +477,6 @@ pub struct CustomAgent {
     tool_context: ToolContext,
     /// Map of user_id -> display name for message attribution.
     user_names: HashMap<String, String>,
-    /// Records every model call's usage for the run's `api_usage_log` row (KYO-974).
-    usage_ledger: Option<crate::usage_ledger::UsageLedger>,
 }
 
 impl CustomAgent {
@@ -499,13 +497,7 @@ impl CustomAgent {
             registry,
             tool_context,
             user_names,
-            usage_ledger: None,
         }
-    }
-
-    /// Record every model call's usage into `ledger`.
-    pub fn set_usage_ledger(&mut self, ledger: crate::usage_ledger::UsageLedger) {
-        self.usage_ledger = Some(ledger);
     }
 
     // -----------------------------------------------------------------------
@@ -1155,14 +1147,11 @@ impl CustomAgent {
     /// Account for one model call the moment the provider returns it, before any
     /// cancellation check or persistence step can drop a response that was paid
     /// for (KYO-974). Every call goes through here: loop turns and the
-    /// max-iterations wrap-up, on both the legacy and the durable path. Records
-    /// the run's usage ledger (the source of `api_usage_log`), feeds the usage
-    /// callback, and on the legacy path the thinking tracker. The durable path's
-    /// tracker is fed by the committed usage event instead.
+    /// max-iterations wrap-up, on both the legacy and the durable path. Feeds the
+    /// usage callback and, on the legacy path, the thinking tracker (the durable
+    /// path's tracker is fed by the committed usage event). Billing itself is the
+    /// metered client's job: it records every response inside the provider call.
     async fn account_usage(&self, response: &crate::types::LLMResponse) {
-        if let Some(ledger) = &self.usage_ledger {
-            ledger.record(self.client.model(), response);
-        }
         let total_input = response.usage.input_tokens
             + response.usage.cache_creation_input_tokens
             + response.usage.cache_read_input_tokens;
@@ -2416,6 +2405,17 @@ Chart 2:\n```chartml\ntype: chart\nversion: 1\ndata:\n  datasource: test\n  quer
         script: Vec<Reply>,
         after_script: Reply,
     ) -> (CustomAgent, Arc<Mutex<Vec<RecordedCall>>>) {
+        let (agent, calls, _ledger) = scripted_metered_agent(config, script, after_script).await;
+        (agent, calls)
+    }
+
+    /// As [`scripted_agent_with_config`], with the provider wrapped in the same
+    /// `MeteredClient` production uses, and its ledger returned.
+    async fn scripted_metered_agent(
+        config: AgentConfig,
+        script: Vec<Reply>,
+        after_script: Reply,
+    ) -> (CustomAgent, Arc<Mutex<Vec<RecordedCall>>>, crate::usage_ledger::UsageLedger) {
         let calls = Arc::new(Mutex::new(Vec::new()));
         let provider = ScriptedProvider {
             script: Mutex::new(script.into()),
@@ -2426,15 +2426,17 @@ Chart 2:\n```chartml\ntype: chart\nversion: 1\ndata:\n  datasource: test\n  quer
         let mut registry = ToolRegistry::new();
         registry.register(Arc::new(NoopTool));
 
+        let metered = crate::usage_ledger::MeteredClient::new(Box::new(provider));
+        let ledger = metered.ledger();
         let agent = CustomAgent::new(
-            Box::new(provider),
+            Box::new(metered),
             config,
             Arc::new(registry),
             test_tool_context().await,
             HashMap::new(),
         );
 
-        (agent, calls)
+        (agent, calls, ledger)
     }
 
     /// Build an agent wired to a scripted provider and a one-tool registry,
@@ -3245,14 +3247,12 @@ Second chart:\n{CHARTML_STRIPPED_NOTE}\nDone."
             cache_read_input_tokens: r,
             reasoning_tokens: 0,
         };
-        let (mut agent, _calls) = scripted_agent_with_config(
+        let (mut agent, _calls, ledger) = scripted_metered_agent(
             AgentConfig::default(),
             vec![Reply::ToolCallWithUsage(usage(5000, 0)), Reply::ToolCallWithUsage(usage(0, 5000))],
             Reply::Text("done".into()),
         )
         .await;
-        let ledger = crate::usage_ledger::UsageLedger::default();
-        agent.set_usage_ledger(ledger.clone());
 
         agent.chat("hi", CancellationToken::new(), None, None, None).await.unwrap();
 
@@ -3266,14 +3266,12 @@ Second chart:\n{CHARTML_STRIPPED_NOTE}\nDone."
     /// (the lifecycle review's blocker: it used to bypass accounting).
     #[tokio::test]
     async fn wrap_up_call_after_max_iterations_is_accounted() {
-        let (mut agent, calls) = scripted_agent_with_config(
+        let (mut agent, calls, ledger) = scripted_metered_agent(
             AgentConfig { max_iterations: 2, max_duration: None, ..Default::default() },
             vec![Reply::ToolCall; 2],
             Reply::Text("wrapped up".into()),
         )
         .await;
-        let ledger = crate::usage_ledger::UsageLedger::default();
-        agent.set_usage_ledger(ledger.clone());
         let tokens = Arc::new(Mutex::new(0u32));
         let sink = tokens.clone();
         agent.callbacks_mut().on_token_usage = Some(Box::new(move |_, _, _| *sink.lock().unwrap() += 1));
