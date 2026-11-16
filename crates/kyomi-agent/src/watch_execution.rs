@@ -1067,7 +1067,7 @@ async fn bill_batch_run(db: &DbPool, watch: &Watch, execution_id: i32, run: &Run
         model: &model,
         component: "kyomi_watch",
     };
-    if let Err(e) = watch_batch_service::bill_run_once(
+    match watch_batch_service::bill_run_once(
         db,
         execution_id,
         crate::batch_run::instance_id(),
@@ -1077,8 +1077,11 @@ async fn bill_batch_run(db: &DbPool, watch: &Watch, execution_id: i32, run: &Run
     )
     .await
     {
+        Ok(true) => {}
+        // Already billed by an earlier step of this run, or no longer ours.
+        Ok(false) => info!(execution_id, "Batch run usage was not billed here (already billed, or the lease is no longer held)"),
         // The transaction rolled back: nothing was claimed or written.
-        warn!(execution_id, error = %e, "Failed to bill a batch run");
+        Err(e) => warn!(execution_id, error = %e, "Failed to bill a batch run"),
     }
 }
 
