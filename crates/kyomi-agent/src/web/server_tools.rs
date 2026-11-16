@@ -306,6 +306,11 @@ pub fn append_footer(content: &str, footer: &str) -> String {
         if run < 3 {
             continue;
         }
+        // A backtick opener whose info string contains a backtick is an inline code
+        // span, not a fence (CommonMark).
+        if marker == '`' && open.is_none() && rest[run..].contains('`') {
+            continue;
+        }
         match open {
             None => open = Some((marker, run)),
             Some((m, len)) if m == marker && run >= len && rest[run..].trim().is_empty() => open = None,
@@ -573,6 +578,7 @@ mod tests {
         assert_eq!(append_footer("~~~\ncode", footer), format!("~~~\ncode\n~~~{footer}"));
         assert_eq!(append_footer("~~~\ncode\n```", footer), format!("~~~\ncode\n```\n~~~{footer}"));
         assert_eq!(append_footer("~~~\ncode\n~~~", footer), format!("~~~\ncode\n~~~{footer}"));
+        assert_eq!(append_footer("```x``` inline code span, not a fence", footer), format!("```x``` inline code span, not a fence{footer}"));
         assert_eq!(append_footer("    ```\nindented code, not a fence", footer), format!("    ```\nindented code, not a fence{footer}"));
     }
 
