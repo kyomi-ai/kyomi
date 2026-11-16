@@ -69,6 +69,22 @@ path is relative (`.githooks`), git resolves it against each worktree's own
 top level, so one run correctly activates every worktree's own tracked hooks
 (KYO-358). The script is idempotent; re-run it any time you're unsure.
 
+### Worktrees (one session = one worktree)
+
+Work in the worktree your session already has (the Claude desktop app and
+`claude --worktree` create it). **Do not `git worktree add` a second, sibling
+`kyomi-wt-*` tree** — it duplicates cold builds and strands work. Only create one
+by hand when you are in the canonical clone and no session worktree exists.
+First thing in any worktree, run `scripts/worktree-setup.sh`: it links `.env`,
+creates `crates/kyomi-ui/dist`, fast-forwards a stale base to `origin/main`,
+checks sccache, and prints `WORKTREE=` and `PORT=` (3100 + ticket number % 900).
+
+Do not put local overrides in `Cargo.toml`: a relative `[patch.crates-io]` path
+such as `../chartml/...` only resolves for a sibling layout. Put the patch, with
+**absolute** paths, in `~/.cargo/config.toml` instead; it applies to every
+worktree and is never committed. Do not share one `CARGO_TARGET_DIR` between
+concurrent worktrees; sccache already shares compiled crates.
+
 ### Review after a rebase
 
 Before pushing a rebased branch, ask the code-review-architect to review the

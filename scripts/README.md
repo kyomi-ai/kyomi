@@ -13,6 +13,11 @@ All scripts are organized by environment. **Every script is environment-specific
   in `.githooks/`; the setting is shared with every worktree of that clone.
   See root `CLAUDE.md` "Setup".
 
+- **`worktree-setup.sh`** - Run first in any worktree (idempotent). Links
+  `.env`, creates `crates/kyomi-ui/dist`, fast-forwards a stale base, checks
+  sccache and relative `[patch]` paths, and prints `WORKTREE=`/`PORT=`. See
+  root `CLAUDE.md` "Worktrees".
+
 - **`mine-review-logs.sh`** - Locates recent code-review logs for the
   coding-standards-mining step (KYO-373 / KYO-386), from any worktree.
   `docs/review-logs/` is **intentionally untracked and machine-local** —

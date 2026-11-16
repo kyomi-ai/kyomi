@@ -695,6 +695,7 @@ jobs:
             scripts/audit-agent-run-deaths-test.sh
             scripts/reconcile-merged-tickets-test.sh
             scripts/preflight-clippy-test.sh
+            scripts/worktree-setup-test.sh
             scripts/lib/stale-tooling-guard-test.sh
             scripts/lint/check-real-identifiers-test.sh
             scripts/lint/check-server-fns-test.sh
