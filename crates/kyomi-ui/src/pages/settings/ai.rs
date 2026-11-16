@@ -24,13 +24,12 @@ use kyomi_types::Permission;
 
 use crate::components::{
     ActionStatus, Alert, AlertDescription, AlertTitle, AlertVariant, Button, Card, CardContent,
-    Skeleton, StatusBadge, StatusBadgeVariant, INPUT_CLASS,
+    Label, Skeleton, StatusBadge, StatusBadgeVariant, INPUT_CLASS,
 };
 use crate::server_fns::ai::{
-    get_llm_tuning, get_resolved_ai_provider, list_openrouter_models, LlmTuningValues,
-    LlmTuningView, ResolvedAiProviderView,
+    get_llm_tuning, get_resolved_ai_provider, list_openrouter_models, update_llm_tuning,
+    LlmTuningValues, LlmTuningView, ResolvedAiProviderView,
 };
-use crate::server_fns::workspace::update_llm_tuning;
 use crate::server_fns::context::UserContext;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -290,8 +289,8 @@ fn TuningField(
     list_id: &'static str,
 ) -> impl IntoView {
     view! {
-        <label class="block space-y-1">
-            <span class="text-sm text-foreground">{label}</span>
+        <div class="space-y-2">
+            <Label>{label}</Label>
             <input
                 type="text"
                 class=INPUT_CLASS
@@ -301,8 +300,8 @@ fn TuningField(
                 prop:value=move || value.get()
                 on:input=move |ev| value.set(event_target_value(&ev))
             />
-            <span class="block text-xs text-muted-foreground">{hint}</span>
-        </label>
+            <p class="text-xs text-muted-foreground">{hint}</p>
+        </div>
     }
 }
 
@@ -363,7 +362,7 @@ fn LlmTuningForm(
     data: LlmTuningView,
     model_efforts: Option<(Vec<String>, Option<String>)>,
 ) -> impl IntoView {
-    let LlmTuningView { provider, workspace, instance } = data;
+    let LlmTuningView { provider, workspace, instance, warnings } = data;
 
     let (mut efforts, default_effort) = match model_efforts {
         Some((supported, default)) if !supported.is_empty() => (supported, default),
@@ -390,7 +389,7 @@ fn LlmTuningForm(
         None => "provider default".to_string(),
     };
     let ph_reasoning = placeholder(&instance.reasoning_effort, &effort_default);
-    let ph_title_reasoning = placeholder(&instance.title_reasoning_effort, "low with a title model, else none");
+    let ph_title_reasoning = placeholder(&instance.title_reasoning_effort, "low if a title model and chat effort are set, else none");
     let ph_watch_reasoning = placeholder(&instance.watch_reasoning_effort, "same as chat");
     let ph_temperature = placeholder(&instance.temperature, "0.7 (chat), 0.1 (copilot)");
     let ph_title_temperature = placeholder(&instance.title_temperature, "0.3");
@@ -416,6 +415,17 @@ fn LlmTuningForm(
     };
 
     view! {
+        {(!warnings.is_empty()).then(|| view! {
+            <Alert variant=AlertVariant::Warning>
+                <AlertTitle>"Some saved values are invalid and are being ignored"</AlertTitle>
+                <AlertDescription>
+                    <ul class="list-disc pl-5">
+                        {warnings.iter().map(|w| view! { <li class="font-mono text-xs">{w.clone()}</li> }).collect_view()}
+                    </ul>
+                    <p class="mt-2">"Fix or clear the fields below and save."</p>
+                </AlertDescription>
+            </Alert>
+        })}
         <datalist id="llm-effort-suggestions">
             {efforts.into_iter().map(|v| view! { <option value=v></option> }).collect_view()}
         </datalist>

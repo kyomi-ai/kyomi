@@ -108,6 +108,10 @@ pub struct WorkspaceAiConfig {
     /// deployments, like `default_model`: SaaS servers control the model and
     /// its tuning entirely.
     pub sampling: kyomi_core::llm_sampling::LlmSamplingSettings,
+    /// Stored sampling values that failed validation and were ignored (one
+    /// `key: reason` entry each). Surfaced on the AI settings page so an admin
+    /// can repair them; never fatal.
+    pub sampling_warnings: Vec<String>,
 }
 
 impl WorkspaceAiConfig {
@@ -169,10 +173,6 @@ pub enum WorkspaceAiConfigError {
     /// [`crate::workspace_secrets`].
     #[error(transparent)]
     Secret(#[from] WorkspaceSecretError),
-
-    /// A stored reasoning-effort / temperature value failed validation.
-    #[error("invalid stored LLM setting: {0}")]
-    InvalidSampling(#[from] kyomi_core::llm_sampling::InvalidSetting),
 
     /// Wraps a serde_json failure serialising the settings JSON blob.
     #[error("settings JSON serialisation failed: {0}")]
@@ -244,7 +244,14 @@ pub async fn load(
     };
 
     let context_window = read_context_window(&row.settings);
-    let sampling = kyomi_core::llm_sampling::read_workspace_sampling(&row.settings)?;
+    let (sampling, sampling_warnings) =
+        kyomi_core::llm_sampling::read_workspace_sampling(&row.settings);
+    for warning in &sampling_warnings {
+        tracing::warn!(
+            workspace_id = %workspace_id,
+            "ignoring invalid stored LLM tuning value: {warning}"
+        );
+    }
 
     Ok(WorkspaceAiConfig {
         provider,
@@ -254,6 +261,7 @@ pub async fn load(
         title_model,
         context_window,
         sampling,
+        sampling_warnings,
     })
 }
 
@@ -594,6 +602,7 @@ mod tests {
             title_model: None,
         context_window: 0,
         sampling: Default::default(),
+        sampling_warnings: Vec::new(),
         };
         assert!(!cfg.is_byok());
     }
@@ -613,6 +622,7 @@ mod tests {
                 title_model: None,
             context_window: 0,
             sampling: Default::default(),
+        sampling_warnings: Vec::new(),
             };
             assert!(cfg.is_byok(), "expected BYOK for {p:?}");
         }

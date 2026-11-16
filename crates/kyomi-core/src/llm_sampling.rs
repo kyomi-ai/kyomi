@@ -25,7 +25,15 @@ pub const OMIT_KEYWORD: &str = "omit";
 const MAX_EFFORT_LEN: usize = 32;
 
 /// Default reasoning effort for background calls (titles, summaries) when a
-/// title model is configured and no explicit title effort is set.
+/// title model is configured, no explicit title effort is set, **and** a chat
+/// reasoning effort is configured.
+///
+/// The last condition is what keeps existing installs unchanged: with no
+/// effort configured anywhere, nothing is sent, so a non-reasoning title model
+/// (e.g. `gpt-4o-mini`, a Haiku model, a local backend) never receives a field
+/// it may reject. Once an operator has configured an effort for chat, the
+/// backend is known to accept the field and titles default to `low` instead of
+/// inheriting the chat value.
 pub const DEFAULT_TITLE_REASONING_EFFORT: &str = "low";
 
 /// Default temperature for interactive chat, Slack and watches.
@@ -160,7 +168,11 @@ pub struct ResolvedSampling {
 /// * `call_default_temperature` is the call site's historical value (0.7 chat,
 ///   0.1 copilot, 0.3 titles) used when nothing is configured.
 /// * Reasoning effort has no default (unset = omit the field), except title
-///   calls, which default to `low` when `title_model_configured`.
+///   calls, which default to `low` when `title_model_configured` and a chat
+///   effort value is configured (see [`DEFAULT_TITLE_REASONING_EFFORT`]).
+///   Title calls never inherit the chat value itself.
+/// * A watch value, when present, wins at *either* layer before the chat
+///   value is consulted: workspace watch, env watch, workspace chat, env chat.
 pub fn resolve_sampling(
     profile: LlmProfile,
     workspace: &LlmSamplingSettings,
@@ -184,7 +196,15 @@ pub fn resolve_sampling(
         .cloned();
     let reasoning_effort = match effort {
         Some(setting) => setting.into_option(),
-        None if profile == LlmProfile::Title && title_model_configured => {
+        None if profile == LlmProfile::Title
+            && title_model_configured
+            && matches!(
+                [workspace, env]
+                    .iter()
+                    .find_map(|s| s.effort_for(LlmProfile::Chat)),
+                Some(Setting::Value(_))
+            ) =>
+        {
             Some(DEFAULT_TITLE_REASONING_EFFORT.to_string())
         }
         None => None,
@@ -214,14 +234,69 @@ pub fn resolve_sampling(
     }
 }
 
+/// The six `settings.custom_settings` keys, in a stable order.
+pub const WORKSPACE_EFFORT_KEYS: [&str; 3] =
+    ["reasoning_effort", "title_reasoning_effort", "watch_reasoning_effort"];
+pub const WORKSPACE_TEMPERATURE_KEYS: [&str; 3] =
+    ["temperature", "title_temperature", "watch_temperature"];
+
+/// Text form of a configured effort for display/editing: empty when unset,
+/// `omit` when explicitly omitted, otherwise the value.
+pub fn effort_text(s: Option<&Setting<String>>) -> String {
+    match s {
+        None => String::new(),
+        Some(Setting::Omit) => OMIT_KEYWORD.to_string(),
+        Some(Setting::Value(v)) => v.clone(),
+    }
+}
+
+/// Text form of a configured temperature (see [`effort_text`]).
+pub fn temperature_text(s: Option<&Setting<f32>>) -> String {
+    match s {
+        None => String::new(),
+        Some(Setting::Omit) => OMIT_KEYWORD.to_string(),
+        Some(Setting::Value(v)) => v.to_string(),
+    }
+}
+
+/// Validate user text and produce the JSON stored under an effort key.
+pub fn stored_effort(raw: &str) -> Result<serde_json::Value, InvalidSetting> {
+    Ok(match parse_reasoning_effort(raw)? {
+        Setting::Omit => serde_json::json!(OMIT_KEYWORD),
+        Setting::Value(v) => serde_json::json!(v),
+    })
+}
+
+/// Validate user text and produce the JSON stored under a temperature key: a
+/// JSON number, or the string `"omit"`. The number is derived from the
+/// parsed value's shortest text form so `0.3` is stored as `0.3`, not the
+/// widened `0.30000001192092896`.
+pub fn stored_temperature(raw: &str) -> Result<serde_json::Value, InvalidSetting> {
+    Ok(match parse_temperature(raw)? {
+        Setting::Omit => serde_json::json!(OMIT_KEYWORD),
+        Setting::Value(v) => {
+            let n: f64 = v
+                .to_string()
+                .parse()
+                .map_err(|_| InvalidSetting(format!("invalid temperature {raw:?}")))?;
+            serde_json::json!(n)
+        }
+    })
+}
+
 /// Read the six settings from `settings.custom_settings`.
 ///
 /// Stored shape: effort values as strings; temperatures as JSON numbers or the
-/// string `"omit"`. A stored value that fails validation is an error, never
-/// silently ignored.
+/// string `"omit"`.
+///
+/// **Lenient by design.** A stored value that fails validation (hand-edited,
+/// or written under an older/looser rule) is dropped and reported in the
+/// returned warnings, never an error: one bad key must not take down every LLM
+/// call for the workspace, nor the settings page an admin would use to repair
+/// it. A dropped value behaves as unset.
 pub fn read_workspace_sampling(
     settings: &Option<serde_json::Value>,
-) -> Result<LlmSamplingSettings, InvalidSetting> {
+) -> (LlmSamplingSettings, Vec<String>) {
     let get = |key: &str| {
         settings
             .as_ref()
@@ -229,33 +304,47 @@ pub fn read_workspace_sampling(
             .and_then(|cs| cs.get(key))
             .filter(|v| !v.is_null())
     };
-    let effort = |key: &str| -> Result<Option<Setting<String>>, InvalidSetting> {
-        get(key)
-            .map(|v| match v.as_str() {
-                Some(s) => parse_reasoning_effort(s),
-                None => Err(InvalidSetting(format!("{key} must be a string"))),
-            })
-            .transpose()
+    let mut warnings = Vec::new();
+    let mut effort = |key: &str| -> Option<Setting<String>> {
+        let v = get(key)?;
+        let parsed = match v.as_str() {
+            Some(s) => parse_reasoning_effort(s),
+            None => Err(InvalidSetting("must be a string".into())),
+        };
+        parsed
+            .map_err(|e| warnings.push(format!("{key}: {e}")))
+            .ok()
     };
-    let temp = |key: &str| -> Result<Option<Setting<f32>>, InvalidSetting> {
-        get(key)
-            .map(|v| match (v.as_f64(), v.as_str()) {
-                (Some(n), _) => parse_temperature(&n.to_string()),
-                (None, Some(s)) => parse_temperature(s),
-                _ => Err(InvalidSetting(format!(
-                    "{key} must be a number or \"{OMIT_KEYWORD}\""
-                ))),
-            })
-            .transpose()
+    let reasoning_effort = effort("reasoning_effort");
+    let title_reasoning_effort = effort("title_reasoning_effort");
+    let watch_reasoning_effort = effort("watch_reasoning_effort");
+    let mut temp = |key: &str| -> Option<Setting<f32>> {
+        let v = get(key)?;
+        let parsed = match (v.as_f64(), v.as_str()) {
+            (Some(n), _) => parse_temperature(&n.to_string()),
+            (None, Some(s)) => parse_temperature(s),
+            _ => Err(InvalidSetting(format!(
+                "must be a number or \"{OMIT_KEYWORD}\""
+            ))),
+        };
+        parsed
+            .map_err(|e| warnings.push(format!("{key}: {e}")))
+            .ok()
     };
-    Ok(LlmSamplingSettings {
-        reasoning_effort: effort("reasoning_effort")?,
-        title_reasoning_effort: effort("title_reasoning_effort")?,
-        watch_reasoning_effort: effort("watch_reasoning_effort")?,
-        temperature: temp("temperature")?,
-        title_temperature: temp("title_temperature")?,
-        watch_temperature: temp("watch_temperature")?,
-    })
+    let temperature = temp("temperature");
+    let title_temperature = temp("title_temperature");
+    let watch_temperature = temp("watch_temperature");
+    (
+        LlmSamplingSettings {
+            reasoning_effort,
+            title_reasoning_effort,
+            watch_reasoning_effort,
+            temperature,
+            title_temperature,
+            watch_temperature,
+        },
+        warnings,
+    )
 }
 
 #[cfg(test)]
@@ -337,13 +426,24 @@ mod tests {
     }
 
     #[test]
-    fn title_defaults_low_only_when_title_model_set_and_is_independent() {
+    fn title_defaults_low_only_with_a_title_model_and_a_configured_chat_effort() {
         let none = LlmSamplingSettings::default();
         let env = LlmSamplingSettings { reasoning_effort: v("high"), ..Default::default() };
+        // Title model + chat effort configured: titles default to low, never inherit high.
         let t = resolve_sampling(LlmProfile::Title, &none, &env, Some(0.3), true);
         assert_eq!(t.reasoning_effort.as_deref(), Some("low"));
+        // No title model: no implicit default and the chat effort is not inherited.
         let t = resolve_sampling(LlmProfile::Title, &none, &env, Some(0.3), false);
-        assert_eq!(t.reasoning_effort, None, "no title model: no implicit default, chat effort is not inherited");
+        assert_eq!(t.reasoning_effort, None);
+        // Existing install: a title model but no effort configured anywhere sends nothing,
+        // so a non-reasoning title model never receives a field it may reject.
+        let t = resolve_sampling(LlmProfile::Title, &none, &none, Some(0.3), true);
+        assert_eq!(t.reasoning_effort, None);
+        // Chat effort explicitly omitted does not enable the default either.
+        let omit = LlmSamplingSettings { reasoning_effort: Some(Setting::Omit), ..Default::default() };
+        let t = resolve_sampling(LlmProfile::Title, &none, &omit, Some(0.3), true);
+        assert_eq!(t.reasoning_effort, None);
+        // Explicit title values always win.
         let explicit_omit = LlmSamplingSettings { title_reasoning_effort: Some(Setting::Omit), ..Default::default() };
         let t = resolve_sampling(LlmProfile::Title, &explicit_omit, &env, Some(0.3), true);
         assert_eq!(t.reasoning_effort, None);
@@ -353,20 +453,77 @@ mod tests {
     }
 
     #[test]
-    fn reads_workspace_settings_and_rejects_invalid_stored_values() {
+    fn watch_precedence_is_workspace_watch_env_watch_workspace_chat_env_chat() {
+        let ws = LlmSamplingSettings { reasoning_effort: v("ws-chat"), ..Default::default() };
+        let env = LlmSamplingSettings {
+            reasoning_effort: v("env-chat"),
+            watch_reasoning_effort: v("env-watch"),
+            ..Default::default()
+        };
+        // An instance watch value beats a workspace chat value.
+        let r = resolve_sampling(LlmProfile::Watch, &ws, &env, Some(0.7), false);
+        assert_eq!(r.reasoning_effort.as_deref(), Some("env-watch"));
+        let ws_watch = LlmSamplingSettings { watch_reasoning_effort: v("ws-watch"), ..ws.clone() };
+        let r = resolve_sampling(LlmProfile::Watch, &ws_watch, &env, Some(0.7), false);
+        assert_eq!(r.reasoning_effort.as_deref(), Some("ws-watch"));
+        let env_chat_only = LlmSamplingSettings { reasoning_effort: v("env-chat"), ..Default::default() };
+        let r = resolve_sampling(LlmProfile::Watch, &ws, &env_chat_only, Some(0.7), false);
+        assert_eq!(r.reasoning_effort.as_deref(), Some("ws-chat"));
+    }
+
+    #[test]
+    fn reads_workspace_settings() {
         let s = Some(serde_json::json!({"custom_settings": {
             "reasoning_effort": "medium", "temperature": 0.25,
             "title_temperature": "omit", "watch_reasoning_effort": "7"
         }}));
-        let r = read_workspace_sampling(&s).unwrap();
+        let (r, warnings) = read_workspace_sampling(&s);
+        assert!(warnings.is_empty(), "{warnings:?}");
         assert_eq!(r.reasoning_effort, v("medium"));
         assert_eq!(r.temperature, Some(Setting::Value(0.25)));
         assert_eq!(r.title_temperature, Some(Setting::Omit));
         assert_eq!(r.watch_reasoning_effort, v("7"));
-        assert_eq!(read_workspace_sampling(&None).unwrap(), LlmSamplingSettings::default());
-        let bad = Some(serde_json::json!({"custom_settings": {"temperature": "hot"}}));
-        assert!(read_workspace_sampling(&bad).is_err());
-        let bad = Some(serde_json::json!({"custom_settings": {"reasoning_effort": 5}}));
-        assert!(read_workspace_sampling(&bad).is_err());
+        assert_eq!(read_workspace_sampling(&None), (LlmSamplingSettings::default(), vec![]));
+    }
+
+    #[test]
+    fn invalid_stored_values_are_dropped_with_a_warning_not_an_error() {
+        let s = Some(serde_json::json!({"custom_settings": {
+            "temperature": "hot",
+            "reasoning_effort": 5,
+            "title_reasoning_effort": "has space",
+            "watch_temperature": 9.0,
+            "title_temperature": 0.4
+        }}));
+        let (r, warnings) = read_workspace_sampling(&s);
+        assert_eq!(warnings.len(), 4, "{warnings:?}");
+        for key in ["temperature:", "reasoning_effort:", "title_reasoning_effort:", "watch_temperature:"] {
+            assert!(warnings.iter().any(|w| w.starts_with(key)), "{key} in {warnings:?}");
+        }
+        // Bad keys behave as unset; the good key survives.
+        assert_eq!(r.temperature, None);
+        assert_eq!(r.reasoning_effort, None);
+        assert_eq!(r.title_temperature, Some(Setting::Value(0.4)));
+    }
+
+    #[test]
+    fn stored_forms_round_trip_through_the_reader() {
+        let settings = Some(serde_json::json!({"custom_settings": {
+            "reasoning_effort": stored_effort(" High ").unwrap(),
+            "watch_reasoning_effort": stored_effort("omit").unwrap(),
+            "temperature": stored_temperature("0.3").unwrap(),
+            "title_temperature": stored_temperature("OMIT").unwrap(),
+        }}));
+        // 0.3 must be stored as the f64 0.3, not the widened f32 value.
+        assert_eq!(settings.as_ref().unwrap()["custom_settings"]["temperature"], serde_json::json!(0.3));
+        let (r, warnings) = read_workspace_sampling(&settings);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(effort_text(r.reasoning_effort.as_ref()), "High");
+        assert_eq!(effort_text(r.watch_reasoning_effort.as_ref()), "omit");
+        assert_eq!(effort_text(r.title_reasoning_effort.as_ref()), "");
+        assert_eq!(temperature_text(r.temperature.as_ref()), "0.3");
+        assert_eq!(temperature_text(r.title_temperature.as_ref()), "omit");
+        assert!(stored_effort("a b").is_err());
+        assert!(stored_temperature("3").is_err());
     }
 }

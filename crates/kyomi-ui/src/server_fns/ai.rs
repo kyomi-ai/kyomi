@@ -115,6 +115,10 @@ pub struct LlmTuningView {
     pub provider: String,
     pub workspace: LlmTuningValues,
     pub instance: LlmTuningValues,
+    /// Stored workspace values that are invalid and therefore ignored, as
+    /// `key: reason`. Shown so an admin can fix or clear them.
+    #[serde(default)]
+    pub warnings: Vec<String>,
 }
 
 /// Result of a candidate-config connectivity test.
@@ -168,34 +172,15 @@ pub enum ResolvedAiProviderView {
 // ---------------------------------------------------------------------------
 
 #[cfg(feature = "ssr")]
-fn effort_text(s: &Option<kyomi_core::llm_sampling::Setting<String>>) -> String {
-    use kyomi_core::llm_sampling::{Setting, OMIT_KEYWORD};
-    match s {
-        None => String::new(),
-        Some(Setting::Omit) => OMIT_KEYWORD.to_string(),
-        Some(Setting::Value(v)) => v.clone(),
-    }
-}
-
-#[cfg(feature = "ssr")]
-fn temperature_text(s: &Option<kyomi_core::llm_sampling::Setting<f32>>) -> String {
-    use kyomi_core::llm_sampling::{Setting, OMIT_KEYWORD};
-    match s {
-        None => String::new(),
-        Some(Setting::Omit) => OMIT_KEYWORD.to_string(),
-        Some(Setting::Value(v)) => v.to_string(),
-    }
-}
-
-#[cfg(feature = "ssr")]
 fn tuning_values(s: &kyomi_core::llm_sampling::LlmSamplingSettings) -> LlmTuningValues {
+    use kyomi_core::llm_sampling::{effort_text, temperature_text};
     LlmTuningValues {
-        reasoning_effort: effort_text(&s.reasoning_effort),
-        title_reasoning_effort: effort_text(&s.title_reasoning_effort),
-        watch_reasoning_effort: effort_text(&s.watch_reasoning_effort),
-        temperature: temperature_text(&s.temperature),
-        title_temperature: temperature_text(&s.title_temperature),
-        watch_temperature: temperature_text(&s.watch_temperature),
+        reasoning_effort: effort_text(s.reasoning_effort.as_ref()),
+        title_reasoning_effort: effort_text(s.title_reasoning_effort.as_ref()),
+        watch_reasoning_effort: effort_text(s.watch_reasoning_effort.as_ref()),
+        temperature: temperature_text(s.temperature.as_ref()),
+        title_temperature: temperature_text(s.title_temperature.as_ref()),
+        watch_temperature: temperature_text(s.watch_temperature.as_ref()),
     }
 }
 
@@ -221,7 +206,78 @@ pub async fn get_llm_tuning() -> Result<LlmTuningView, ServerFnError> {
         provider,
         workspace: tuning_values(&ws_config.sampling),
         instance: tuning_values(&ac.ctx.config.llm_sampling),
+        warnings: ws_config.sampling_warnings.clone(),
     })
+}
+
+/// Validate and store the workspace LLM tuning (reasoning effort and
+/// temperature per call profile). Self-hosted admins only.
+///
+/// Each empty field clears its key so the instance `LLM_*` value or the
+/// built-in default applies again. Every non-empty value is validated with
+/// the same parsers the env and the stored-settings reader use, and the whole
+/// request is rejected if any field is invalid (nothing is partially saved).
+/// The write is an atomic edit of `settings` (see
+/// `workspace_service::update_workspace_settings_with`), so it cannot clobber
+/// a concurrent change to another settings key.
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
+pub async fn update_llm_tuning(values: LlmTuningValues) -> Result<(), ServerFnError> {
+    use super::IntoServerFnErrorCore as _;
+    use kyomi_core::llm_sampling::{
+        stored_effort, stored_temperature, WORKSPACE_EFFORT_KEYS, WORKSPACE_TEMPERATURE_KEYS,
+    };
+
+    let ac = AuthenticatedContext::extract().await?;
+    if !ac.ctx.config.self_hosted {
+        return Err(ServerFnError::new(
+            "LLM tuning is only configurable on self-hosted deployments.",
+        ));
+    }
+    ac.require(Permission::ManageAiConfig, "Workspace admin access required")?;
+
+    // Validate everything first; `None` clears the key.
+    let [e0, e1, e2] = [&values.reasoning_effort, &values.title_reasoning_effort, &values.watch_reasoning_effort];
+    let [t0, t1, t2] = [&values.temperature, &values.title_temperature, &values.watch_temperature];
+    let mut edits: Vec<(&'static str, Option<serde_json::Value>)> = Vec::new();
+    for (key, raw) in WORKSPACE_EFFORT_KEYS.into_iter().zip([e0, e1, e2]) {
+        let raw = raw.trim();
+        let stored = if raw.is_empty() {
+            None
+        } else {
+            Some(stored_effort(raw).map_err(|e| ServerFnError::new(format!("{key}: {e}")))?)
+        };
+        edits.push((key, stored));
+    }
+    for (key, raw) in WORKSPACE_TEMPERATURE_KEYS.into_iter().zip([t0, t1, t2]) {
+        let raw = raw.trim();
+        let stored = if raw.is_empty() {
+            None
+        } else {
+            Some(stored_temperature(raw).map_err(|e| ServerFnError::new(format!("{key}: {e}")))?)
+        };
+        edits.push((key, stored));
+    }
+
+    let found = kyomi_auth::workspace_service::update_workspace_settings_with(
+        ac.db(),
+        &ac.ws_id,
+        |current| {
+            let mut settings = current.clone();
+            for (key, stored) in &edits {
+                settings = Some(match stored {
+                    Some(v) => super::workspace::merge_custom_settings(&settings, key, v.clone()),
+                    None => super::workspace::clear_custom_settings_key(&settings, key),
+                });
+            }
+            Ok(settings.unwrap_or_else(|| serde_json::json!({})))
+        },
+    )
+    .await
+    .into_sfn_core()?;
+    if !found {
+        return Err(ServerFnError::new("Workspace not found"));
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -1632,6 +1688,7 @@ mod tests {
             title_model: None,
             context_window: 0,
             sampling: Default::default(),
+            sampling_warnings: Vec::new(),
         }
     }
 

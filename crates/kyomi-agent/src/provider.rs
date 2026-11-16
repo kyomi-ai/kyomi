@@ -720,6 +720,7 @@ mod tests {
             title_model: None,
             context_window: 0,
             sampling: Default::default(),
+            sampling_warnings: Vec::new(),
         };
 
         let provider = create_provider_from_workspace(&ws, &fallback)
@@ -744,6 +745,7 @@ mod tests {
             title_model: None,
             context_window: 0,
             sampling: Default::default(),
+            sampling_warnings: Vec::new(),
         };
 
         let provider = create_provider_from_workspace(&ws, &fallback).unwrap();
@@ -771,6 +773,7 @@ mod tests {
             title_model: None,
             context_window: 0,
             sampling: Default::default(),
+            sampling_warnings: Vec::new(),
         };
 
         let provider = create_provider_from_workspace(&ws, &fallback)
@@ -793,6 +796,7 @@ mod tests {
             title_model: None,
             context_window: 0,
             sampling: Default::default(),
+            sampling_warnings: Vec::new(),
         };
 
         let provider = create_provider_from_workspace(&ws, &fallback).unwrap();
@@ -814,6 +818,7 @@ mod tests {
             title_model: None,
             context_window: 0,
             sampling: Default::default(),
+            sampling_warnings: Vec::new(),
         };
 
         let err = match create_provider_from_workspace(&ws, &fallback) {
@@ -845,6 +850,7 @@ mod tests {
             title_model: None,
             context_window: 0,
             sampling: Default::default(),
+            sampling_warnings: Vec::new(),
         };
 
         // SaaS mode should ignore BYOK and use server config

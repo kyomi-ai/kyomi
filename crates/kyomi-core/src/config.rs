@@ -646,28 +646,36 @@ impl Config {
     }
 }
 
-/// Read an optional env var and parse it; an invalid value aborts startup with
-/// the variable name rather than being silently ignored.
-fn optional_parsed_env<T>(
+/// Read one optional setting through `get` and parse it; an invalid value
+/// aborts startup with the variable name rather than being silently ignored.
+/// An empty value is treated as unset.
+fn optional_parsed<T>(
+    get: &impl Fn(&str) -> Option<String>,
     key: &str,
     parse: fn(&str) -> Result<T, crate::llm_sampling::InvalidSetting>,
 ) -> Option<T> {
-    match env::var(key) {
-        Ok(raw) if raw.trim().is_empty() => None,
-        Ok(raw) => Some(parse(&raw).unwrap_or_else(|e| panic!("{key}: {e}"))),
-        Err(_) => None,
+    match get(key) {
+        Some(raw) if raw.trim().is_empty() => None,
+        Some(raw) => Some(parse(&raw).unwrap_or_else(|e| panic!("{key}: {e}"))),
+        None => None,
     }
 }
 
 fn llm_sampling_from_env() -> crate::llm_sampling::LlmSamplingSettings {
+    llm_sampling_from(|k| env::var(k).ok())
+}
+
+/// Build the instance LLM tuning from a variable lookup (the process
+/// environment in production; a map in tests).
+fn llm_sampling_from(get: impl Fn(&str) -> Option<String>) -> crate::llm_sampling::LlmSamplingSettings {
     use crate::llm_sampling::{parse_reasoning_effort as effort, parse_temperature as temp};
     crate::llm_sampling::LlmSamplingSettings {
-        reasoning_effort: optional_parsed_env("LLM_REASONING_EFFORT", effort),
-        title_reasoning_effort: optional_parsed_env("LLM_TITLE_REASONING_EFFORT", effort),
-        watch_reasoning_effort: optional_parsed_env("LLM_WATCH_REASONING_EFFORT", effort),
-        temperature: optional_parsed_env("LLM_TEMPERATURE", temp),
-        title_temperature: optional_parsed_env("LLM_TITLE_TEMPERATURE", temp),
-        watch_temperature: optional_parsed_env("LLM_WATCH_TEMPERATURE", temp),
+        reasoning_effort: optional_parsed(&get, "LLM_REASONING_EFFORT", effort),
+        title_reasoning_effort: optional_parsed(&get, "LLM_TITLE_REASONING_EFFORT", effort),
+        watch_reasoning_effort: optional_parsed(&get, "LLM_WATCH_REASONING_EFFORT", effort),
+        temperature: optional_parsed(&get, "LLM_TEMPERATURE", temp),
+        title_temperature: optional_parsed(&get, "LLM_TITLE_TEMPERATURE", temp),
+        watch_temperature: optional_parsed(&get, "LLM_WATCH_TEMPERATURE", temp),
     }
 }
 

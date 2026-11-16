@@ -8,6 +8,7 @@
 //! one-test-topic-per-file rule. Shared fixtures and the `include_str!`
 //! constant live here; each topic gets its own file.
 
+mod llm_sampling;
 mod process_instance;
 mod smtp_settings;
 
