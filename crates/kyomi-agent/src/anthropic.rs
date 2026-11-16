@@ -167,8 +167,9 @@ impl AnthropicClient {
                             "role": "assistant",
                             "content": content_blocks
                         }));
-                    } else {
-                        // Simple text assistant message.
+                    } else if !msg.content.is_empty() {
+                        // Simple text assistant message. (An empty one is invalid for
+                        // the provider and carries nothing, so it is not sent.)
                         anthropic_messages.push(json!({
                             "role": "assistant",
                             "content": msg.content

@@ -40,6 +40,41 @@ pub struct ServerTool {
     pub entry: Value,
 }
 
+impl ServerTool {
+    /// The entry with this request's `max_uses` set to the allowance still left
+    /// for the run (never above what the entry already allows).
+    pub fn with_max_uses(&self, remaining: u32) -> Value {
+        let mut entry = self.entry.clone();
+        let slot = match self.backend {
+            kyomi_core::web_tools::WebBackendKind::OpenRouter => entry.get_mut("parameters"),
+            _ => Some(&mut entry),
+        };
+        if let Some(obj) = slot.and_then(Value::as_object_mut) {
+            let current = obj.get("max_uses").and_then(Value::as_u64).unwrap_or(u64::from(remaining));
+            obj.insert("max_uses".into(), json!(current.min(u64::from(remaining))));
+        }
+        entry
+    }
+}
+
+/// Replay server-tool turns as plain text, for a request that carries no server
+/// tool: the provider rejects server-tool result blocks when the tool is not in
+/// the request. A message left with neither text nor tool calls (a bare
+/// `pause_turn` shell) is dropped.
+pub fn without_provider_content(messages: &[crate::types::Message]) -> Vec<crate::types::Message> {
+    messages
+        .iter()
+        .filter_map(|m| {
+            if m.provider_content.is_none() {
+                return Some(m.clone());
+            }
+            let mut m = m.clone();
+            m.provider_content = None;
+            (!m.content.is_empty() || m.tool_calls.as_ref().is_some_and(|t| !t.is_empty())).then_some(m)
+        })
+        .collect()
+}
+
 pub const ANTHROPIC_SEARCH_VERSION: &str = "web_search_20250305";
 pub const ANTHROPIC_FETCH_VERSION: &str = "web_fetch_20250910";
 
@@ -395,6 +430,45 @@ mod tests {
         assert!(a.provider_content.is_some());
         assert_eq!(a.sources[0].url, "https://www.rust-lang.org/");
         assert_eq!(a.sources[0].title, "Rust Programming Language");
+    }
+
+    /// LIVE capture: a real `pause_turn` (haiku, 10 sequential web_fetch calls, the
+    /// server loop's iteration limit). The paused content ends in a
+    /// `server_tool_use` with no result yet, exactly the shape the docs describe.
+    #[test]
+    fn anthropic_live_pause_turn_response_parses_and_replays_verbatim() {
+        let raw = fixture("anthropic_pause_turn_message.json");
+        assert_eq!(raw["stop_reason"], "pause_turn");
+        let blocks = raw["content"].as_array().unwrap();
+        assert_eq!(blocks.last().unwrap()["type"], "server_tool_use", "unresolved trailing server_tool_use");
+        let a = parse_anthropic(&raw);
+        assert_eq!(a.fetches, 10, "the loop stopped at its iteration limit");
+        assert_eq!(a.provider_content.as_ref().unwrap(), blocks);
+        let msg = crate::types::Message::assistant("x").with_provider_content(a.provider_content);
+        let (_, replayed) = crate::anthropic::AnthropicClient::convert_messages_to_anthropic(&[msg], &Default::default());
+        assert_eq!(replayed[0]["content"], raw["content"], "continuation sends the paused content unchanged");
+    }
+
+    #[test]
+    fn per_request_allowance_never_exceeds_the_entry_and_applies_to_both_backends() {
+        use kyomi_core::web_tools::WebBackendKind::{Anthropic as A, OpenRouter as O};
+        let a = ServerTool { kind: WebToolKind::Search, backend: A, entry: anthropic_tool_entry(WebToolKind::Search, &cfg(A, json!({})), &caps()) };
+        assert_eq!(a.with_max_uses(2)["max_uses"], 2);
+        assert_eq!(a.with_max_uses(50)["max_uses"], 5, "never raised above the entry");
+        let o = ServerTool { kind: WebToolKind::Fetch, backend: O, entry: openrouter_tool_entry(WebToolKind::Fetch, &cfg(O, json!({})), &caps()) };
+        assert_eq!(o.with_max_uses(3)["parameters"]["max_uses"], 3);
+    }
+
+    #[test]
+    fn without_provider_content_replays_server_turns_as_text_and_drops_empty_shells() {
+        use crate::types::Message;
+        let blocks = Some(vec![json!({"type": "server_tool_use", "id": "srvtoolu_1", "name": "web_search", "input": {}})]);
+        let with_text = Message::assistant("partial").with_provider_content(blocks.clone());
+        let shell = Message::assistant("").with_provider_content(blocks);
+        let out = without_provider_content(&[Message::user("q"), with_text, shell, Message::assistant("plain")]);
+        assert_eq!(out.len(), 3);
+        assert!(out.iter().all(|m| m.provider_content.is_none()));
+        assert_eq!(out[1].content, "partial");
     }
 
     #[test]

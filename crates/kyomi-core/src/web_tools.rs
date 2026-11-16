@@ -176,6 +176,9 @@ pub struct WebToolsSettings {
     pub caps: WebCaps,
     /// Whether watches / scheduled runs may use the web tools (chat-only by default).
     pub in_unattended_runs: bool,
+    /// Cap variables that were set but are not non-negative integers; reported by
+    /// [`validate`](Self::validate) instead of silently falling back to a default.
+    pub invalid_caps: Vec<String>,
 }
 
 impl Default for WebToolsSettings {
@@ -218,19 +221,26 @@ impl WebToolsSettings {
                 options: non_empty(&format!("{p}_OPTIONS")),
             }
         };
-        let cap = |k: &str, default: u32| {
-            non_empty(k).and_then(|v| v.parse().ok()).unwrap_or(default)
+        let mut invalid_caps = Vec::new();
+        let mut cap = |k: &str, default: u32| match non_empty(k) {
+            None => default,
+            Some(v) => v.parse().unwrap_or_else(|_| {
+                invalid_caps.push(k.to_string());
+                default
+            }),
         };
         let d = WebCaps::default();
+        let caps = WebCaps {
+            per_turn_search: cap("WEB_TOOLS_SEARCHES_PER_TURN", d.per_turn_search),
+            per_turn_fetch: cap("WEB_TOOLS_FETCHES_PER_TURN", d.per_turn_fetch),
+            workspace_monthly: cap("WEB_TOOLS_WORKSPACE_MONTHLY_CAP", d.workspace_monthly),
+            global_monthly: cap("WEB_TOOLS_GLOBAL_MONTHLY_CAP", d.global_monthly),
+        };
         Self {
             search: backend(WebToolKind::Search),
             fetch: backend(WebToolKind::Fetch),
-            caps: WebCaps {
-                per_turn_search: cap("WEB_TOOLS_SEARCHES_PER_TURN", d.per_turn_search),
-                per_turn_fetch: cap("WEB_TOOLS_FETCHES_PER_TURN", d.per_turn_fetch),
-                workspace_monthly: cap("WEB_TOOLS_WORKSPACE_MONTHLY_CAP", d.workspace_monthly),
-                global_monthly: cap("WEB_TOOLS_GLOBAL_MONTHLY_CAP", d.global_monthly),
-            },
+            caps,
+            invalid_caps,
             in_unattended_runs: non_empty("WEB_TOOLS_UNATTENDED")
                 .is_some_and(|v| matches!(v.to_lowercase().as_str(), "1" | "true" | "yes")),
         }
@@ -240,6 +250,10 @@ impl WebToolsSettings {
     /// replaces the instance entry for that tool *entirely* (provider, key, URL
     /// and options), so one workspace's key can never be paired with another
     /// level's provider.
+    ///
+    /// A workspace `base_url` is ignored: it would let workspace configuration
+    /// point Kyomi's server-side requests (carrying the workspace's API key) at an
+    /// arbitrary host. Vendors' default endpoints are used.
     pub fn with_workspace_override(
         &self,
         search: Option<WebBackendSettings>,
@@ -247,12 +261,18 @@ impl WebToolsSettings {
     ) -> Self {
         let mut out = self.clone();
         if let Some(s) = search {
-            out.search = s;
+            out.search = WebBackendSettings { base_url: None, ..s };
         }
         if let Some(f) = fetch {
-            out.fetch = f;
+            out.fetch = WebBackendSettings { base_url: None, ..f };
         }
         out
+    }
+
+    /// These settings with both tools off (`none`), keeping caps and flags.
+    pub fn disabled(&self) -> Self {
+        let off = WebBackendSettings { provider: Some("none".into()), ..Default::default() };
+        Self { search: off.clone(), fetch: off, ..self.clone() }
     }
 
     fn settings(&self, tool: WebToolKind) -> &WebBackendSettings {
@@ -338,6 +358,12 @@ impl WebToolsSettings {
     /// naming the variables instead of a 400 at runtime. Returns the resolved
     /// pair `(search, fetch)`.
     pub fn validate(&self, llm: LlmFacts<'_>) -> crate::Result<(ResolvedBackend, ResolvedBackend)> {
+        if !self.invalid_caps.is_empty() {
+            return Err(crate::Error::Internal(format!(
+                "{} must be a non-negative integer",
+                self.invalid_caps.join(", ")
+            )));
+        }
         Ok((
             self.resolve(WebToolKind::Search, llm)?,
             self.resolve(WebToolKind::Fetch, llm)?,
@@ -464,6 +490,28 @@ mod tests {
         let ws = WebBackendSettings { provider: Some("builtin".into()), ..Default::default() };
         let merged = instance.with_workspace_override(None, Some(ws));
         assert!(merged.resolve(WebToolKind::Fetch, OPENAI).unwrap().enabled().is_some());
+    }
+
+    #[test]
+    fn a_mistyped_cap_fails_validation_instead_of_silently_using_the_default() {
+        let err = settings(&[("WEB_TOOLS_WORKSPACE_MONTHLY_CAP", "2OO")]).validate(ANTHROPIC).unwrap_err();
+        assert!(err.to_string().contains("WEB_TOOLS_WORKSPACE_MONTHLY_CAP"));
+    }
+
+    #[test]
+    fn workspace_override_ignores_base_url_and_disabled_turns_both_tools_off() {
+        let ws = WebBackendSettings {
+            provider: Some("tavily".into()),
+            api_key: Some("k".into()),
+            base_url: Some("http://169.254.169.254/".into()),
+            options: None,
+        };
+        let merged = settings(&[]).with_workspace_override(Some(ws), None);
+        assert_eq!(merged.search.base_url, None);
+        let off = merged.disabled();
+        assert!(off.resolve(WebToolKind::Search, ANTHROPIC).unwrap().enabled().is_none());
+        assert!(off.resolve(WebToolKind::Fetch, ANTHROPIC).unwrap().enabled().is_none());
+        assert_eq!(off.caps, merged.caps);
     }
 
     #[test]

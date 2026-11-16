@@ -122,18 +122,8 @@ pub async fn store(
         workspace_id
     )?
     .ok_or_else(|| WorkspaceWebConfigError::WorkspaceNotFound(workspace_id.to_string()))?;
-    let mut settings = row.settings.unwrap_or_else(|| serde_json::json!({}));
-    let custom = settings
-        .as_object_mut()
-        .ok_or_else(|| WorkspaceWebConfigError::Invalid("settings is not an object".into()))?
-        .entry("custom_settings")
-        .or_insert_with(|| serde_json::json!({}))
-        .as_object_mut()
-        .ok_or_else(|| WorkspaceWebConfigError::Invalid("custom_settings is not an object".into()))?;
-    match value {
-        None => {
-            custom.remove(settings_key(tool));
-        }
+    let entry = match value {
+        None => None,
         Some(v) => {
             let mut entry = serde_json::Map::new();
             if let Some(p) = &v.provider {
@@ -156,9 +146,10 @@ pub async fn store(
                 }
                 entry.insert("options".into(), parsed);
             }
-            custom.insert(settings_key(tool).into(), serde_json::Value::Object(entry));
+            Some(serde_json::Value::Object(entry))
         }
-    }
+    };
+    let settings = crate::workspace_ai_config::merge_custom_settings_value(&row.settings, settings_key(tool), entry);
     let text = serde_json::to_string(&settings).map_err(|e| WorkspaceWebConfigError::Invalid(e.to_string()))?;
     match db {
         kyomi_core::db::DbPool::Postgres(pg) => {

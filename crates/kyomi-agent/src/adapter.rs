@@ -792,6 +792,16 @@ fn should_persist_new_message(msg: &Message, caller_persisted_id: Option<&str>) 
     }
 }
 
+/// A `pause_turn` shell: an assistant message that is only server-tool blocks
+/// (no text, no tool calls). Nothing to store, and an empty assistant row in
+/// history is rejected by the provider on every later turn.
+fn is_empty_pause_shell(msg: &Message) -> bool {
+    msg.role == MessageRole::Assistant
+        && msg.content.is_empty()
+        && msg.tool_calls.as_ref().is_none_or(|t| t.is_empty())
+        && msg.provider_content.is_some()
+}
+
 /// Persist one newly-produced agent message to the DB, applying the same
 /// skip / UPDATE-vs-INSERT rules every caller of it must use (KYO-493 phase
 /// 3) — shared by `persist_after_chat`'s tail pass and
@@ -835,6 +845,13 @@ async fn persist_one_new_message(
     // assistant/tool message, and — critically — any AdapterPersists row,
     // e.g. Slack's caller-chosen id) is still persisted here.
     if !should_persist_new_message(msg, caller_persisted_user_id) {
+        return Ok(());
+    }
+
+    // A `pause_turn` shell (server-tool blocks only, no text and no tool calls)
+    // has nothing to store; persisting it would put an empty assistant row in
+    // history that the provider rejects on every later turn (KYO-969).
+    if is_empty_pause_shell(msg) {
         return Ok(());
     }
 
@@ -4191,4 +4208,16 @@ mod tests {
         assert!(calls[3].messages.iter().filter(|message| message.role == crate::types::MessageRole::Tool).all(|message| message.content.starts_with("Error: Workspace admin access required")));
     }
 
+
+    #[test]
+    fn an_empty_pause_shell_is_not_persisted_but_real_assistant_rows_are() {
+        let shell = Message::assistant("").with_provider_content(Some(vec![serde_json::json!({"type": "server_tool_use"})]));
+        assert!(is_empty_pause_shell(&shell));
+        let with_text = Message::assistant("partial").with_provider_content(Some(vec![serde_json::json!({"type": "server_tool_use"})]));
+        assert!(!is_empty_pause_shell(&with_text));
+        assert!(!is_empty_pause_shell(&Message::assistant("")), "an ordinary empty message is untouched here");
+        let with_calls = Message::assistant_with_tool_calls("", vec![ToolCall { id: "t".into(), name: "n".into(), arguments: serde_json::json!({}), arguments_error: None }])
+            .with_provider_content(Some(vec![]));
+        assert!(!is_empty_pause_shell(&with_calls));
+    }
 }

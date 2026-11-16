@@ -388,22 +388,32 @@ pub fn create_provider_from_workspace(
     ws_config: &kyomi_auth::workspace_ai_config::WorkspaceAiConfig,
     fallback_config: &kyomi_core::Config,
 ) -> kyomi_core::Result<Box<dyn LLMProvider>> {
+    create_provider(resolve_workspace_provider_config(ws_config, fallback_config)?)
+}
+
+/// The provider configuration [`create_provider_from_workspace`] builds the
+/// client from. Public so other code that depends on *which* provider and base
+/// URL are in effect for a workspace (for example whether a provider-executed
+/// web backend can run) asks the same function instead of re-deriving the rule.
+pub fn resolve_workspace_provider_config(
+    ws_config: &kyomi_auth::workspace_ai_config::WorkspaceAiConfig,
+    fallback_config: &kyomi_core::Config,
+) -> kyomi_core::Result<LLMProviderConfig> {
     use kyomi_auth::workspace_ai_config::WorkspaceAiProvider;
 
     // SaaS mode: always use Kyomi-managed credentials and model.
     // Workspace-level BYOK configs and default_model are preserved in the
     // database but ignored at runtime — the server controls everything.
     if !fallback_config.self_hosted {
-        let config = resolve_provider_config(fallback_config)?;
-        return create_provider(config);
+        return resolve_provider_config(fallback_config);
     }
 
-    let llm_config = match ws_config.provider {
+    match ws_config.provider {
         WorkspaceAiProvider::Kyomi => {
             // Server-side keys: server controls the model entirely.
             // Workspace default_model is ignored — it may reference a
             // BYOK-only model from a previous provider configuration.
-            resolve_provider_config(fallback_config)?
+            resolve_provider_config(fallback_config)
         }
         WorkspaceAiProvider::Anthropic
         | WorkspaceAiProvider::OpenAI
@@ -420,17 +430,15 @@ pub fn create_provider_from_workspace(
                 WorkspaceAiProvider::Gemini => ProviderKind::Gemini,
                 WorkspaceAiProvider::Kyomi => unreachable!("handled above"),
             };
-            LLMProviderConfig {
+            Ok(LLMProviderConfig {
                 provider,
                 api_key,
                 model: ws_config.model.clone(),
                 base_url: ws_config.base_url.clone(),
                 context_window: ws_config.context_window,
-            }
+            })
         }
-    };
-
-    create_provider(llm_config)
+    }
 }
 
 // ---------------------------------------------------------------------------

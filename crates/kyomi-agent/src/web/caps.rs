@@ -4,7 +4,7 @@
 //! [`kyomi_core::web_tools::WebCaps`]): a per-turn limit, a per-workspace
 //! monthly limit and a global monthly budget. Monthly counters live in the KV
 //! store (Redis when configured), so they are shared across server instances
-//! and survive restarts. A call is counted when it is *attempted*: the cap
+//! and survive restarts when Redis is configured (the in-memory fallback is per instance and resets on restart). A call is counted when it is *attempted*: the cap
 //! bounds spend, and a failed call may still have been billed upstream.
 //!
 //! At a cap the tool returns a clear "unavailable" result and chat continues.
@@ -40,32 +40,21 @@ fn month_key(scope: &str, tool: WebToolKind) -> String {
     format!("web_tools:{}:{}:{:04}-{:02}", tool.tool_name(), scope, now.year(), now.month())
 }
 
-/// Reserve one call against the monthly caps. Checks the workspace cap
-/// first so a workspace over its own cap never spends the shared global budget.
+/// Reserve one call against the monthly caps: refuse when either counter is at
+/// its cap (nothing is counted for a refusal), otherwise count the call against
+/// both. The check and the increment are separate KV operations, so the caps are
+/// soft under concurrency: simultaneous calls can overshoot by the number of
+/// concurrent runs. They bound spend, they are not a transaction.
 pub async fn reserve_monthly(
     kv: &KVPool,
     caps: &WebCaps,
     workspace_id: &str,
     tool: WebToolKind,
 ) -> kyomi_core::Result<Result<(), CapRefusal>> {
-    let global_key = month_key("global", tool);
-    let ws_key = month_key(&format!("ws:{workspace_id}"), tool);
-    // Workspace first: a workspace over its own cap must not spend the shared
-    // global budget.
-    let ws = kv.incr(&ws_key).await?;
-    if ws == 1 {
-        kv.expire(&ws_key, MONTH_TTL_SECS).await?;
+    if let Err(refusal) = check_monthly(kv, caps, workspace_id, tool).await? {
+        return Ok(Err(refusal));
     }
-    if ws > i64::from(caps.workspace_monthly) {
-        return Ok(Err(CapRefusal::WorkspaceMonthly));
-    }
-    let global = kv.incr(&global_key).await?;
-    if global == 1 {
-        kv.expire(&global_key, MONTH_TTL_SECS).await?;
-    }
-    if global > i64::from(caps.global_monthly) {
-        return Ok(Err(CapRefusal::GlobalMonthly));
-    }
+    add_usage(kv, workspace_id, tool, 1).await?;
     Ok(Ok(()))
 }
 
@@ -131,9 +120,12 @@ mod tests {
         assert_eq!(reserve_monthly(&kv, &c, "a", t).await.unwrap(), Ok(()));
         assert_eq!(reserve_monthly(&kv, &c, "a", t).await.unwrap(), Ok(()));
         assert_eq!(reserve_monthly(&kv, &c, "a", t).await.unwrap(), Err(CapRefusal::WorkspaceMonthly));
-        // Other workspace still has room, but the global budget (3) is now spent.
+        // Other workspace still has room; the refused call above spent nothing, so
+        // the global budget (3) has one left.
         assert_eq!(reserve_monthly(&kv, &c, "b", t).await.unwrap(), Ok(()));
         assert_eq!(reserve_monthly(&kv, &c, "b", t).await.unwrap(), Err(CapRefusal::GlobalMonthly));
+        // A global refusal does not inflate the workspace counter either.
+        assert_eq!(check_monthly(&kv, &caps(3, 100), "b", t).await.unwrap(), Ok(()), "b used 1, not 2");
     }
 
     #[tokio::test]

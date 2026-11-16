@@ -51,7 +51,7 @@ pub(crate) const API_USAGE_LOG_INSERT_SQL: &str = "INSERT INTO api_usage_log \
 use crate::agent::{AgentConfig, CustomAgent};
 use crate::prompt;
 use crate::provider::{
-    create_provider_from_workspace, resolve_provider_config, ProviderKind,
+    create_provider, create_provider_from_workspace, ProviderKind,
 };
 use crate::thinking::AgentThinkingTracker;
 use crate::tools::web::WEB_TOOL_NAMES;
@@ -382,6 +382,38 @@ struct WebRunPlan {
     server_tools: Vec<crate::web::server_tools::ServerTool>,
 }
 
+/// Whether this run may use the web tools at all: interactive chat (no explicit
+/// tool subset), or a watch run when the operator enabled unattended use.
+/// Copilots, Slack and every other context never do. The single source of truth
+/// for registration and for extending a watch's tool subset.
+/// The web settings for one run: the instance settings with the workspace's
+/// override applied. If the override cannot be read (database error, missing
+/// secrets key, a key that no longer decrypts, malformed options) the tools are
+/// **disabled for the run** rather than falling back to the instance backend: a
+/// workspace that chose its own provider/key (or `none`) must never silently send
+/// its queries to a different third party on the instance's quota.
+fn web_settings_for_run(
+    instance: &kyomi_core::web_tools::WebToolsSettings,
+    loaded: Result<kyomi_auth::workspace_web_config::WorkspaceWebOverride, kyomi_auth::workspace_web_config::WorkspaceWebConfigError>,
+    workspace_id: &str,
+) -> kyomi_core::web_tools::WebToolsSettings {
+    match loaded {
+        Ok(ov) => instance.with_workspace_override(ov.search, ov.fetch),
+        Err(e) => {
+            tracing::warn!(workspace_id = %workspace_id, error = %e, "workspace web tool override is unreadable; web tools are disabled for this run");
+            instance.disabled()
+        }
+    }
+}
+
+fn web_tools_eligible(settings: &kyomi_core::web_tools::WebToolsSettings, config: &AgentExecutionConfig) -> bool {
+    match config.context_type.as_str() {
+        "chat" => config.tools_subset.is_none(),
+        "kyomi_watch" => settings.in_unattended_runs,
+        _ => false,
+    }
+}
+
 fn register_web_tools_for_run(
     registry: &mut crate::tools::ToolRegistry,
     settings: &kyomi_core::web_tools::WebToolsSettings,
@@ -389,12 +421,7 @@ fn register_web_tools_for_run(
     provider_kind: ProviderKind,
     llm_base_url: Option<&str>,
 ) -> WebRunPlan {
-    let eligible = if config.tools_subset.is_some() {
-        settings.in_unattended_runs
-    } else {
-        config.context_type == "chat"
-    };
-    if !eligible {
+    if !web_tools_eligible(settings, config) {
         return WebRunPlan::default();
     }
     let provider = provider_kind.to_string();
@@ -479,7 +506,10 @@ pub async fn execute_agent_chat(
             ws_config.model = Some(model.clone());
         }
         let is_byok = ws_config.is_byok() && app_config.self_hosted;
-        let client = create_provider_from_workspace(&ws_config, app_config)?;
+        let llm_config = crate::provider::resolve_workspace_provider_config(&ws_config, app_config)?;
+        let provider_kind = llm_config.provider;
+        let llm_base_url = llm_config.base_url.clone();
+        let client = create_provider(llm_config)?;
         // Resolved once per execution so the value is stable for the whole
         // conversation turn (effort changes invalidate Anthropic's prompt
         // cache).
@@ -490,42 +520,6 @@ pub async fn execute_agent_chat(
             config.temperature,
             false,
         );
-        let provider_kind = match ws_config.provider {
-            kyomi_auth::workspace_ai_config::WorkspaceAiProvider::Kyomi
-            | kyomi_auth::workspace_ai_config::WorkspaceAiProvider::Anthropic => {
-                ProviderKind::Anthropic
-            }
-            kyomi_auth::workspace_ai_config::WorkspaceAiProvider::OpenAI => ProviderKind::OpenAI,
-            kyomi_auth::workspace_ai_config::WorkspaceAiProvider::Gemini => ProviderKind::Gemini,
-        };
-        // For Kyomi-mode workspaces, the effective provider kind reflects
-        // whatever the server env keys resolve to (which may be OpenAI or
-        // Gemini for self-hosted tenants). Re-read it from the resolved
-        // fallback in that case so usage logs attribute to the right vendor.
-        let provider_kind = if matches!(
-            ws_config.provider,
-            kyomi_auth::workspace_ai_config::WorkspaceAiProvider::Kyomi
-        ) || !app_config.self_hosted
-        {
-            resolve_provider_config(app_config)
-                .map(|c| c.provider)
-                .unwrap_or(provider_kind)
-        } else {
-            provider_kind
-        };
-        // The base URL the LLM client actually uses, mirroring
-        // `create_provider_from_workspace`: server env config unless a
-        // self-hosted workspace brings its own provider.
-        let llm_base_url = if !app_config.self_hosted
-            || matches!(
-                ws_config.provider,
-                kyomi_auth::workspace_ai_config::WorkspaceAiProvider::Kyomi
-            )
-        {
-            app_config.llm_base_url.clone()
-        } else {
-            ws_config.base_url.clone()
-        };
         (client, provider_kind, is_byok, sampling, llm_base_url)
     };
     // Read the authoritative model name from the provider (not from config defaults).
@@ -545,7 +539,7 @@ pub async fn execute_agent_chat(
         // Explicit tools_subset overrides context-based defaults. Web tools join an
         // unattended subset only when the operator enabled them for unattended runs.
         let mut include = subset.clone();
-        if app_config.web_tools.in_unattended_runs {
+        if web_tools_eligible(&app_config.web_tools, &config) {
             include.extend(crate::tools::web::WEB_TOOL_NAMES.iter().map(|n| n.to_string()));
         }
         ToolFilter {
@@ -576,14 +570,11 @@ pub async fn execute_agent_chat(
 
     // 4. Create tool registry (filtered by tools_subset if provided).
     let mut registry = create_default_registry();
-    // A workspace may override the instance's web backend (own key / provider).
-    let web_settings = match kyomi_auth::workspace_web_config::load(db, &config.workspace_id).await {
-        Ok(ov) => app_config.web_tools.with_workspace_override(ov.search, ov.fetch),
-        Err(e) => {
-            tracing::warn!(workspace_id = %config.workspace_id, error = %e, "ignoring unreadable workspace web tool override");
-            app_config.web_tools.clone()
-        }
-    };
+    let web_settings = web_settings_for_run(
+        &app_config.web_tools,
+        kyomi_auth::workspace_web_config::load(db, &config.workspace_id).await,
+        &config.workspace_id,
+    );
     let web_plan = register_web_tools_for_run(
         &mut registry,
         &web_settings,
@@ -2447,7 +2438,11 @@ mod tests {
         let app = web_config(TAVILY);
         let copilot = AgentExecutionConfig { context_type: "dashboard_copilot".into(), ..AgentExecutionConfig::default() };
         assert!(registered(&app, &copilot, ProviderKind::OpenAI).is_empty());
-        let watch = AgentExecutionConfig { tools_subset: Some(vec!["query_datasource".into()]), ..AgentExecutionConfig::default() };
+        let watch = AgentExecutionConfig {
+            context_type: "kyomi_watch".into(),
+            tools_subset: Some(vec!["query_datasource".into()]),
+            ..AgentExecutionConfig::default()
+        };
         assert!(registered(&app, &watch, ProviderKind::OpenAI).is_empty());
         let mut with_flag = TAVILY.to_vec();
         with_flag.push(("WEB_TOOLS_UNATTENDED", "true"));
@@ -2494,5 +2489,34 @@ mod tests {
         let mut registry = crate::tools::ToolRegistry::new();
         let plan = register_web_tools_for_run(&mut registry, &app.web_tools, &AgentExecutionConfig::default(), ProviderKind::OpenAI, Some("https://api.openai.com/v1"));
         assert!(!plan.available);
+    }
+
+    #[test]
+    fn unreadable_workspace_override_disables_web_tools_instead_of_using_the_instance_backend() {
+        let instance = web_config(TAVILY).web_tools;
+        let err = kyomi_auth::workspace_web_config::WorkspaceWebConfigError::EncryptionUnavailable;
+        let settings = web_settings_for_run(&instance, Err(err), "w1");
+        let mut registry = crate::tools::ToolRegistry::new();
+        let plan = register_web_tools_for_run(&mut registry, &settings, &AgentExecutionConfig::default(), ProviderKind::OpenAI, None);
+        assert!(!plan.available, "must not fall back to the instance's tavily backend");
+        // A readable, empty override keeps the instance backend.
+        let ok = web_settings_for_run(&instance, Ok(Default::default()), "w1");
+        let plan = register_web_tools_for_run(&mut crate::tools::ToolRegistry::new(), &ok, &AgentExecutionConfig::default(), ProviderKind::OpenAI, None);
+        assert!(plan.available);
+    }
+
+    #[test]
+    fn unattended_flag_enables_watches_but_never_copilots_or_slack() {
+        let mut vars = TAVILY.to_vec();
+        vars.push(("WEB_TOOLS_UNATTENDED", "true"));
+        let app = web_config(&vars);
+        let subset = Some(vec!["query_datasource".to_string()]);
+        for (ctx, expected) in [("kyomi_watch", true), ("dashboard_copilot", false), ("knowledge_copilot", false), ("slack", false)] {
+            let cfg = AgentExecutionConfig { context_type: ctx.into(), tools_subset: subset.clone(), ..AgentExecutionConfig::default() };
+            assert_eq!(registered(&app, &cfg, ProviderKind::OpenAI).len() == 1, expected, "{ctx}");
+        }
+        // Chat with a subset is not interactive chat.
+        let chat_subset = AgentExecutionConfig { tools_subset: subset, ..AgentExecutionConfig::default() };
+        assert!(registered(&app, &chat_subset, ProviderKind::OpenAI).is_empty());
     }
 }

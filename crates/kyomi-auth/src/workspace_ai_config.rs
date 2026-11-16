@@ -514,6 +514,17 @@ fn merge_custom_settings_key(
     key: &str,
     model: &str,
 ) -> serde_json::Value {
+    merge_custom_settings_value(settings, key, Some(serde_json::json!(model)))
+}
+
+/// Non-destructively write `settings.custom_settings[key] = value` (or remove the
+/// key with `None`), creating the nested objects as needed. Shared by every writer
+/// of `custom_settings` in this crate.
+pub(crate) fn merge_custom_settings_value(
+    settings: &Option<serde_json::Value>,
+    key: &str,
+    value: Option<serde_json::Value>,
+) -> serde_json::Value {
     let mut s = settings
         .clone()
         .unwrap_or_else(|| serde_json::json!({}));
@@ -523,14 +534,21 @@ fn merge_custom_settings_key(
         s = serde_json::json!({});
     }
 
-    if s.get("custom_settings").is_none()
+    if s.get("custom_settings").and_then(|v| v.as_object()).is_none()
         && let Some(obj) = s.as_object_mut()
     {
         obj.insert("custom_settings".to_string(), serde_json::json!({}));
     }
 
     if let Some(cs) = s.get_mut("custom_settings").and_then(|v| v.as_object_mut()) {
-        cs.insert(key.to_string(), serde_json::json!(model));
+        match value {
+            Some(v) => {
+                cs.insert(key.to_string(), v);
+            }
+            None => {
+                cs.remove(key);
+            }
+        }
     }
 
     s

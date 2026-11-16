@@ -2,7 +2,7 @@
 
 Kyomi's chat agent can search the public web and read public web pages (for news, documentation, definitions and market context) when an administrator has enabled it. The agent uses these tools only for external information; numbers about your workspace always come from queries against your datasources.
 
-Web access is **off until configured**: there is no default backend. It is available in chat only, not in watches or scheduled runs, unless the administrator opts in. It is an internal capability of the Kyomi agent and is **not** exposed through the [MCP server](/docs/mcp).
+Web access is **off until configured**: there is no default backend. It is available in interactive chat only. Watches and scheduled runs can use it only if the administrator opts in; copilots and Slack never do. It is an internal capability of the Kyomi agent and is **not** exposed through the [MCP server](/docs/mcp).
 
 ## What leaves Kyomi
 
@@ -12,7 +12,7 @@ Web content is treated as untrusted data. The agent is told not to follow instru
 
 ## Sources
 
-Answers that used the web show the sources (title and link). Each search or fetch appears in the conversation with the pages it used.
+Answers that used the web show their sources (title and link). With `tavily`, `linkup` and `builtin`, each search or fetch also appears as a card in the conversation listing the pages it used. With `anthropic` and `openrouter` the provider runs the tool inside one model call, so there is no card; the sources are listed under **Sources** at the end of the answer instead. (OpenRouter reports citations for search only, so a fetch adds none.)
 
 ## Backends
 
@@ -30,6 +30,8 @@ An unsupported combination (for example `anthropic` with `LLM_PROVIDER=openai`) 
 
 ## Limits
 
-Per conversation turn: 5 searches and 5 fetches. Per month: 200 calls per workspace and 1,000 across the instance, for each tool. At a limit the agent is told web access is unavailable and carries on without it. All are environment-configurable (see `deploy/.env.example`).
+Per conversation turn: 5 searches and 5 fetches. Per month: 200 calls per workspace and 1,000 across the instance, for each tool. At a limit the agent is told web access is unavailable and carries on without it. All are environment-configurable (see `deploy/.env.example`); a mistyped value stops the server at startup.
 
-A workspace can use its own backend and key through its workspace settings (`custom_settings.web_search` / `custom_settings.web_fetch`); there is no settings page for it yet.
+The monthly limits are soft: simultaneous conversations can overshoot slightly, and with `anthropic` / `openrouter` usage is added after the provider reports it. Without Redis the monthly counters are per server instance and reset on restart.
+
+A workspace can use its own backend and key through its workspace settings (`custom_settings.web_search` / `custom_settings.web_fetch`; the key is stored encrypted and a workspace `base_url` is ignored); there is no settings page for it yet. If a workspace's override cannot be read, web access is switched off for that workspace's conversations rather than falling back to the instance backend. The monthly limits still apply to a workspace's own key.

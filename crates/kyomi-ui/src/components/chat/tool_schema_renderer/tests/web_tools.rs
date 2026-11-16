@@ -15,11 +15,12 @@ fn search_sources_render_as_external_links_with_host_and_date() {
         "tool": "web_search",
         "input": {"query": "rust release"},
         "output": {"available": true, "results": [
-            {"title": "Rust 1.99", "url": "https://blog.rust-lang.org/2026/x", "snippet": "<untrusted_web_content>x</untrusted_web_content>", "published": "2026-10-01"}
+            {"title": "<untrusted_web_content>\nRust 1.99\n</untrusted_web_content>", "url": "https://blog.rust-lang.org/2026/x", "snippet": "<untrusted_web_content>x</untrusted_web_content>", "published": "2026-10-01"}
         ]}
     }));
     assert!(html.contains("rust release"), "{html}");
     assert!(html.contains("Rust 1.99"), "{html}");
+    assert!(!html.contains("&lt;untrusted_web_content"), "fence markers are not shown to people: {html}");
     assert!(html.contains("href=\"https://blog.rust-lang.org/2026/x\""), "{html}");
     assert!(html.contains("noopener"), "{html}");
     assert!(html.contains("blog.rust-lang.org · 2026-10-01"), "{html}");

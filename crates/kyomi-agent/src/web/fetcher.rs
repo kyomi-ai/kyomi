@@ -87,21 +87,17 @@ impl BuiltinFetcher {
         }
     }
 
-    /// Resolve and validate; returns the addresses the connection is pinned to.
+    /// Resolve and validate (shared pinned-egress code in `kyomi-mcp-client`);
+    /// returns the addresses the connection is pinned to.
     async fn validated_addresses(&self, url: &Url) -> Result<(String, Vec<SocketAddr>), WebError> {
         let host = url.host_str().unwrap_or_default().trim_matches(['[', ']']).to_string();
         let port = url.port_or_known_default().unwrap_or(443);
-        let addresses = if let Ok(ip) = host.parse::<IpAddr>() {
-            vec![SocketAddr::new(ip, port)]
-        } else {
-            self.resolver
-                .resolve(&host, port)
-                .await
-                .map_err(|_| WebError::InvalidRequest("the host name could not be resolved".into()))?
-        };
-        if addresses.is_empty() || addresses.len() > 32 || addresses.iter().any(|a| !self.is_allowed_ip(a.ip())) {
-            return Err(WebError::Blocked("the address is not a public internet address".into()));
-        }
+        let addresses = kyomi_mcp_client::validated_addresses(self.resolver.as_ref(), &host, port, |ip| self.is_allowed_ip(ip))
+            .await
+            .map_err(|e| match e.kind {
+                kyomi_mcp_client::ErrorKind::Dns => WebError::InvalidRequest("the host name could not be resolved".into()),
+                _ => WebError::Blocked("the address is not a public internet address".into()),
+            })?;
         Ok((host, addresses))
     }
 
@@ -109,14 +105,9 @@ impl BuiltinFetcher {
         let mut url = self.check_url(&request.url)?;
         for _ in 0..=MAX_REDIRECTS {
             let (host, addresses) = self.validated_addresses(&url).await?;
-            let client = reqwest::Client::builder()
-                .no_proxy()
-                .redirect(reqwest::redirect::Policy::none())
-                .connect_timeout(CONNECT_TIMEOUT)
-                .timeout(DEADLINE)
-                .pool_max_idle_per_host(0)
+            let client = kyomi_mcp_client::pinned_client(&host, &addresses, CONNECT_TIMEOUT, DEADLINE)
+                .map_err(|_| WebError::Upstream("could not build the HTTP client".into()))?
                 .user_agent("Mozilla/5.0 (compatible; KyomiBot/1.0; +https://kyomi.ai)")
-                .resolve_to_addrs(&host, &addresses)
                 .build()
                 .map_err(|e| WebError::Upstream(e.to_string()))?;
             let response = client
@@ -126,7 +117,7 @@ impl BuiltinFetcher {
                 .await
                 .map_err(|e| if e.is_timeout() { WebError::Timeout } else { WebError::Upstream("connection failed".into()) })?;
             // Defence in depth: the peer must be one of the validated answers.
-            if !response.remote_addr().is_some_and(|p| addresses.contains(&p)) {
+            if !kyomi_mcp_client::peer_is_pinned(&response, &addresses) {
                 return Err(WebError::Blocked("connected to an unexpected address".into()));
             }
             let status = response.status();
