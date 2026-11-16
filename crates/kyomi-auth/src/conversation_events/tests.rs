@@ -1948,9 +1948,15 @@ async fn lifecycle_review_regressions(db: &DbPool) {
         cache_creation_input_tokens: 4,
         cache_read_input_tokens: 3,
         extra_metadata: Some(r#"{"calls":[{"cache_read_input_tokens":3}]}"#.into()),
+        request_id: None,
     };
     store
         .fenced_api_usage(&conversation, &receipt.run_id, &lease, 1105, &usage)
+        .await
+        .unwrap();
+    // A second write by the valid owner (a retry) must not bill the run twice.
+    store
+        .fenced_api_usage(&conversation, &receipt.run_id, &lease, 1107, &usage)
         .await
         .unwrap();
     let mut stale = lease.clone();
@@ -1977,7 +1983,7 @@ async fn lifecycle_review_regressions(db: &DbPool) {
         .unwrap()
         .0,
         1,
-        "stale/expired owners must write zero usage rows"
+        "a retry, stale owner and expired owner must all write zero extra usage rows"
     );
     let (cache_write, cache_read, metadata): (i32, i32, String) = kyomi_core::db_fetch_one!(
         db,
@@ -2249,6 +2255,7 @@ async fn lease_wait_cannot_resurrect(db: &DbPool, other: &DbPool) {
                                         cache_creation_input_tokens: 0,
                                         cache_read_input_tokens: 0,
                                         extra_metadata: None,
+                                        request_id: None,
                                     },
                                 )
                                 .await

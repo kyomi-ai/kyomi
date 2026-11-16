@@ -31,35 +31,6 @@ use kyomi_embed::LazyEmbedding;
 
 use crate::adapter::{AssistantMessagePersistence, ChatAgentAdapter, UserMessagePersistence};
 
-/// Markup on provider cost to cover payment processing fees; Kyomi-billed rows only.
-pub(crate) const AI_COST_MULTIPLIER: f64 = 1.1;
-
-/// SQL used to persist a row to `api_usage_log` after an agent turn.
-///
-/// Semantics of the two cost columns (see [`kyomi_core::models::ApiUsageLog`]):
-/// * `cost_estimate` is what `BillingService::calculate_credits_info` sums —
-///   it is the amount debited from Kyomi bundle credits. For BYOK rows it is
-///   always `0.0` so BYOK traffic does not touch Kyomi billing.
-/// * `provider_cost_usd` is BYOK-only observability — the real upstream
-///   provider cost in USD. `NULL` for Kyomi rows where `cost_estimate` is
-///   already the real cost.
-///
-/// Extracted as a const so it can be unit-tested without a database.
-///
-/// `extra_metadata` is a `json` column on Postgres (the text parameter needs
-/// the cast) and plain `TEXT` on SQLite, so the statement is per backend.
-pub(crate) const API_USAGE_LOG_INSERT_SQL: &str = "INSERT INTO api_usage_log \
-     (user_id, workspace_id, session_id, timestamp, provider, model, \
-      input_tokens, output_tokens, total_tokens, \
-      cache_creation_input_tokens, cache_read_input_tokens, \
-      cost_estimate, component, provider_cost_usd, extra_metadata) \
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $13, $14, $10, $11, $12, $15::text::json)";
-pub(crate) const API_USAGE_LOG_INSERT_SQL_SQLITE: &str = "INSERT INTO api_usage_log \
-     (user_id, workspace_id, session_id, timestamp, provider, model, \
-      input_tokens, output_tokens, total_tokens, \
-      cache_creation_input_tokens, cache_read_input_tokens, \
-      cost_estimate, component, provider_cost_usd, extra_metadata) \
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $13, $14, $10, $11, $12, $15)";
 use crate::agent::{AgentConfig, CustomAgent};
 use crate::prompt;
 use crate::provider::{
@@ -658,7 +629,7 @@ pub async fn execute_agent_chat(
     // `AgentThinkingTracker::finalize`'s doc for why the ordering
     // (finalize while holding the lock, release, then step 14 writes) is
     // what makes the terminal write strictly win.
-    let (thinking_events, full_texts, token_usage, input_tokens, output_tokens, total_cost) = {
+    let (thinking_events, full_texts, token_usage) = {
         let mut t = tracker.lock().await;
         t.finalize();
         let events = t.get_events_for_storage();
@@ -676,51 +647,21 @@ pub async fn execute_agent_chat(
             "context_tokens": ctx,
             "context_window": ctx_win,
         });
-        (events, ft, Some(usage), inp, out, cost)
+        (events, ft, Some(usage))
     };
 
-    // 14b. Log usage to api_usage_log for billing.
-    // Apply 10% markup to cover payment processing fees.
-    //
-    // BYOK (workspace-owned keys): the workspace pays the provider directly,
-    // so we record the row with `cost_estimate = 0.0` — token counts and
-    // model names are preserved for diagnostics, but `check_ai_usage_allowed`
-    // sums `cost_estimate` from this table and must not charge BYOK usage
-    // against `ai_credits_used_usd`. Writing 0 keeps the single source of
-    // truth for billing consistent without a parallel BYOK-only code path.
-    if input_tokens > 0 || output_tokens > 0 {
-        let total_tokens = (input_tokens + output_tokens) as i32;
-        // BYOK: `cost_estimate = 0.0` (not billed against Kyomi credits) and
-        //       `provider_cost_usd = total_cost` so we keep observability into
-        //       the real upstream provider spend. `total_cost` comes from the
-        //       tracker, which accumulates the `cost` field from each LLM response.
-        // Kyomi: `cost_estimate = total_cost * markup` (billed) and
-        //       `provider_cost_usd = NULL` — `cost_estimate` already reflects
-        //       the real cost, so the extra column would be redundant.
-        let (billed_cost, provider_cost_usd): (f64, Option<f64>) = if is_byok {
-            (0.0, Some(total_cost))
-        } else {
-            (total_cost * AI_COST_MULTIPLIER, None)
-        };
-        let provider_str = provider_kind.to_string();
-        let ledger_totals = usage_ledger.totals();
-        let cache_creation = i32::try_from(ledger_totals.cache_creation_input_tokens).unwrap_or(i32::MAX);
-        let cache_read = i32::try_from(ledger_totals.cache_read_input_tokens).unwrap_or(i32::MAX);
-        let extra_metadata = usage_ledger.extra_metadata().map(|m| m.to_string());
+    // 14b. Log usage to api_usage_log for billing. The 10% markup and the BYOK
+    // rule (`cost_estimate = 0`, real cost in `provider_cost_usd`) live in
+    // `UsageLedger::billing_row`. The ledger sees every provider call (incl. the max-iterations wrap-up) and is
+    // the single source for the row's tokens, cost and cache totals (KYO-974).
+    if let Some(mut usage) = usage_ledger.billing_row(
+        is_byok,
+        &provider_kind.to_string(),
+        &model_name,
+        &config.component,
+    ) {
         if let Some(run) = config.assistant_message_persistence.durable_run() {
-            let usage = kyomi_auth::conversation_events::ApiUsageWrite {
-                provider: provider_str,
-                model: model_name.clone(),
-                input_tokens: input_tokens as i32,
-                output_tokens: output_tokens as i32,
-                total_tokens,
-                cost_estimate: billed_cost,
-                component: config.component.clone(),
-                provider_cost_usd,
-                cache_creation_input_tokens: cache_creation,
-                cache_read_input_tokens: cache_read,
-                extra_metadata: extra_metadata.clone(),
-            };
+            usage.request_id = Some(run.run_id.as_str().to_string());
             kyomi_auth::conversation_events::ConversationStore::new(
                 db, encryption_key, &config.user_id, &config.workspace_id,
             ).fenced_api_usage(
@@ -729,25 +670,23 @@ pub async fn execute_agent_chat(
             ).await.map_err(|error| kyomi_core::Error::ServiceUnavailable(error.to_string()))?;
         } else if let Err(e) = kyomi_core::db_execute!(
             db,
-            match &db {
-                DbPool::Postgres(_) => API_USAGE_LOG_INSERT_SQL,
-                DbPool::Sqlite(_) => API_USAGE_LOG_INSERT_SQL_SQLITE,
-            },
+            &kyomi_core::models::ApiUsageInsert::insert_sql(matches!(db, DbPool::Postgres(_))),
             &config.user_id,
             &config.workspace_id,
             &config.session_id as &str,
             chrono::Utc::now(),
-            &provider_str,
-            &model_name,
-            input_tokens as i32,
-            output_tokens as i32,
-            total_tokens,
-            billed_cost,
-            &config.component,
-            provider_cost_usd,
-            cache_creation,
-            cache_read,
-            &extra_metadata
+            &usage.provider,
+            &usage.model,
+            usage.input_tokens,
+            usage.output_tokens,
+            usage.total_tokens,
+            usage.cost_estimate,
+            &usage.component,
+            usage.provider_cost_usd,
+            usage.cache_creation_input_tokens,
+            usage.cache_read_input_tokens,
+            &usage.extra_metadata,
+            None::<&str>
         ) {
             warn!(error = %e, "Failed to log API usage to database");
         }
@@ -1704,37 +1643,6 @@ mod tests {
             logs.contains("Dropping dashboard summary") && logs.contains(&dashboard_id),
             "the dropped summary must be logged, not silent: {logs}"
         );
-    }
-
-    // -- Contract: api_usage_log INSERT includes provider_cost_usd -----------
-    //
-    // Guards the BYOK observability column: `provider_cost_usd` must appear
-    // in both the column list and the VALUES clause, and the parameter count
-    // must match. If someone accidentally drops the column or reorders the
-    // INSERT, this test catches it at `cargo test` time rather than in prod.
-
-    #[test]
-    fn api_usage_log_insert_has_provider_cost_usd_column() {
-        let sql = API_USAGE_LOG_INSERT_SQL;
-        assert!(
-            sql.contains("provider_cost_usd"),
-            "INSERT must reference provider_cost_usd: {sql}"
-        );
-        // 15 columns, 15 distinct binds: the cache totals ($13, $14) and the
-        // per-call breakdown ($15) are real values, never literals (KYO-974).
-        for sql in [API_USAGE_LOG_INSERT_SQL, API_USAGE_LOG_INSERT_SQL_SQLITE] {
-            let placeholder_count = (1..=15).filter(|n| sql.contains(&format!("${n}"))).count();
-            assert_eq!(
-                placeholder_count, 15,
-                "INSERT should have exactly 15 bind placeholders: {sql}"
-            );
-            assert!(!sql.contains(", 0, 0,"), "cache columns must not be literals: {sql}");
-        }
-    }
-
-    #[test]
-    fn api_usage_log_insert_targets_correct_table() {
-        assert!(API_USAGE_LOG_INSERT_SQL.contains("INSERT INTO api_usage_log"));
     }
 
     #[test]

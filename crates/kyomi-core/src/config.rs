@@ -247,7 +247,9 @@ pub struct Config {
     pub llm_base_url: Option<String>,
 
     /// Context window size for the configured LLM model (in tokens).
-    /// Populated at startup from the provider's model list API (e.g., OpenRouter).
+    /// `LLM_CONTEXT_WINDOW` when set (it always wins); otherwise populated at
+    /// startup from the provider's model list API (e.g., OpenRouter), and
+    /// otherwise left 0 so the provider uses its own per-model window.
     /// 0 = unknown.
     pub llm_context_window: u32,
 
@@ -638,6 +640,14 @@ impl Config {
     /// Returns true if Slack integration is configured (client ID + secret present).
     pub fn slack_configured(&self) -> bool {
         self.slack_client_id.is_some() && self.slack_client_secret.is_some()
+    }
+
+    /// Record a context window fetched from the provider's model list API. An
+    /// explicit `LLM_CONTEXT_WINDOW` is never overwritten.
+    pub fn apply_fetched_context_window(&mut self, tokens: u32) {
+        if self.llm_context_window == 0 {
+            self.llm_context_window = tokens;
+        }
     }
 
     /// Returns true if an LLM provider is configured (AI features available).

@@ -724,26 +724,11 @@ impl CustomAgent {
             // (return, continue, or fall through to tool execution).
             iterations_used += 1;
 
-            if let Some(ledger) = &self.usage_ledger {
-                ledger.record(self.client.model(), &response);
-            }
-
-            // Track token usage.
-            // Total input tokens = regular + cache-creation + cache-read.
-            // `input_tokens` alone excludes cached tokens, which makes the
-            // context display wildly wrong when prompt caching is active.
-            let total_input = response.usage.input_tokens
+            // Usage and cost were already accounted for inside `call_llm`, at the
+            // moment the provider returned (KYO-974); only loop state is kept here.
+            self.state.last_input_tokens = response.usage.input_tokens
                 + response.usage.cache_creation_input_tokens
                 + response.usage.cache_read_input_tokens;
-            self.state.last_input_tokens = total_input;
-            if self.runtime.is_none() { self.progress(AgentProgress::Usage(total_input, response.usage.output_tokens, response.cost)).await; }
-            if let Some(ref cb) = self.callbacks.on_token_usage {
-                cb(
-                    total_input,
-                    response.usage.output_tokens,
-                    response.cost,
-                );
-            }
 
             // Billable-cost accumulator for `max_total_tokens`. Deliberately
             // excludes `cache_read_input_tokens` — see the field doc on
@@ -1161,7 +1146,31 @@ impl CustomAgent {
             context.complete(&provider, sink.as_ref(), &agent_runtime::ModelCallId(format!("model-{}", self.state.global_iteration)))
                 .await.map_err(runtime_error)
         } else {
-            self.client.complete(messages, tools, &self.config.request_options(), &self.user_names).await
+            let response = self.client.complete(messages, tools, &self.config.request_options(), &self.user_names).await?;
+            self.account_usage(&response).await;
+            Ok(response)
+        }
+    }
+
+    /// Account for one model call the moment the provider returns it, before any
+    /// cancellation check or persistence step can drop a response that was paid
+    /// for (KYO-974). Every call goes through here: loop turns and the
+    /// max-iterations wrap-up, on both the legacy and the durable path. Records
+    /// the run's usage ledger (the source of `api_usage_log`), feeds the usage
+    /// callback, and on the legacy path the thinking tracker. The durable path's
+    /// tracker is fed by the committed usage event instead.
+    async fn account_usage(&self, response: &crate::types::LLMResponse) {
+        if let Some(ledger) = &self.usage_ledger {
+            ledger.record(self.client.model(), response);
+        }
+        let total_input = response.usage.input_tokens
+            + response.usage.cache_creation_input_tokens
+            + response.usage.cache_read_input_tokens;
+        if self.runtime.is_none() {
+            self.progress(AgentProgress::Usage(total_input, response.usage.output_tokens, response.cost)).await;
+        }
+        if let Some(ref cb) = self.callbacks.on_token_usage {
+            cb(total_input, response.usage.output_tokens, response.cost);
         }
     }
 
@@ -1510,6 +1519,8 @@ impl agent_runtime::CompleteProvider for RuntimeProvider<'_> {
         let response = self.agent.client.complete(self.messages, self.tools, &self.agent.config.request_options(),
             &self.agent.user_names).await
             .map_err(|error| agent_runtime::ExecutionError::Provider(error.to_string()))?;
+        // Before persistence: a paid response is accounted even if committing it fails.
+        self.agent.account_usage(&response).await;
         let mut planning = Vec::new();
         if let Some(thought) = response.thinking_content.as_deref().and_then(crate::thinking::clean_thought) {
             planning.push(thought.full_text.unwrap_or(thought.display));
@@ -3248,6 +3259,31 @@ Second chart:\n{CHARTML_STRIPPED_NOTE}\nDone."
         let t = ledger.totals();
         assert_eq!((t.cache_creation_input_tokens, t.cache_read_input_tokens), (5000, 5000));
         assert_eq!(ledger.extra_metadata().unwrap()["calls"].as_array().unwrap().len(), 3);
+    }
+
+    /// The forced wrap-up turn after `max_iterations` is a paid provider call
+    /// carrying the full context; it must be in the ledger like any other
+    /// (the lifecycle review's blocker: it used to bypass accounting).
+    #[tokio::test]
+    async fn wrap_up_call_after_max_iterations_is_accounted() {
+        let (mut agent, calls) = scripted_agent_with_config(
+            AgentConfig { max_iterations: 2, max_duration: None, ..Default::default() },
+            vec![Reply::ToolCall; 2],
+            Reply::Text("wrapped up".into()),
+        )
+        .await;
+        let ledger = crate::usage_ledger::UsageLedger::default();
+        agent.set_usage_ledger(ledger.clone());
+        let tokens = Arc::new(Mutex::new(0u32));
+        let sink = tokens.clone();
+        agent.callbacks_mut().on_token_usage = Some(Box::new(move |_, _, _| *sink.lock().unwrap() += 1));
+
+        agent.chat("hi", CancellationToken::new(), None, None, None).await.unwrap();
+
+        let provider_calls = calls.lock().unwrap().len();
+        assert_eq!(provider_calls, 3, "2 loop iterations + the wrap-up");
+        assert_eq!(ledger.extra_metadata().unwrap()["calls"].as_array().unwrap().len(), provider_calls);
+        assert_eq!(*tokens.lock().unwrap() as usize, provider_calls, "usage callback also sees every call");
     }
 
     #[tokio::test]

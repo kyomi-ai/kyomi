@@ -9,34 +9,34 @@ use kyomi_core::DbPool;
 use serde_json::json;
 
 use crate::anthropic::AnthropicClient;
-use crate::execution::{AI_COST_MULTIPLIER, API_USAGE_LOG_INSERT_SQL_SQLITE};
-use crate::usage_ledger::UsageLedger;
+use crate::usage_ledger::{UsageLedger, AI_COST_MULTIPLIER};
+use kyomi_core::models::ApiUsageInsert;
 
-/// Price `response` as the chat path does and write the row the way
-/// `execute_agent_chat` does.
+/// Price `response` and write the row exactly as `execute_agent_chat` does:
+/// the ledger builds it and `ApiUsageInsert` writes it.
 async fn log_run(db: &DbPool, workspace_id: &str, model: &str, response: serde_json::Value) {
     let parsed = AnthropicClient::parse_response(model, &response, None).unwrap();
     let ledger = UsageLedger::default();
     ledger.record(model, &parsed);
-    let t = ledger.totals();
-    let billed = parsed.cost.unwrap() * AI_COST_MULTIPLIER;
+    let u = ledger.billing_row(false, "anthropic", model, "chat_agent").unwrap();
     let DbPool::Sqlite(sq) = db else { panic!("sqlite fixture") };
-    sqlx::query(API_USAGE_LOG_INSERT_SQL_SQLITE)
+    sqlx::query(&ApiUsageInsert::insert_sql(false))
         .bind("u1")
         .bind(workspace_id)
         .bind("session-1")
         .bind(chrono::Utc::now())
-        .bind("anthropic")
-        .bind(model)
-        .bind(t.prompt_tokens() as i32)
-        .bind(t.output_tokens as i32)
-        .bind((t.prompt_tokens() + t.output_tokens) as i32)
-        .bind(billed)
-        .bind("chat_agent")
-        .bind(None::<f64>)
-        .bind(t.cache_creation_input_tokens as i32)
-        .bind(t.cache_read_input_tokens as i32)
-        .bind(ledger.extra_metadata().map(|m| m.to_string()))
+        .bind(&u.provider)
+        .bind(&u.model)
+        .bind(u.input_tokens)
+        .bind(u.output_tokens)
+        .bind(u.total_tokens)
+        .bind(u.cost_estimate)
+        .bind(&u.component)
+        .bind(u.provider_cost_usd)
+        .bind(u.cache_creation_input_tokens)
+        .bind(u.cache_read_input_tokens)
+        .bind(&u.extra_metadata)
+        .bind(None::<&str>)
         .execute(sq)
         .await
         .unwrap();

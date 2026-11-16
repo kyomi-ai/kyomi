@@ -274,7 +274,13 @@ impl AnthropicClient {
         // thinking configuration is part of the cached prefix, so it is sent
         // on every request of a supporting model (KYO-974). Models without
         // adaptive thinking (Haiku 4.5, ...) would answer 400, so they get none.
-        if crate::anthropic_pricing::supports_adaptive_thinking(model) {
+        // The API rejects `temperature` other than 1 while thinking is adaptive
+        // (verified live), so a configured temperature wins and no `thinking` is
+        // sent: models that think only on request (Sonnet 4.6, ...) then keep
+        // working with it. Models that think by default (5.x) need
+        // `LLM_TEMPERATURE=omit` regardless.
+        let temperature_allows_thinking = options.temperature.is_none_or(|t| (t - 1.0).abs() < f32::EPSILON);
+        if temperature_allows_thinking && crate::anthropic_pricing::supports_adaptive_thinking(model) {
             body["thinking"] = json!({"type": "adaptive", "display": "summarized"});
         }
 
@@ -583,8 +589,8 @@ impl AnthropicClient {
             message_id: response.get("id").and_then(|v| v.as_str()).map(str::to_string),
             request_id,
             service_tier: u.and_then(|u| u.get("service_tier")).and_then(|v| v.as_str()).map(str::to_string),
-            cache_creation_5m: w5m as u32,
-            cache_creation_1h: w1h as u32,
+            cache_creation_5m: u32::try_from(w5m).unwrap_or(u32::MAX),
+            cache_creation_1h: u32::try_from(w1h).unwrap_or(u32::MAX),
             stop_reason: finish_reason.to_string(),
             stop_details: response.get("stop_details").filter(|v| !v.is_null()).cloned(),
             cost_usd: priced.cost_usd,
@@ -760,7 +766,7 @@ mod tests {
     /// byte-identical on every request of a tool loop. Live measurement
     /// (Haiku 5.5, 4-round dependent chain) found replay within run-to-run
     /// noise (about 3% cheaper) and the stateless cache reads grew every call,
-    /// so thinking is not replayed; see docs/LLM_PROVIDERS.md.
+    /// so thinking is not replayed; see kyomi-private/docs/LLM_PROVIDERS.md.
     #[test]
     fn stateless_history_has_no_thinking_blocks_and_is_deterministic() {
         let tool_calls = vec![ToolCall {
@@ -1550,6 +1556,19 @@ mod tests {
         assert_eq!(body["thinking"], json!({"type": "adaptive", "display": "summarized"}));
         let body = AnthropicClient::build_request_body("claude-haiku-4-5-20251001", None, msgs(), &[], &opts);
         assert!(body.get("thinking").is_none(), "{body}");
+    }
+
+    /// Live finding: `temperature` other than 1 is a 400 while thinking is adaptive.
+    #[test]
+    fn a_configured_temperature_other_than_one_suppresses_the_thinking_parameter() {
+        let msgs = || vec![json!({"role": "user", "content": "hi"})];
+        let warm = RequestOptions::new(1024).with_temperature(Some(0.25));
+        let body = AnthropicClient::build_request_body("claude-sonnet-4-6", None, msgs(), &[], &warm);
+        assert!(body.get("thinking").is_none(), "{body}");
+        assert_eq!(body["temperature"], json!(0.25));
+        let one = RequestOptions::new(1024).with_temperature(Some(1.0));
+        let body = AnthropicClient::build_request_body("claude-sonnet-4-6", None, msgs(), &[], &one);
+        assert!(body.get("thinking").is_some(), "{body}");
     }
 
     #[test]

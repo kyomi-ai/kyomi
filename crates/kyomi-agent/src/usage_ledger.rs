@@ -10,6 +10,8 @@ use std::sync::{Arc, Mutex};
 
 use serde_json::json;
 
+use kyomi_core::models::ApiUsageInsert;
+
 use crate::types::{AgentTokenUsage, LLMResponse, ProviderCallDetail};
 
 /// Shared handle: the agent loop records into it, `execute_agent_chat` reads it.
@@ -20,11 +22,20 @@ pub struct UsageLedger(Arc<Mutex<Vec<CallRecord>>>);
 struct CallRecord {
     model: String,
     usage: AgentTokenUsage,
+    /// Provider cost of this call in USD (`LLMResponse::cost`).
+    cost: Option<f64>,
     detail: Option<ProviderCallDetail>,
 }
 
+/// Markup on provider cost to cover payment processing fees; Kyomi-billed rows only.
+pub const AI_COST_MULTIPLIER: f64 = 1.1;
+
+fn saturating_i32(n: u64) -> i32 {
+    i32::try_from(n).unwrap_or(i32::MAX)
+}
+
 /// Sums over every call in a run.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct LedgerTotals {
     /// Uncached input tokens.
     pub fresh_input_tokens: u64,
@@ -32,6 +43,8 @@ pub struct LedgerTotals {
     pub cache_creation_input_tokens: u64,
     pub cache_read_input_tokens: u64,
     pub reasoning_tokens: u64,
+    /// Provider cost in USD, summed over calls that reported one.
+    pub cost_usd: f64,
 }
 
 impl LedgerTotals {
@@ -47,6 +60,7 @@ impl UsageLedger {
         self.lock().push(CallRecord {
             model: model.to_string(),
             usage: response.usage.clone(),
+            cost: response.cost,
             detail: response.call_detail.clone(),
         });
     }
@@ -65,6 +79,45 @@ impl UsageLedger {
             cache_read_input_tokens: t.cache_read_input_tokens
                 + u64::from(c.usage.cache_read_input_tokens),
             reasoning_tokens: t.reasoning_tokens + u64::from(c.usage.reasoning_tokens),
+            cost_usd: t.cost_usd + c.cost.unwrap_or(0.0),
+        })
+    }
+
+    /// The run's `api_usage_log` row, or `None` when no tokens were used. The
+    /// ledger is the single source for tokens, cost and cache totals: it sees
+    /// every provider call, including the max-iterations wrap-up.
+    pub fn billing_row(
+        &self,
+        is_byok: bool,
+        provider: &str,
+        model: &str,
+        component: &str,
+    ) -> Option<ApiUsageInsert> {
+        let t = self.totals();
+        let (input, output) = (t.prompt_tokens(), t.output_tokens);
+        if input == 0 && output == 0 {
+            return None;
+        }
+        // BYOK: the workspace pays the provider, so Kyomi credits are untouched
+        // (`cost_estimate` 0) and the real cost is kept for observability.
+        let (cost_estimate, provider_cost_usd) = if is_byok {
+            (0.0, Some(t.cost_usd))
+        } else {
+            (t.cost_usd * AI_COST_MULTIPLIER, None)
+        };
+        Some(ApiUsageInsert {
+            provider: provider.to_string(),
+            model: model.to_string(),
+            component: component.to_string(),
+            request_id: None,
+            input_tokens: saturating_i32(input),
+            output_tokens: saturating_i32(output),
+            total_tokens: saturating_i32(input + output),
+            cost_estimate,
+            provider_cost_usd,
+            cache_creation_input_tokens: saturating_i32(t.cache_creation_input_tokens),
+            cache_read_input_tokens: saturating_i32(t.cache_read_input_tokens),
+            extra_metadata: self.extra_metadata().map(|m| m.to_string()),
         })
     }
 
@@ -176,6 +229,44 @@ mod tests {
         assert_eq!(calls[0]["message_id"], "msg_1");
         assert_eq!(calls[0]["request_id"], "req_1");
         assert_eq!(m["fresh_input_tokens"], 30);
+    }
+
+    #[test]
+    fn billing_row_sums_cost_tokens_and_cache_for_the_whole_run() {
+        let l = UsageLedger::default();
+        l.record("claude-sonnet-5-5", &response(10, 100, 5000, 0, 40));
+        l.record("claude-sonnet-5-5", &response(20, 200, 0, 5000, 60));
+        let row = l.billing_row(false, "anthropic", "m", "chat_agent").unwrap();
+        assert_eq!(row.input_tokens, 10_030);
+        assert_eq!(row.output_tokens, 300);
+        assert_eq!(row.total_tokens, 10_330);
+        assert_eq!((row.cache_creation_input_tokens, row.cache_read_input_tokens), (5000, 5000));
+        assert!((row.cost_estimate - 0.02 * AI_COST_MULTIPLIER).abs() < 1e-12);
+        assert_eq!(row.provider_cost_usd, None);
+        assert!(row.extra_metadata.is_some());
+    }
+
+    #[test]
+    fn byok_row_is_free_to_kyomi_and_keeps_the_real_cost() {
+        let l = UsageLedger::default();
+        l.record("claude-sonnet-5-5", &response(10, 100, 0, 0, 0));
+        let row = l.billing_row(true, "anthropic", "m", "chat_agent").unwrap();
+        assert_eq!(row.cost_estimate, 0.0);
+        assert_eq!(row.provider_cost_usd, Some(0.01));
+    }
+
+    #[test]
+    fn no_tokens_means_no_row() {
+        assert!(UsageLedger::default().billing_row(false, "anthropic", "m", "chat_agent").is_none());
+    }
+
+    #[test]
+    fn huge_totals_saturate_instead_of_wrapping() {
+        let l = UsageLedger::default();
+        l.record("m", &response(u32::MAX, u32::MAX, 0, 0, 0));
+        l.record("m", &response(u32::MAX, u32::MAX, 0, 0, 0));
+        let row = l.billing_row(false, "anthropic", "m", "chat_agent").unwrap();
+        assert_eq!((row.input_tokens, row.total_tokens), (i32::MAX, i32::MAX));
     }
 
     #[test]

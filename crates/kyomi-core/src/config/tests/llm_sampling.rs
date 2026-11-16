@@ -81,3 +81,14 @@ fn context_window_is_read_in_tokens() {
 fn context_window_zero_or_garbage_aborts_startup() {
     window(Some("lots"));
 }
+
+#[test]
+fn fetched_context_window_never_overwrites_the_env_override() {
+    let mut c = crate::Config { llm_context_window: 300_000, ..crate::Config::test_config() };
+    c.apply_fetched_context_window(128_000);
+    assert_eq!(c.llm_context_window, 300_000, "LLM_CONTEXT_WINDOW wins");
+
+    let mut c = crate::Config { llm_context_window: 0, ..crate::Config::test_config() };
+    c.apply_fetched_context_window(128_000);
+    assert_eq!(c.llm_context_window, 128_000, "fetched value fills an unset window");
+}

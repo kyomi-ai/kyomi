@@ -944,21 +944,7 @@ impl ConversationStore<'_> {
     }
 }
 /// Billing fields recorded only while the durable run still owns its valid lease.
-pub struct ApiUsageWrite {
-    pub provider: String,
-    pub model: String,
-    pub input_tokens: i32,
-    pub output_tokens: i32,
-    pub total_tokens: i32,
-    pub cost_estimate: f64,
-    pub component: String,
-    pub provider_cost_usd: Option<f64>,
-    /// Real cache totals for the run (`input_tokens` already includes them).
-    pub cache_creation_input_tokens: i32,
-    pub cache_read_input_tokens: i32,
-    /// Per-call breakdown, serialized JSON.
-    pub extra_metadata: Option<String>,
-}
+pub type ApiUsageWrite = kyomi_core::models::ApiUsageInsert;
 impl ConversationStore<'_> {
     pub async fn fenced_api_usage(
         &self,
@@ -977,11 +963,17 @@ impl ConversationStore<'_> {
             agent_runtime::validate_ownership(&row.snapshot()?, lease, now)?;
             let timestamp = chrono::DateTime::from_timestamp_millis(now)
                 .ok_or(agent_runtime::LifecycleError::InvalidLease)?;
-            // `extra_metadata` is `json` on Postgres (text needs the cast) and TEXT on SQLite.
-            let metadata_param = if matches!(self.db, DbPool::Postgres(_)) { "$15::text::json" } else { "$15" };
-            let insert = format!("INSERT INTO api_usage_log (user_id,workspace_id,session_id,timestamp,provider,model,input_tokens,output_tokens,total_tokens,cache_creation_input_tokens,cache_read_input_tokens,cost_estimate,component,provider_cost_usd,extra_metadata) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$13,$14,$10,$11,$12,{metadata_param})");
+            // At most one usage row per run: a re-executed run (new owner after a
+            // crash, retry) must not bill the same run twice. The run id is the key.
+            let run_key = run.as_str();
+            let (existing,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM api_usage_log WHERE session_id=$1 AND request_id=$2")
+                .bind(conversation.as_str()).bind(run_key).fetch_one(&mut *tx).await?;
+            if existing > 0 {
+                return Ok(());
+            }
+            let insert = kyomi_core::models::ApiUsageInsert::insert_sql(matches!(self.db, DbPool::Postgres(_)));
             sqlx::query(&insert)
-                .bind(self.actor_id).bind(self.workspace_id).bind(conversation.as_str()).bind(timestamp).bind(&usage.provider).bind(&usage.model).bind(usage.input_tokens).bind(usage.output_tokens).bind(usage.total_tokens).bind(usage.cost_estimate).bind(&usage.component).bind(usage.provider_cost_usd).bind(usage.cache_creation_input_tokens).bind(usage.cache_read_input_tokens).bind(&usage.extra_metadata).execute(&mut *tx).await?;
+                .bind(self.actor_id).bind(self.workspace_id).bind(conversation.as_str()).bind(timestamp).bind(&usage.provider).bind(&usage.model).bind(usage.input_tokens).bind(usage.output_tokens).bind(usage.total_tokens).bind(usage.cost_estimate).bind(&usage.component).bind(usage.provider_cost_usd).bind(usage.cache_creation_input_tokens).bind(usage.cache_read_input_tokens).bind(&usage.extra_metadata).bind(run_key).execute(&mut *tx).await?;
             Ok(())
         })
     }
