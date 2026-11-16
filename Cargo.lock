@@ -6425,6 +6425,7 @@ dependencies = [
  "kyomi-datasource-server",
  "kyomi-embed",
  "kyomi-knowledge",
+ "kyomi-mcp-client",
  "kyomi-test-db",
  "kyomi-types",
  "pgvector",
@@ -6444,6 +6445,7 @@ dependencies = [
  "typst",
  "typst-as-lib",
  "typst-pdf",
+ "url",
  "uuid",
  "web-push-native",
 ]

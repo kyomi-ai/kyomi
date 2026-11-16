@@ -13,6 +13,8 @@ kyomi-datasource-server = { workspace = true }
 kyomi-datasource-drivers = { workspace = true }
 kyomi-connect-protocol = { workspace = true }
 kyomi-embed = { workspace = true }
+kyomi-mcp-client = { workspace = true }
+url = { workspace = true }
 kyomi-knowledge = { workspace = true }
 tokio = { workspace = true }
 futures-util = { workspace = true }
