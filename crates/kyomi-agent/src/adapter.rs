@@ -3702,59 +3702,7 @@ mod tests {
         assert_eq!(replay.events.iter().filter(|event| matches!(&event.payload,agent_runtime::PublicPayload::ToolOutcome {text,transport:agent_runtime::TransportOutcome::Failed,domain:agent_runtime::DomainOutcome::Rejected,..} if text.preview.contains("Unknown tool"))).count(),1);
     }
 
-    struct ActualToolsProvider {
-        inner: crate::test_support::ScriptedProvider,
-        requested: Vec<(&'static str, serde_json::Value)>,
-        index: std::sync::atomic::AtomicUsize,
-        truncation: Truncation,
-        /// Tool calls returned per model response (1 for every pre-existing test).
-        batch: usize,
-    }
-
-    /// Which returned tool calls carry an unparsable-arguments error.
-    #[derive(Clone, Copy, PartialEq, Eq)]
-    enum Truncation {
-        /// None of them.
-        Never,
-        /// Only the first call of the first response (the pre-existing `truncated` flag).
-        FirstCall,
-        /// Every call of every response.
-        EveryCall,
-    }
-    #[async_trait::async_trait]
-    impl crate::provider::LLMProvider for ActualToolsProvider {
-        async fn complete(&self, messages: &[Message], tools: &[crate::types::Tool], temperature: Option<f32>, max_tokens: u32,
-            names: &std::collections::HashMap<String,String>) -> kyomi_core::Result<crate::types::LLMResponse> {
-            let mut response = self.inner.complete(messages, tools, temperature, max_tokens, names).await?;
-            let index = self.index.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            let start = index * self.batch;
-            let end = (start + self.batch).min(self.requested.len());
-            if start < end {
-                let truncate = |offset: usize| match self.truncation {
-                    Truncation::Never => false,
-                    Truncation::FirstCall => index == 0 && offset == 0,
-                    Truncation::EveryCall => true,
-                };
-                let calls: Vec<crate::types::ToolCall> = self.requested[start..end]
-                    .iter()
-                    .enumerate()
-                    .map(|(offset, (name, arguments))| crate::types::ToolCall {
-                        id: format!("provider-call-{}", start + offset),
-                        name: (*name).into(),
-                        arguments: arguments.clone(),
-                        arguments_error: truncate(offset)
-                            .then(|| "arguments could not be parsed as JSON (finish_reason=max_tokens): EOF".to_string()),
-                    })
-                    .collect();
-                if calls.iter().any(|call| call.arguments_error.is_some()) {
-                    response.finish_reason = "max_tokens".into();
-                }
-                response.tool_calls = Some(calls);
-            }
-            Ok(response)
-        }
-        fn model(&self) -> &str { "actual-tool-outcome-fixture" }
-    }
+    use crate::test_support::{ActualToolsProvider, FailingTool, FailureKind, SucceedingTool, Truncation, rejecting_tool};
     async fn actual_tool_outcomes(requested: Vec<(&'static str, serde_json::Value)>) -> (Vec<agent_runtime::DomainOutcome>, Vec<crate::test_support::RecordedCall>) {
         let db = crate::test_support::test_pool().await;
         crate::test_support::seed_user_and_workspace(&db).await;
@@ -3791,96 +3739,6 @@ mod tests {
         (outcomes, recorded)
     }
 
-    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-    enum FailureKind {
-        BadRequest,
-        ServerError,
-        Timeout,
-        UnknownResult,
-        Panic,
-        ResultPanic,
-        TransportError,
-        NotFound,
-        Forbidden,
-        BadRequestAfterEffect,
-        MutatingUnknown,
-        RejectedResult,
-        Succeeded,
-    }
-
-    struct FailingTool {
-        kind: FailureKind,
-        name: &'static str,
-        calls: Arc<std::sync::atomic::AtomicUsize>,
-    }
-
-    #[async_trait::async_trait]
-    impl crate::tools::AgentTool for FailingTool {
-        fn name(&self) -> &str { self.name }
-        fn description(&self) -> &str { "Failure-class fixture" }
-        fn parameters_schema(&self) -> serde_json::Value { serde_json::json!({"type":"object","properties":{}}) }
-        fn bad_request_is_pre_effect(&self) -> bool {
-            self.kind != FailureKind::BadRequestAfterEffect
-        }
-        fn result_domain_outcome(&self, text: &str) -> agent_runtime::DomainOutcome {
-            if self.kind == FailureKind::ResultPanic {
-                panic!("result classification exploded");
-            }
-            if self.kind == FailureKind::UnknownResult {
-                agent_runtime::DomainOutcome::Unknown
-            } else if text.contains("\"error\"") || text.contains("\"valid\":false") {
-                agent_runtime::DomainOutcome::Rejected
-            } else {
-                agent_runtime::DomainOutcome::Succeeded
-            }
-        }
-        async fn execute(&self, _: serde_json::Value, ctx: &crate::tools::ToolContext) -> kyomi_core::Result<String> {
-            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            match self.kind {
-                FailureKind::BadRequest => Err(kyomi_core::Error::BadRequest("Missing required parameter 'x'".into())),
-                FailureKind::ServerError => Err(kyomi_core::Error::ServiceUnavailable("provider server exploded".into())),
-                FailureKind::Timeout => Err(kyomi_core::Error::ServiceUnavailable("timed out waiting for provider".into())),
-                FailureKind::UnknownResult => Ok("{\"error\":\"timeout after commit; unknown_after_commit\"}".into()),
-                FailureKind::Panic => panic!("tool exploded"),
-                FailureKind::ResultPanic => Ok("{\"ok\":true}".into()),
-                FailureKind::TransportError => Err(kyomi_core::Error::DatasourceConnection("connection reset by peer".into())),
-                FailureKind::NotFound => Err(kyomi_core::Error::NotFound("datasource 'missing' not found".into())),
-                FailureKind::Forbidden => Err(kyomi_core::Error::Forbidden("document scope denied".into())),
-                FailureKind::BadRequestAfterEffect => {
-                    kyomi_core::db_execute!(&ctx.db, "UPDATE workspaces SET name='mutated once' WHERE workspace_id = $1", &ctx.workspace_id).unwrap();
-                    Err(kyomi_core::Error::BadRequest("partial effect then validation failed".into()))
-                }
-                FailureKind::MutatingUnknown => {
-                    kyomi_core::db_execute!(&ctx.db, "UPDATE workspaces SET name='mutated once' WHERE workspace_id = $1", &ctx.workspace_id).unwrap();
-                    Err(kyomi_core::Error::ServiceUnavailable("mutated then lost acknowledgement".into()))
-                }
-                FailureKind::RejectedResult => Ok("{\"valid\":false}".into()),
-                FailureKind::Succeeded => Ok("{\"ok\":true}".into()),
-            }
-        }
-    }
-
-    /// A tool that rejects every call with a definite pre-effect rejection
-    /// (`BadRequest`), like a SQL analysis error the model can repair.
-    fn rejecting_tool(calls: &Arc<std::sync::atomic::AtomicUsize>) -> Arc<FailingTool> {
-        Arc::new(FailingTool { kind: FailureKind::BadRequest, name: "rejecting_tool", calls: calls.clone() })
-    }
-
-    struct SucceedingTool {
-        calls: Arc<std::sync::atomic::AtomicUsize>,
-    }
-
-    #[async_trait::async_trait]
-    impl crate::tools::AgentTool for SucceedingTool {
-        fn name(&self) -> &str { "succeeding_tool" }
-        fn description(&self) -> &str { "Succeeding fixture" }
-        fn parameters_schema(&self) -> serde_json::Value { serde_json::json!({"type":"object","properties":{}}) }
-        async fn execute(&self, _: serde_json::Value, _: &crate::tools::ToolContext) -> kyomi_core::Result<String> {
-            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            Ok("{\"ok\":true}".into())
-        }
-    }
-
     /// Every `ToolIntent` id must have a matching `ToolOutcome` id. A plain function,
     /// not inline in the async harness, to keep that future's frame small.
     fn assert_every_requested_call_answered<'a>(payloads: impl Iterator<Item = &'a agent_runtime::PublicPayload>) {
@@ -3893,6 +3751,7 @@ mod tests {
             }
         }
         assert!(intents.is_subset(&answered), "every requested tool call needs an outcome: requested={intents:?} answered={answered:?}");
+        // The batch tests assert the outcome count too, so this cannot pass vacuously there.
     }
 
     async fn run_tool_script(
@@ -3901,23 +3760,12 @@ mod tests {
         truncated: bool,
     ) -> (Result<String, kyomi_core::Error>, Vec<agent_runtime::ToolOutcome>, Vec<crate::test_support::RecordedCall>, kyomi_core::DbPool) {
         let truncation = if truncated { Truncation::FirstCall } else { Truncation::Never };
-        Box::pin(run_tool_script_with(requested, register, truncation, 1)).await
+        run_tool_script_with(requested, register, truncation, 1).await
     }
 
     /// Like `run_tool_script`, but the model returns `batch` tool calls in each
     /// response and `truncation` selects which calls carry unparsable arguments.
     async fn run_tool_script_with(
-        requested: Vec<(&'static str, serde_json::Value)>,
-        register: impl FnOnce(&mut crate::tools::ToolRegistry),
-        truncation: Truncation,
-        batch: usize,
-    ) -> (Result<String, kyomi_core::Error>, Vec<agent_runtime::ToolOutcome>, Vec<crate::test_support::RecordedCall>, kyomi_core::DbPool) {
-        // The body below is a large future; box it so callers' frames stay small
-        // on the default 2 MB test thread stack.
-        Box::pin(run_tool_script_inner(requested, register, truncation, batch)).await
-    }
-
-    async fn run_tool_script_inner(
         requested: Vec<(&'static str, serde_json::Value)>,
         register: impl FnOnce(&mut crate::tools::ToolRegistry),
         truncation: Truncation,
@@ -3944,17 +3792,22 @@ mod tests {
         let answer = adapter.chat(ChatParams {message:"correct tool errors",cancel_token:CancellationToken::new(),current_time_user_tz:None,message_source:Some("web"),user_id:Some("user-a"),user_message_persistence:&user,assistant_message_persistence:&assistant}).await;
         let run = assistant.durable_run().unwrap();
         let store = kyomi_auth::conversation_events::ConversationStore::new(&db,&key,"user-a","ws-1");
-        let replay = store.replay(&run.conversation_id,0,100).await.unwrap();
-        let outcomes: Vec<_> = replay.events.iter().filter_map(|event| match &event.payload {
+        let mut replay_events = Vec::new();
+        let mut after = 0;
+        loop {
+            let batch = store.replay(&run.conversation_id, after, 100).await.unwrap();
+            replay_events.extend(batch.events);
+            after = batch.scanned_through;
+            if !batch.has_more { break; }
+        }
+        let outcomes: Vec<_> = replay_events.iter().filter_map(|event| match &event.payload {
             agent_runtime::PublicPayload::ToolOutcome {transport,domain,text,..} => Some(agent_runtime::ToolOutcome { transport: transport.clone(), domain: domain.clone(), text: text.preview.clone() }),
             _ => None,
         }).collect();
         // Every tool call the model requested must have an outcome, even when a failure
-        // guard ends the turn mid-batch. (The replay window is capped; skip the check
-        // if it was truncated rather than assert on a partial view.)
-        if replay.events.len() < 100 {
-            assert_every_requested_call_answered(replay.events.iter().map(|event| &event.payload));
-        }
+        // guard ends the turn mid-batch. The whole run was replayed above, so this
+        // always checks the complete history.
+        assert_every_requested_call_answered(replay_events.iter().map(|event| &event.payload));
         let recorded = std::mem::take(&mut *calls.lock().unwrap());
         (answer, outcomes, recorded, db)
     }
@@ -4074,8 +3927,6 @@ mod tests {
         let mut requested: Vec<(&'static str, serde_json::Value)> = Vec::new();
         for n in 0..4 { requested.push(("failing_tool", serde_json::json!({"n": n}))); }
         for n in 0..9 { requested.push(("rejecting_tool", serde_json::json!({"n": n}))); }
-        // The replay harness caps visible events at 100, so count executions on
-        // the tools themselves rather than through the returned outcomes.
         let (result, _, _, _) = run_tool_script(
             requested,
             |registry| { registry.register(rejecting); registry.register(failing); },

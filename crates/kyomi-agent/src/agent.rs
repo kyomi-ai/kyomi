@@ -1522,29 +1522,42 @@ impl agent_runtime::ToolExecution for RuntimeTool<'_> {
     }
 }
 
-/// Execute one tool call and classify every failure into a model-facing
-/// `ToolOutcome`. A panic inside the tool is caught and becomes an Unknown
-/// outcome with verify-before-retry guidance; it never escapes the turn.
 /// Model-facing text prefix for a call to a tool name that is not registered.
-/// [`tool_outcome`] formats it and [`is_repairable_rejection`] reads it back from
-/// the (persisted) outcome, so the two cannot drift apart.
+/// This is persisted wire text: [`unknown_tool_text`] formats it and
+/// [`is_repairable_rejection`] reads it back from the stored outcome, so it must
+/// not change without migrating how stored outcomes are classified.
 const UNKNOWN_TOOL_PREFIX: &str = "Error: Unknown tool '";
+
+/// The model-facing text for a call to an unregistered tool. The single producer
+/// of [`UNKNOWN_TOOL_PREFIX`] text.
+fn unknown_tool_text(name: &str, available: &str) -> String {
+    format!("{UNKNOWN_TOOL_PREFIX}{name}'. Available tools: {available}")
+}
 
 /// Whether a failed tool call is a *repairable rejection*: a definite
 /// (`DomainOutcome::Rejected`), effect-free rejection returned by a real tool
-/// that ran with parsed arguments. A rejection that happens before any tool runs
-/// (unparsable or truncated arguments, an unknown tool name) is not repairable
-/// in this sense and keeps the strict failure budget.
+/// that ran with parsed arguments. This includes a real tool's own
+/// `BadRequest` (for example a missing required parameter). A rejection that
+/// happens before any tool runs (unparsable or truncated arguments, an unknown
+/// tool name) is not repairable in this sense and keeps the strict failure
+/// budget.
 ///
-/// Decided from the call and its outcome only (both persisted with the turn),
-/// never from live registry state, so a resumed turn classifies every failure
-/// exactly as the original run did.
+/// Derived only from the call and outcome values (`arguments_error` travels with
+/// the serialized `ToolCall`; domain, transport and text come from the stored
+/// outcome), never from live registry state. The unknown-tool case requires
+/// `TransportOutcome::Failed`, the only transport [`tool_outcome`] produces for
+/// it, so a real tool that merely returns similar text cannot be misread.
 fn is_repairable_rejection(call: &ToolCall, outcome: &agent_runtime::ToolOutcome) -> bool {
+    let unknown_tool = outcome.transport == agent_runtime::TransportOutcome::Failed
+        && outcome.text.starts_with(UNKNOWN_TOOL_PREFIX);
     outcome.domain == agent_runtime::DomainOutcome::Rejected
         && call.arguments_error.is_none()
-        && !outcome.text.starts_with(UNKNOWN_TOOL_PREFIX)
+        && !unknown_tool
 }
 
+/// Execute one tool call and classify every failure into a model-facing
+/// `ToolOutcome`. A panic inside the tool is caught and becomes an Unknown
+/// outcome with verify-before-retry guidance; it never escapes the turn.
 async fn tool_outcome(
     agent: &CustomAgent,
     call: &ToolCall,
@@ -1557,7 +1570,7 @@ async fn tool_outcome(
     }
     let Some(tool) = agent.registry.get_tool(&call.name) else {
         return ToolOutcome { transport: TransportOutcome::Failed, domain: DomainOutcome::Rejected,
-            text: format!("{UNKNOWN_TOOL_PREFIX}{}'. Available tools: {}", call.name, agent.registry.tool_names().join(", ")) };
+            text: unknown_tool_text(&call.name, &agent.registry.tool_names().join(", ")) };
     };
     // The panic boundary covers the whole tool call, including the tool's own
     // result classification: a buggy tool must never escape the turn.
@@ -1680,71 +1693,43 @@ mod tests {
         // Rejected before any tool ran: truncated/unparsable arguments.
         assert!(!is_repairable_rejection(&call_with(Some("EOF")), &outcome_with(T::Failed, D::Rejected, "Tool call 'x' was not executed")));
         // Rejected before any tool ran: unknown tool name (text produced by tool_outcome).
-        let unknown = format!("{UNKNOWN_TOOL_PREFIX}nope'. Available tools: a, b");
+        let unknown = unknown_tool_text("nope", "a, b");
         assert!(!is_repairable_rejection(&ok_call, &outcome_with(T::Failed, D::Rejected, &unknown)));
+        // A real tool that merely RETURNS similar text (transport Completed) is still repairable.
+        assert!(is_repairable_rejection(&ok_call, &outcome_with(T::Completed, D::Rejected, &unknown)));
         // Unknown outcome (may have had an effect) and success are never repairable rejections.
         assert!(!is_repairable_rejection(&ok_call, &outcome_with(T::Failed, D::Unknown, "boom")));
         assert!(!is_repairable_rejection(&ok_call, &outcome_with(T::Unknown, D::Unknown, "lost")));
         assert!(!is_repairable_rejection(&ok_call, &outcome_with(T::Completed, D::Succeeded, "{}")));
     }
 
-    /// Provider for the legacy (non-runtime) path: one tool call per response,
-    /// each with distinct arguments, naming `names[i]` on response `i`; then a
-    /// plain text answer.
-    struct DistinctCallProvider {
-        names: Vec<&'static str>,
-        next: std::sync::atomic::AtomicUsize,
-    }
-
-    #[async_trait::async_trait]
-    impl crate::provider::LLMProvider for DistinctCallProvider {
-        async fn complete(
-            &self,
-            _messages: &[crate::types::Message],
-            _tools: &[crate::types::Tool],
-            _temperature: Option<f32>,
-            _max_tokens: u32,
-            _names: &HashMap<String, String>,
-        ) -> kyomi_core::Result<crate::types::LLMResponse> {
-            let i = self.next.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            let tool_calls = self.names.get(i).map(|name| {
-                vec![ToolCall {
-                    id: format!("tc_{i}"),
-                    name: (*name).into(),
-                    arguments: serde_json::json!({ "n": i }),
-                    arguments_error: None,
-                }]
-            });
-            Ok(crate::types::LLMResponse {
-                raw_response: serde_json::Value::Null,
-                content: if tool_calls.is_some() { String::new() } else { "done".into() },
-                finish_reason: if tool_calls.is_some() { "tool_use".into() } else { "stop".into() },
-                usage: crate::types::AgentTokenUsage::default(),
-                tool_calls,
-                cost: None,
-                thinking_content: None,
-            })
-        }
-        fn model(&self) -> &str { "distinct-call-fixture" }
-    }
-
-    /// Tool that always fails with a definite pre-effect rejection.
-    struct LegacyRejectTool;
-
-    #[async_trait::async_trait]
-    impl crate::tools::AgentTool for LegacyRejectTool {
-        fn name(&self) -> &str { "legacy_reject" }
-        fn description(&self) -> &str { "Always rejects" }
-        fn parameters_schema(&self) -> serde_json::Value { serde_json::json!({"type":"object","properties":{}}) }
-        async fn execute(&self, _: serde_json::Value, _: &crate::tools::ToolContext) -> kyomi_core::Result<String> {
-            Err(kyomi_core::Error::BadRequest("Unknown identifier".into()))
-        }
-    }
-
+    /// Agent on the legacy (non-runtime) path whose model issues one tool call per
+    /// response, `names[i]` on response `i` with distinct arguments, then answers "done".
     async fn legacy_agent(names: Vec<&'static str>) -> CustomAgent {
-        let provider = DistinctCallProvider { names, next: std::sync::atomic::AtomicUsize::new(0) };
+        let requested: Vec<(&'static str, serde_json::Value)> = names
+            .iter()
+            .enumerate()
+            .map(|(i, name)| (*name, serde_json::json!({ "n": i })))
+            .collect();
+        let mut script: Vec<Reply> = vec![Reply::ToolCall; requested.len()];
+        script.push(Reply::Text("done".to_string()));
+        let provider = ActualToolsProvider {
+            inner: ScriptedProvider {
+                script: Mutex::new(script.into()),
+                after_script: Reply::Text("unexpected".to_string()),
+                calls: Arc::new(Mutex::new(Vec::new())),
+            },
+            requested,
+            index: std::sync::atomic::AtomicUsize::new(0),
+            truncation: Truncation::Never,
+            batch: 1,
+        };
         let mut registry = ToolRegistry::new();
-        registry.register(Arc::new(LegacyRejectTool));
+        registry.register(Arc::new(FailingTool {
+            kind: FailureKind::BadRequest,
+            name: "legacy_reject",
+            calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        }));
         CustomAgent::new(
             Box::new(provider),
             AgentConfig { max_iterations: 25, ..Default::default() },
@@ -2377,7 +2362,7 @@ Chart 2:\n```chartml\ntype: chart\nversion: 1\ndata:\n  datasource: test\n  quer
     // drive the same ToolCall-then-Text scripting through a full
     // `ChatAgentAdapter::chat()` turn without a second copy. See that
     // module's doc comment on the extraction.
-    use crate::test_support::{NoopTool, RecordedCall, Reply, ScriptedProvider};
+    use crate::test_support::{ActualToolsProvider, FailingTool, FailureKind, NoopTool, RecordedCall, Reply, ScriptedProvider, Truncation};
 
     /// Build a `ToolContext` over an in-memory sqlite pool and in-memory KV
     /// store. `session_id: None` keeps the agent off the ChartML validation
