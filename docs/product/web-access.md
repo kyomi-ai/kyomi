@@ -14,6 +14,8 @@ Web content is treated as untrusted data. The agent is told not to follow instru
 
 Answers that used the web show their sources (title and link). With `tavily`, `linkup` and `builtin`, each search or fetch also appears as a card in the conversation listing the pages it used. With `anthropic` and `openrouter` the provider runs the tool inside one model call, so there is no card; the sources are listed under **Sources** at the end of the answer instead. (OpenRouter reports citations for search only, so a fetch adds none.)
 
+With `anthropic`, the search results the model used are kept with the conversation (encrypted, like the messages) so follow-up questions can build on them, and are removed when the message is deleted. If they are too large, or the web tools are not available for a later request, the follow-up sees the answer text instead.
+
 ## Backends
 
 Set the backend for search and for fetch separately.

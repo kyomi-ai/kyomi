@@ -1115,6 +1115,7 @@ async fn lifecycle_conformance(db: &DbPool, other: &DbPool) {
         tool_calls: Some(
             serde_json::json!([{"id":"fixture-tool-call","type":"function","function":{"name":"fixture_lookup","arguments":"{}"}}]),
         ),
+        provider_content: None,
     };
     assert!(
         !store
@@ -1387,6 +1388,7 @@ async fn lifecycle_conformance(db: &DbPool, other: &DbPool) {
         tool_call_id: None,
         name: None,
         tool_calls: None,
+        provider_content: None,
     };
     viewer
         .fenced_message(
@@ -1666,6 +1668,7 @@ async fn lifecycle_review_regressions(db: &DbPool) {
         tool_call_id: None,
         name: None,
         tool_calls: Some(calls.clone()),
+        provider_content: None,
     };
     store
         .fenced_message(&conversation, &receipt.run_id, &lease, 1102, &message)
@@ -1721,6 +1724,53 @@ async fn lifecycle_review_regressions(db: &DbPool) {
             .iter()
             .any(|item| item.message_id == message.message_id),
         "encrypted tool calls must retain SQL non-NULL UI filtering"
+    );
+    // KYO-969: the provider's verbatim server-tool blocks ride in the same
+    // transaction as the message, are encrypted at rest, come back equal in value
+    // through the history loader.
+    let captured: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../kyomi-agent/src/web/fixtures/anthropic_search_message.json"
+    ))
+    .unwrap();
+    let blocks = captured["content"].clone();
+    let result_marker = blocks[1]["content"][0]["encrypted_content"].as_str().unwrap().to_string();
+    assert!(result_marker.len() > 100, "live fixture carries a real encrypted_content");
+    let with_blocks = MessageWrite {
+        message_id: uuid::Uuid::new_v4().to_string(),
+        role: "assistant".into(),
+        content: "searched the web".into(),
+        tool_call_id: None,
+        name: None,
+        tool_calls: None,
+        provider_content: Some(("anthropic".into(), blocks.clone())),
+    };
+    store
+        .fenced_message(&conversation, &receipt.run_id, &lease, 1103, &with_blocks)
+        .await
+        .unwrap();
+    let raw_blocks = kyomi_core::db_fetch_one!(
+        db,
+        (serde_json::Value, String),
+        "SELECT blocks, backend FROM chat_message_provider_content WHERE message_id=$1",
+        &with_blocks.message_id
+    )
+    .unwrap();
+    assert_eq!(raw_blocks.1, "anthropic");
+    assert!(!raw_blocks.0.to_string().contains(&result_marker), "blocks are encrypted at rest");
+    let history = crate::chat_service::get_agent_messages(db, &KEY, &sid, None).await.unwrap();
+    let loaded = history.iter().find(|item| item.message_id == with_blocks.message_id).unwrap();
+    assert_eq!(loaded.provider_backend.as_deref(), Some("anthropic"));
+    assert_eq!(loaded.provider_content.as_ref(), Some(&blocks), "equal in value, encrypted_content included");
+    assert!(
+        history.iter().find(|item| item.message_id == message.message_id).unwrap().provider_content.is_none(),
+        "a message with no stored blocks loads as plain text"
+    );
+    assert_eq!(
+        crate::chat_service::restore_provider_content(
+            "m", Some("anthropic".into()), Some(&raw_blocks.0), &[3u8; 32]
+        ),
+        (None, None),
+        "blocks that cannot be decrypted fall back to the message text, never partially"
     );
     assert_lifecycle_sync(db, &sid, &owner, true).await;
     let sync_before_duplicate = lifecycle_sync_count(db, &sid).await;

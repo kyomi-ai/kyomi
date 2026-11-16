@@ -388,7 +388,7 @@ impl AnthropicClient {
     // -----------------------------------------------------------------------
 
     /// Parse the Anthropic API JSON response into an [`LLMResponse`].
-    fn parse_response(
+    pub(crate) fn parse_response(
         model: &str,
         response: &serde_json::Value,
     ) -> kyomi_core::Result<LLMResponse> {

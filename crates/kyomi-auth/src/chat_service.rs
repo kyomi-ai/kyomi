@@ -2177,6 +2177,12 @@ pub struct AgentMessage {
     /// ever fabricating a source, since `build_metadata_prefix` already
     /// omits whichever part is absent.
     pub message_source: Option<String>,
+    /// Provider format of [`Self::provider_content`] (e.g. `"anthropic"`); `None`
+    /// when the provider's verbatim blocks were not stored for this message.
+    pub provider_backend: Option<String>,
+    /// The provider's verbatim assistant content blocks (KYO-969). Encrypted in
+    /// the row; the loaders decrypt it. Only meaningful with `provider_backend`.
+    pub provider_content: Option<serde_json::Value>,
 }
 
 /// Row type for agent message queries.
@@ -2191,6 +2197,57 @@ struct AgentMessageRow {
     sent_by_user_id: Option<String>,
     current_time_user_tz: Option<String>,
     message_source: Option<String>,
+    provider_backend: Option<String>,
+    provider_content: Option<serde_json::Value>,
+}
+
+/// Decrypt a message's stored provider blocks. A row that cannot be read or is
+/// not a JSON array yields `(None, None)`: the message then replays as its text,
+/// which is always valid, rather than risking a partial or damaged block list.
+pub fn restore_provider_content(
+    message_id: &str,
+    backend: Option<String>,
+    stored: Option<&serde_json::Value>,
+    encryption_key: &[u8; 32],
+) -> (Option<String>, Option<serde_json::Value>) {
+    let (Some(backend), Some(stored)) = (backend, stored) else {
+        return (None, None);
+    };
+    match encryption::restore_json_field(stored, encryption_key) {
+        Ok(blocks) if blocks.as_array().is_some_and(|array| !array.is_empty()) => (Some(backend), Some(blocks)),
+        Ok(_) => {
+            tracing::warn!(%message_id, "Ignoring stored provider content that is not a non-empty array");
+            (None, None)
+        }
+        Err(error) => {
+            tracing::warn!(%message_id, "Ignoring unreadable stored provider content: {error}");
+            (None, None)
+        }
+    }
+}
+
+/// Store the provider's verbatim content blocks for a message (KYO-969), so a
+/// later turn can send them back unchanged. Idempotent per message. The caller
+/// decides whether the blocks are eligible (backend, size); see
+/// `kyomi_agent::adapter`.
+pub async fn store_provider_content(
+    db: &DbPool,
+    encryption_key: &[u8; 32],
+    message_id: &str,
+    backend: &str,
+    blocks: &serde_json::Value,
+) -> kyomi_core::Result<()> {
+    let protected = encryption::protect_json_field(blocks, encryption_key)?;
+    kyomi_core::db_execute!(
+        db,
+        "INSERT INTO chat_message_provider_content (message_id, backend, blocks) VALUES ($1, $2, $3) \
+         ON CONFLICT (message_id) DO UPDATE SET backend = EXCLUDED.backend, blocks = EXCLUDED.blocks",
+        message_id,
+        backend,
+        &protected as &serde_json::Value
+    )
+    .map_err(|e| kyomi_core::Error::Internal(format!("failed to store provider content: {e}")))?;
+    Ok(())
 }
 
 /// Get ALL messages for agent context restoration (including tool calls and tool results).
@@ -2227,7 +2284,9 @@ pub async fn get_agent_messages(
             db,
             AgentMessageRow,
             "SELECT message_id, role, content, tool_calls, tool_call_id, tool_name, \
-              sent_by_user_id, current_time_user_tz, message_source \
+              sent_by_user_id, current_time_user_tz, message_source, \
+              (SELECT p.backend FROM chat_message_provider_content p WHERE p.message_id = chat_messages.message_id) AS provider_backend, \
+              (SELECT p.blocks FROM chat_message_provider_content p WHERE p.message_id = chat_messages.message_id) AS provider_content \
              FROM chat_messages \
              WHERE session_id = $1 AND NOT EXISTS (SELECT 1 FROM conversation_runs r WHERE r.user_message_id=chat_messages.message_id AND r.state='queued' AND r.request_id IS NOT NULL AND EXISTS (SELECT 1 FROM conversation_runs active WHERE active.session_id=r.session_id AND active.state='running')) AND (created_at > $2 OR (created_at = $2 AND message_id > $3)) \
              ORDER BY created_at ASC, message_id ASC",
@@ -2240,7 +2299,9 @@ pub async fn get_agent_messages(
             db,
             AgentMessageRow,
             "SELECT message_id, role, content, tool_calls, tool_call_id, tool_name, \
-              sent_by_user_id, current_time_user_tz, message_source \
+              sent_by_user_id, current_time_user_tz, message_source, \
+              (SELECT p.backend FROM chat_message_provider_content p WHERE p.message_id = chat_messages.message_id) AS provider_backend, \
+              (SELECT p.blocks FROM chat_message_provider_content p WHERE p.message_id = chat_messages.message_id) AS provider_content \
              FROM chat_messages \
              WHERE session_id = $1 AND NOT EXISTS (SELECT 1 FROM conversation_runs r WHERE r.user_message_id=chat_messages.message_id AND r.state='queued' AND r.request_id IS NOT NULL AND EXISTS (SELECT 1 FROM conversation_runs active WHERE active.session_id=r.session_id AND active.state='running')) \
              ORDER BY created_at ASC, message_id ASC",
@@ -2268,6 +2329,9 @@ pub async fn get_agent_messages(
             continue;
         }
 
+        let (provider_backend, provider_content) = restore_provider_content(
+            &row.message_id, row.provider_backend, row.provider_content.as_ref(), encryption_key,
+        );
         result.push(AgentMessage {
             message_id: row.message_id,
             role: row.role,
@@ -2278,6 +2342,8 @@ pub async fn get_agent_messages(
             sent_by_user_id: row.sent_by_user_id,
             current_time_user_tz: row.current_time_user_tz,
             message_source: row.message_source,
+            provider_backend,
+            provider_content,
         });
     }
 

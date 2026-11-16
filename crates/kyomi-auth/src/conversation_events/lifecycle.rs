@@ -321,7 +321,7 @@ impl ConversationStore<'_> {
             .bind(conversation.as_str())
             .fetch_one(&mut *tx)
             .await?;
-            let rows=sqlx::query_as::<_,crate::chat_service::AgentMessage>("SELECT message_id,role,content,tool_calls,tool_call_id,tool_name,sent_by_user_id,current_time_user_tz,message_source FROM chat_messages WHERE session_id=$1 AND message_id<>$2 AND NOT EXISTS(SELECT 1 FROM conversation_runs future WHERE (future.user_message_id=chat_messages.message_id OR future.assistant_message_id=chat_messages.message_id) AND future.request_id IS NOT NULL AND (future.queued_at>$3 OR (future.queued_at=$3 AND future.run_id>$4))) ORDER BY created_at,message_id")
+            let rows=sqlx::query_as::<_,crate::chat_service::AgentMessage>("SELECT message_id,role,content,tool_calls,tool_call_id,tool_name,sent_by_user_id,current_time_user_tz,message_source,(SELECT p.backend FROM chat_message_provider_content p WHERE p.message_id=chat_messages.message_id) AS provider_backend,(SELECT p.blocks FROM chat_message_provider_content p WHERE p.message_id=chat_messages.message_id) AS provider_content FROM chat_messages WHERE session_id=$1 AND message_id<>$2 AND NOT EXISTS(SELECT 1 FROM conversation_runs future WHERE (future.user_message_id=chat_messages.message_id OR future.assistant_message_id=chat_messages.message_id) AND future.request_id IS NOT NULL AND (future.queued_at>$3 OR (future.queued_at=$3 AND future.run_id>$4))) ORDER BY created_at,message_id")
                 .bind(conversation.as_str()).bind(message_id.as_str()).bind(row.queued_at).bind(run.as_str()).fetch_all(&mut *tx).await?;
             let mut messages = Vec::with_capacity(rows.len());
             for mut message in rows {
@@ -331,6 +331,12 @@ impl ConversationStore<'_> {
                     .as_ref()
                     .map(|value| encryption::restore_json_field(value, self.key))
                     .transpose()?;
+                (message.provider_backend, message.provider_content) = crate::chat_service::restore_provider_content(
+                    &message.message_id,
+                    message.provider_backend.take(),
+                    message.provider_content.as_ref(),
+                    self.key,
+                );
                 if message.role == "assistant"
                     && message.content.trim().is_empty()
                     && message.tool_calls.is_none()
@@ -606,6 +612,10 @@ pub struct MessageWrite {
     pub tool_call_id: Option<String>,
     pub name: Option<String>,
     pub tool_calls: Option<serde_json::Value>,
+    /// The provider's verbatim blocks for this message and their format
+    /// (KYO-969). Written in the same transaction as the message, so they can
+    /// never be misaligned with it. `None` stores nothing.
+    pub provider_content: Option<(String, serde_json::Value)>,
 }
 impl ConversationStore<'_> {
     pub async fn fenced_message(
@@ -711,6 +721,11 @@ impl ConversationStore<'_> {
             } else {
                 sqlx::query("INSERT INTO chat_messages(message_id,session_id,role,content,tool_call_id,tool_name,tool_calls,status,pinned,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,'complete',false,$8)")
                     .bind(&message.message_id).bind(conversation.as_str()).bind(&message.role).bind(encrypted).bind(&message.tool_call_id).bind(&message.name).bind(&tool_calls).bind(chrono::Utc::now()).execute(&mut *tx).await?;
+            }
+            if let Some((backend, blocks)) = &message.provider_content {
+                let protected = encryption::protect_json_field(blocks, self.key)?;
+                sqlx::query("INSERT INTO chat_message_provider_content(message_id,backend,blocks) VALUES($1,$2,$3) ON CONFLICT (message_id) DO UPDATE SET backend=EXCLUDED.backend,blocks=EXCLUDED.blocks")
+                    .bind(&message.message_id).bind(backend).bind(&protected).execute(&mut *tx).await?;
             }
             write_session_sync!(
                 &scoped,

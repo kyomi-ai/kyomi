@@ -324,6 +324,33 @@ pub fn append_footer(content: &str, footer: &str) -> String {
 }
 
 /// Recorded-response fixtures shared with other test modules.
+/// Whether a run of consecutive assistant messages' blocks form complete server
+/// turns: every server tool call has its result later in the sequence, and every
+/// result follows its call. The provider rejects a request that violates this
+/// (a result with no call, or a call left open before the next user turn), so a
+/// stored turn that fails the check is replayed as text instead.
+pub fn server_turn_is_complete<'a>(blocks: impl IntoIterator<Item = &'a Value>) -> bool {
+    let mut open: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for block in blocks {
+        match block.get("type").and_then(Value::as_str) {
+            Some("server_tool_use") => match block.get("id").and_then(Value::as_str) {
+                Some(id) => {
+                    open.insert(id);
+                }
+                None => return false,
+            },
+            Some(kind) if kind != "tool_result" && kind.ends_with("_tool_result") => {
+                match block.get("tool_use_id").and_then(Value::as_str) {
+                    Some(id) if open.remove(id) => {}
+                    _ => return false,
+                }
+            }
+            _ => {}
+        }
+    }
+    open.is_empty()
+}
+
 #[cfg(test)]
 pub(crate) mod tests_support {
     use serde_json::{Value, json};

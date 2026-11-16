@@ -870,8 +870,15 @@ impl CustomAgent {
                 // require citations to be displayed).
                 let content = self.with_web_sources(content);
 
-                // Push final response to state so persist_after_chat saves it.
-                self.state.messages.push(Message::assistant(&content));
+                // Push final response to state so persist_after_chat saves it. A
+                // server-tool turn keeps the provider's own blocks (encrypted_content
+                // and citations' encrypted_index included) so the next user turn can
+                // send them back unchanged; the displayed text carries the sources
+                // footer, the stored blocks do not. A research run cut short ends in an
+                // unresolved `server_tool_use` the provider would reject in a later
+                // request, so that answer keeps only its text.
+                let blocks = if cut_short { None } else { server_activity.provider_content.clone() };
+                self.state.messages.push(Message::assistant(&content).with_provider_content(blocks));
                 return Ok(content);
             }
 
