@@ -84,11 +84,6 @@ impl AnthropicClient {
         })
     }
 
-    /// The base URL when it is not Anthropic's own endpoint (a proxy).
-    pub(crate) fn custom_base_url(&self) -> Option<&str> {
-        (self.base.base_url != ANTHROPIC_API_URL).then_some(self.base.base_url.as_str())
-    }
-
     /// Return the model name this client is configured with.
     pub fn model(&self) -> &str {
         self.base.model()

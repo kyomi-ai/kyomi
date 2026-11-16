@@ -29,6 +29,7 @@ pub mod agent;
 pub mod alert;
 pub mod anthropic;
 pub mod batch;
+pub mod batch_run;
 pub mod catalog;
 pub mod catalog_scheduler;
 pub mod copilot;

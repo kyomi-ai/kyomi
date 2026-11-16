@@ -289,9 +289,10 @@ impl LLMProvider for AnthropicClient {
     }
 
     fn batch(&self) -> Option<&dyn crate::batch::BatchLLMProvider> {
-        crate::batch::batch_support(ProviderKind::Anthropic, self.custom_base_url())
-            .is_ok()
-            .then_some(self as &dyn crate::batch::BatchLLMProvider)
+        // The adapter exists for any Anthropic client; whether a custom base
+        // URL (a proxy) may be used for batches is a configuration decision
+        // enforced by `batch::batch_support`.
+        Some(self)
     }
 }
 

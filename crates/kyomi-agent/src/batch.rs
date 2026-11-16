@@ -398,8 +398,9 @@ mod tests {
     fn the_provider_batch_accessor_follows_the_support_matrix() {
         let direct = AnthropicClient::new("k".into(), None).unwrap();
         assert!(LLMProvider::batch(&direct).is_some());
+        // A proxy has the adapter but `batch_support` (the config gate) rejects it.
         let proxied = AnthropicClient::with_base_url("k".into(), None, "http://proxy".into()).unwrap();
-        assert!(LLMProvider::batch(&proxied).is_none());
+        assert!(LLMProvider::batch(&proxied).is_some());
         let or = OpenAIProvider::new("k".into(), Some("a/b".into()), Some("https://openrouter.ai/api/v1".into())).unwrap();
         assert!(LLMProvider::batch(&or).is_some());
         let plain = OpenAIProvider::new("k".into(), None, None).unwrap();
