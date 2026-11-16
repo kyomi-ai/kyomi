@@ -288,6 +288,10 @@ macro_rules! persist_append {
                     let updated = sqlx::query("UPDATE chat_messages SET content = $1,status = $2,created_at = $3 WHERE message_id = $4 AND session_id = $5 AND role = 'assistant' AND status = 'in_progress'")
                         .bind(encrypted).bind(projection.status).bind(projection_time!($tx,session_id)).bind(projection.message_id.as_str()).bind(session_id).execute(&mut *$tx).await?;
                     if updated.rows_affected() != 1 { return Err(EventStoreError::MissingProjection); }
+                    if projection.status != "complete" {
+                        // The text is now a failure/cancel/interrupt notice: blocks stored for the placeholder earlier would override it on replay.
+                        sqlx::query("DELETE FROM chat_message_provider_content WHERE message_id = $1").bind(projection.message_id.as_str()).execute(&mut *$tx).await?;
+                    }
                 } else {
                     sqlx::query("INSERT INTO chat_messages (message_id,session_id,role,content,status,pinned,created_at) VALUES ($1,$2,$3,$4,$5,false,$6)")
                         .bind(projection.message_id.as_str()).bind(session_id).bind(projection.role).bind(encrypted).bind(projection.status).bind(chrono::Utc::now()).execute(&mut *$tx).await?;

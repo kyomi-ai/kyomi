@@ -1254,9 +1254,9 @@ impl CustomAgent {
     /// allowance still left for the run. Dropping the tool (rather than failing)
     /// lets the conversation continue.
     ///
-    /// When no server tool is sent, server-tool blocks in the history are
-    /// replayed as plain text: the provider rejects result blocks for a tool that
-    /// is absent from the request.
+    /// Server-tool blocks in the history are replayed only for turns whose tools
+    /// are all sent with this request, and as plain text otherwise: the provider
+    /// rejects result blocks for a tool that is absent from the request.
     async fn prepare_call(
         &self,
         messages: &[Message],
@@ -1264,11 +1264,7 @@ impl CustomAgent {
     ) -> (crate::provider::RequestOptions, Vec<Message>) {
         let mut options = self.config.request_options();
         options.server_tools = if allow_server_tools { self.admitted_server_tools(true).await } else { Vec::new() };
-        let messages = if options.server_tools.is_empty() {
-            crate::web::server_tools::without_provider_content(messages)
-        } else {
-            messages.to_vec()
-        };
+        let messages = crate::web::server_tools::replayable_provider_content(messages, &options.server_tools);
         (options, messages)
     }
 

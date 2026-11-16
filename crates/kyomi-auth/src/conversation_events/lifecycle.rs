@@ -179,6 +179,8 @@ macro_rules! write_terminal {
                 let updated = sqlx::query("UPDATE chat_messages SET content=$1,status=$2,created_at=$3 WHERE message_id=$4 AND session_id=$5 AND status='in_progress' AND role='assistant'")
                     .bind(encrypted).bind(projection.status).bind(projection_time!($tx,$submission.submitted.conversation_id.as_str())).bind(projection.message_id.as_str()).bind($submission.submitted.conversation_id.as_str()).execute(&mut *$tx).await?;
                 if updated.rows_affected()!=1 { return Err(EventStoreError::MissingProjection); }
+                // The placeholder's text is now the failure/interruption text: blocks stored for it earlier would override it on replay.
+                sqlx::query("DELETE FROM chat_message_provider_content WHERE message_id=$1").bind(projection.message_id.as_str()).execute(&mut *$tx).await?;
             }
             write_snapshot!($tx,$submission.submitted.run_id.as_str(),&plan.snapshot);
             write_session_sync!($store,$tx,$submission.submitted.conversation_id.as_str(),kyomi_types::sync::SyncActionType::Update);
@@ -321,7 +323,7 @@ impl ConversationStore<'_> {
             .bind(conversation.as_str())
             .fetch_one(&mut *tx)
             .await?;
-            let rows=sqlx::query_as::<_,crate::chat_service::AgentMessage>("SELECT message_id,role,content,tool_calls,tool_call_id,tool_name,sent_by_user_id,current_time_user_tz,message_source,(SELECT p.backend FROM chat_message_provider_content p WHERE p.message_id=chat_messages.message_id) AS provider_backend,(SELECT p.blocks FROM chat_message_provider_content p WHERE p.message_id=chat_messages.message_id) AS provider_content FROM chat_messages WHERE session_id=$1 AND message_id<>$2 AND NOT EXISTS(SELECT 1 FROM conversation_runs future WHERE (future.user_message_id=chat_messages.message_id OR future.assistant_message_id=chat_messages.message_id) AND future.request_id IS NOT NULL AND (future.queued_at>$3 OR (future.queued_at=$3 AND future.run_id>$4))) ORDER BY created_at,message_id")
+            let rows=sqlx::query_as::<_,crate::chat_service::AgentMessage>(concat!("SELECT message_id,role,content,tool_calls,tool_call_id,tool_name,sent_by_user_id,current_time_user_tz,message_source,", crate::chat_service::provider_content_columns!(), " FROM chat_messages WHERE session_id=$1 AND message_id<>$2 AND NOT EXISTS(SELECT 1 FROM conversation_runs future WHERE (future.user_message_id=chat_messages.message_id OR future.assistant_message_id=chat_messages.message_id) AND future.request_id IS NOT NULL AND (future.queued_at>$3 OR (future.queued_at=$3 AND future.run_id>$4))) ORDER BY created_at,message_id"))
                 .bind(conversation.as_str()).bind(message_id.as_str()).bind(row.queued_at).bind(run.as_str()).fetch_all(&mut *tx).await?;
             let mut messages = Vec::with_capacity(rows.len());
             for mut message in rows {
@@ -615,7 +617,7 @@ pub struct MessageWrite {
     /// The provider's verbatim blocks for this message and their format
     /// (KYO-969). Written in the same transaction as the message, so they can
     /// never be misaligned with it. `None` stores nothing.
-    pub provider_content: Option<(String, serde_json::Value)>,
+    pub provider_content: Option<crate::chat_service::ProviderContent>,
 }
 impl ConversationStore<'_> {
     pub async fn fenced_message(
@@ -722,10 +724,10 @@ impl ConversationStore<'_> {
                 sqlx::query("INSERT INTO chat_messages(message_id,session_id,role,content,tool_call_id,tool_name,tool_calls,status,pinned,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,'complete',false,$8)")
                     .bind(&message.message_id).bind(conversation.as_str()).bind(&message.role).bind(encrypted).bind(&message.tool_call_id).bind(&message.name).bind(&tool_calls).bind(chrono::Utc::now()).execute(&mut *tx).await?;
             }
-            if let Some((backend, blocks)) = &message.provider_content {
-                let protected = encryption::protect_json_field(blocks, self.key)?;
-                sqlx::query("INSERT INTO chat_message_provider_content(message_id,backend,blocks) VALUES($1,$2,$3) ON CONFLICT (message_id) DO UPDATE SET backend=EXCLUDED.backend,blocks=EXCLUDED.blocks")
-                    .bind(&message.message_id).bind(backend).bind(&protected).execute(&mut *tx).await?;
+            if let Some(content) = &message.provider_content {
+                let protected = encryption::protect_json_field(&content.blocks, self.key)?;
+                sqlx::query(crate::chat_service::PROVIDER_CONTENT_UPSERT_SQL)
+                    .bind(&message.message_id).bind(&content.backend).bind(&protected).execute(&mut *tx).await?;
             }
             write_session_sync!(
                 &scoped,

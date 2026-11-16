@@ -2185,6 +2185,30 @@ pub struct AgentMessage {
     pub provider_content: Option<serde_json::Value>,
 }
 
+/// The provider's verbatim assistant content blocks for one message and the
+/// provider format they are in (KYO-969). See `chat_message_provider_content`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProviderContent {
+    pub backend: String,
+    pub blocks: serde_json::Value,
+}
+
+/// Upsert of one message's provider blocks; `$3` is the encrypted envelope.
+/// Shared by [`store_provider_content`] and the durable write in
+/// `conversation_events` so the two cannot drift.
+pub const PROVIDER_CONTENT_UPSERT_SQL: &str = "INSERT INTO chat_message_provider_content (message_id, backend, blocks) VALUES ($1, $2, $3) \
+     ON CONFLICT (message_id) DO UPDATE SET backend = EXCLUDED.backend, blocks = EXCLUDED.blocks";
+
+/// The two columns every agent-history query selects so no loader can forget the
+/// stored provider blocks. Expands to a string literal for `concat!`.
+macro_rules! provider_content_columns {
+    () => {
+        "(SELECT p.backend FROM chat_message_provider_content p WHERE p.message_id = chat_messages.message_id) AS provider_backend, \
+         (SELECT p.blocks FROM chat_message_provider_content p WHERE p.message_id = chat_messages.message_id) AS provider_content"
+    };
+}
+pub(crate) use provider_content_columns;
+
 /// Row type for agent message queries.
 #[derive(Debug, sqlx::FromRow)]
 struct AgentMessageRow {
@@ -2228,25 +2252,35 @@ pub fn restore_provider_content(
 
 /// Store the provider's verbatim content blocks for a message (KYO-969), so a
 /// later turn can send them back unchanged. Idempotent per message. The caller
-/// decides whether the blocks are eligible (backend, size); see
-/// `kyomi_agent::adapter`.
+/// decides whether the blocks are eligible (backend, size).
 pub async fn store_provider_content(
     db: &DbPool,
     encryption_key: &[u8; 32],
     message_id: &str,
-    backend: &str,
-    blocks: &serde_json::Value,
+    content: &ProviderContent,
 ) -> kyomi_core::Result<()> {
-    let protected = encryption::protect_json_field(blocks, encryption_key)?;
+    let protected = encryption::protect_json_field(&content.blocks, encryption_key)?;
     kyomi_core::db_execute!(
         db,
-        "INSERT INTO chat_message_provider_content (message_id, backend, blocks) VALUES ($1, $2, $3) \
-         ON CONFLICT (message_id) DO UPDATE SET backend = EXCLUDED.backend, blocks = EXCLUDED.blocks",
+        PROVIDER_CONTENT_UPSERT_SQL,
         message_id,
-        backend,
+        content.backend.as_str(),
         &protected as &serde_json::Value
     )
     .map_err(|e| kyomi_core::Error::Internal(format!("failed to store provider content: {e}")))?;
+    Ok(())
+}
+
+/// Forget a message's stored provider blocks. Called when its text is rewritten
+/// outside the agent run (a user edit), because the blocks would otherwise
+/// override the edit on replay.
+pub async fn clear_provider_content(db: &DbPool, message_id: &str) -> kyomi_core::Result<()> {
+    kyomi_core::db_execute!(
+        db,
+        "DELETE FROM chat_message_provider_content WHERE message_id = $1",
+        message_id
+    )
+    .map_err(|e| kyomi_core::Error::Internal(format!("failed to clear provider content: {e}")))?;
     Ok(())
 }
 
@@ -2283,13 +2317,11 @@ pub async fn get_agent_messages(
         kyomi_core::db_fetch_all!(
             db,
             AgentMessageRow,
-            "SELECT message_id, role, content, tool_calls, tool_call_id, tool_name, \
-              sent_by_user_id, current_time_user_tz, message_source, \
-              (SELECT p.backend FROM chat_message_provider_content p WHERE p.message_id = chat_messages.message_id) AS provider_backend, \
-              (SELECT p.blocks FROM chat_message_provider_content p WHERE p.message_id = chat_messages.message_id) AS provider_content \
+            concat!("SELECT message_id, role, content, tool_calls, tool_call_id, tool_name, \
+              sent_by_user_id, current_time_user_tz, message_source, ", provider_content_columns!(), " \
              FROM chat_messages \
              WHERE session_id = $1 AND NOT EXISTS (SELECT 1 FROM conversation_runs r WHERE r.user_message_id=chat_messages.message_id AND r.state='queued' AND r.request_id IS NOT NULL AND EXISTS (SELECT 1 FROM conversation_runs active WHERE active.session_id=r.session_id AND active.state='running')) AND (created_at > $2 OR (created_at = $2 AND message_id > $3)) \
-             ORDER BY created_at ASC, message_id ASC",
+             ORDER BY created_at ASC, message_id ASC"),
             session_id,
             cutoff_row.created_at,
             after_id
@@ -2298,13 +2330,11 @@ pub async fn get_agent_messages(
         kyomi_core::db_fetch_all!(
             db,
             AgentMessageRow,
-            "SELECT message_id, role, content, tool_calls, tool_call_id, tool_name, \
-              sent_by_user_id, current_time_user_tz, message_source, \
-              (SELECT p.backend FROM chat_message_provider_content p WHERE p.message_id = chat_messages.message_id) AS provider_backend, \
-              (SELECT p.blocks FROM chat_message_provider_content p WHERE p.message_id = chat_messages.message_id) AS provider_content \
+            concat!("SELECT message_id, role, content, tool_calls, tool_call_id, tool_name, \
+              sent_by_user_id, current_time_user_tz, message_source, ", provider_content_columns!(), " \
              FROM chat_messages \
              WHERE session_id = $1 AND NOT EXISTS (SELECT 1 FROM conversation_runs r WHERE r.user_message_id=chat_messages.message_id AND r.state='queued' AND r.request_id IS NOT NULL AND EXISTS (SELECT 1 FROM conversation_runs active WHERE active.session_id=r.session_id AND active.state='running')) \
-             ORDER BY created_at ASC, message_id ASC",
+             ORDER BY created_at ASC, message_id ASC"),
             session_id
         )?
     };
@@ -2914,6 +2944,10 @@ pub async fn update_message_content_owned(
     if msg_exists.is_none() {
         return Err(kyomi_core::Error::Internal("Message not found".to_string()));
     }
+
+    // The stored provider blocks describe the old text; drop them first so a
+    // failure after this point leaves the edit visible, not overridden.
+    clear_provider_content(db, message_id).await?;
 
     // Update and re-encrypt.
     let updated =

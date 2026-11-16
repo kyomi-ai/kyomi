@@ -57,15 +57,55 @@ impl ServerTool {
     }
 }
 
-/// Replay server-tool turns as plain text, for a request that carries no server
-/// tool: the provider rejects server-tool result blocks when the tool is not in
-/// the request. A message left with neither text nor tool calls (a bare
+/// The index ranges of each run of consecutive assistant messages. A server-tool
+/// turn (including a `pause_turn` continuation) lives inside one such run, and
+/// the provider accepts or rejects it as a whole.
+pub fn assistant_runs(messages: &[crate::types::Message]) -> Vec<std::ops::Range<usize>> {
+    let mut runs = Vec::new();
+    let mut start = None;
+    for (index, message) in messages.iter().enumerate() {
+        let assistant = message.role == crate::types::MessageRole::Assistant;
+        match (assistant, start) {
+            (true, None) => start = Some(index),
+            (false, Some(from)) => {
+                runs.push(from..index);
+                start = None;
+            }
+            _ => {}
+        }
+    }
+    if let Some(from) = start {
+        runs.push(from..messages.len());
+    }
+    runs
+}
+
+/// What a request may replay of the stored provider blocks: a server-tool turn is
+/// kept only while every tool it called is among the `offered` server tools (the
+/// provider rejects result blocks for a tool absent from the request, e.g. after
+/// an admin moved search to another backend, or when only one tool's allowance is
+/// left). Any other turn is replayed as plain text. With nothing offered, all
+/// blocks go. A message left with neither text nor tool calls (a bare
 /// `pause_turn` shell) is dropped.
-pub fn without_provider_content(messages: &[crate::types::Message]) -> Vec<crate::types::Message> {
+pub fn replayable_provider_content(messages: &[crate::types::Message], offered: &[Value]) -> Vec<crate::types::Message> {
+    let offered: Vec<&str> = offered.iter().filter_map(|entry| entry.get("name").and_then(Value::as_str)).collect();
+    let mut keep = vec![true; messages.len()];
+    for run in assistant_runs(messages) {
+        let calls_unavailable_tool = messages[run.clone()]
+            .iter()
+            .filter_map(|m| m.provider_content.as_ref())
+            .flatten()
+            .filter(|block| block.get("type").and_then(Value::as_str) == Some("server_tool_use"))
+            .any(|block| block.get("name").and_then(Value::as_str).is_none_or(|name| !offered.contains(&name)));
+        for index in run {
+            keep[index] = !calls_unavailable_tool;
+        }
+    }
     messages
         .iter()
-        .filter_map(|m| {
-            if m.provider_content.is_none() {
+        .zip(keep)
+        .filter_map(|(m, keep)| {
+            if keep || m.provider_content.is_none() {
                 return Some(m.clone());
             }
             let mut m = m.clone();
@@ -178,10 +218,16 @@ pub struct ServerToolActivity {
     pub errors: Vec<String>,
 }
 
+/// A server tool's result block type (`web_search_tool_result`, ...); the
+/// client-tool `tool_result` is not one.
+fn is_server_result_type(kind: &str) -> bool {
+    kind != "tool_result" && kind.ends_with("_tool_result")
+}
+
 fn is_server_block(block: &Value) -> bool {
     match block.get("type").and_then(Value::as_str) {
         Some("server_tool_use") => true,
-        Some(t) => t != "tool_result" && t.ends_with("_tool_result"),
+        Some(t) => is_server_result_type(t),
         None => false,
     }
 }
@@ -323,7 +369,6 @@ pub fn append_footer(content: &str, footer: &str) -> String {
     }
 }
 
-/// Recorded-response fixtures shared with other test modules.
 /// Whether a run of consecutive assistant messages' blocks form complete server
 /// turns: every server tool call has its result later in the sequence, and every
 /// result follows its call. The provider rejects a request that violates this
@@ -339,7 +384,7 @@ pub fn server_turn_is_complete<'a>(blocks: impl IntoIterator<Item = &'a Value>) 
                 }
                 None => return false,
             },
-            Some(kind) if kind != "tool_result" && kind.ends_with("_tool_result") => {
+            Some(kind) if is_server_result_type(kind) => {
                 match block.get("tool_use_id").and_then(Value::as_str) {
                     Some(id) if open.remove(id) => {}
                     _ => return false,
@@ -351,6 +396,7 @@ pub fn server_turn_is_complete<'a>(blocks: impl IntoIterator<Item = &'a Value>) 
     open.is_empty()
 }
 
+/// Recorded-response fixtures shared with other test modules.
 #[cfg(test)]
 pub(crate) mod tests_support {
     use serde_json::{Value, json};
@@ -529,12 +575,25 @@ mod tests {
     }
 
     #[test]
-    fn without_provider_content_replays_server_turns_as_text_and_drops_empty_shells() {
+    fn a_stored_turn_is_replayed_only_while_every_tool_it_called_is_offered() {
+        use crate::types::Message;
+        let search = Message::assistant("a").with_provider_content(Some(search_response()["content"].as_array().unwrap().clone()));
+        let history = vec![Message::user("q"), search, Message::user("q2")];
+        let offered = |names: &[&str]| names.iter().map(|n| json!({"type": "x", "name": n})).collect::<Vec<_>>();
+        assert!(replayable_provider_content(&history, &offered(&["web_search"]))[1].provider_content.is_some());
+        assert!(replayable_provider_content(&history, &offered(&["web_search", "web_fetch"]))[1].provider_content.is_some());
+        let only_fetch = replayable_provider_content(&history, &offered(&["web_fetch"]));
+        assert!(only_fetch[1].provider_content.is_none(), "search blocks without the search tool replay as text");
+        assert_eq!(only_fetch[1].content, "a");
+    }
+
+    #[test]
+    fn replayable_provider_content_replays_server_turns_as_text_and_drops_empty_shells() {
         use crate::types::Message;
         let blocks = Some(vec![json!({"type": "server_tool_use", "id": "srvtoolu_1", "name": "web_search", "input": {}})]);
         let with_text = Message::assistant("partial").with_provider_content(blocks.clone());
         let shell = Message::assistant("").with_provider_content(blocks);
-        let out = without_provider_content(&[Message::user("q"), with_text, shell, Message::assistant("plain")]);
+        let out = replayable_provider_content(&[Message::user("q"), with_text, shell, Message::assistant("plain")], &[]);
         assert_eq!(out.len(), 3);
         assert!(out.iter().all(|m| m.provider_content.is_none()));
         assert_eq!(out[1].content, "partial");

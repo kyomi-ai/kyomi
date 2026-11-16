@@ -395,8 +395,7 @@ impl ChatAgentAdapter {
             let agent_msg = db_message_to_agent_message(msg);
             state.messages.push(agent_msg);
         }
-        drop_incomplete_server_turns(&mut state.messages[first_loaded..]);
-        apply_provider_content_budget(&mut state.messages[first_loaded..]);
+        select_replayable_server_turns(&mut state.messages[first_loaded..]);
 
         // Record total message count (including the system message already in state
         // before DB messages were appended) so persist_after_chat slices correctly.
@@ -879,7 +878,7 @@ async fn persist_one_new_message(
             tool_call_id: msg.tool_call_id.clone(),
             name: msg.name.clone(),
             tool_calls: tool_calls_json.clone(),
-            provider_content: provider_content.clone(),
+            provider_content,
         };
         kyomi_auth::conversation_events::ConversationStore::new(db, encryption_key, user_id, workspace_id)
             .fenced_message(&run.conversation_id, &run.run_id, &run.lease,
@@ -898,7 +897,7 @@ async fn persist_one_new_message(
     if msg.role == MessageRole::Assistant
         && preinserted_assistant_id.is_some_and(|id| msg.message_id.as_deref() == Some(id))
     {
-        chat_service::finalize_assistant_placeholder(
+        let finalized = chat_service::finalize_assistant_placeholder(
             db,
             encryption_key,
             msg.message_id.as_deref().expect("matched Some above"),
@@ -908,7 +907,10 @@ async fn persist_one_new_message(
             tool_calls_json.as_ref(),
         )
         .await?;
-        store_provider_content(db, encryption_key, msg.message_id.as_deref().expect("matched Some above"), provider_content.as_ref()).await?;
+        // Blocks belong to the text they came with: only when it was written.
+        if finalized && let Some(content) = &provider_content {
+            store_provider_content_best_effort(db, encryption_key, msg.message_id.as_deref().expect("matched Some above"), content).await;
+        }
         return Ok(());
     }
 
@@ -946,103 +948,92 @@ async fn persist_one_new_message(
         chat_service::MessageStatus::Complete,
     )
     .await?;
-    store_provider_content(db, encryption_key, &stored_id, provider_content.as_ref()).await?;
+    if let Some(content) = &provider_content {
+        store_provider_content_best_effort(db, encryption_key, &stored_id, content).await;
+    }
     Ok(())
 }
 
-/// Provider format of the blocks this module stores. Only Anthropic's server
-/// tools produce verbatim blocks that must be replayed; OpenRouter's server
-/// tools run over Chat Completions and have nothing to replay.
-const ANTHROPIC_BACKEND: &str = "anthropic";
+/// A message's stored blocks above this size are not stored, and no more than
+/// this much stored block data is replayed per request (newest first). Blocks are
+/// never truncated or edited, because the provider rejects a modified block, so
+/// the limit is a whole-message (and, for replay, whole-turn) decision. The
+/// provider counts `encrypted_content` as input tokens, so the limit also keeps a
+/// long research conversation inside the model's context window.
+const MAX_PROVIDER_CONTENT_BYTES: usize = 256 * 1024;
 
-/// A single message's blocks above this size are not stored, so the message
-/// replays as its text. The limit is a whole-message decision: blocks are never
-/// truncated or edited, because the provider rejects a modified block.
-const MAX_STORED_PROVIDER_CONTENT_BYTES: usize = 512 * 1024;
-
-/// Total stored blocks replayed on one request. Counted newest first; once the
-/// next-older message would exceed it, that message and every older one replay
-/// as text. `encrypted_content` counts as input tokens, so this keeps a long
-/// research conversation inside the model's context window.
-const MAX_REPLAYED_PROVIDER_CONTENT_BYTES: usize = 256 * 1024;
+/// The provider format of the blocks this module stores. Only Anthropic's server
+/// tools produce verbatim blocks that must be replayed; OpenRouter's run over
+/// Chat Completions and have nothing to replay.
+fn replayable_backend() -> String {
+    crate::provider::ProviderKind::Anthropic.to_string()
+}
 
 /// The blocks to store for this message, if it has any and they fit.
-fn storable_provider_content(msg: &Message) -> Option<(String, serde_json::Value)> {
+fn storable_provider_content(msg: &Message) -> Option<chat_service::ProviderContent> {
     if msg.role != MessageRole::Assistant {
         return None;
     }
     let blocks = msg.provider_content.as_ref().filter(|blocks| !blocks.is_empty())?;
     let value = serde_json::Value::Array(blocks.clone());
     let size = serde_json::to_vec(&value).map(|bytes| bytes.len()).unwrap_or(usize::MAX);
-    if size > MAX_STORED_PROVIDER_CONTENT_BYTES {
+    if size > MAX_PROVIDER_CONTENT_BYTES {
         warn!(
             size,
-            limit = MAX_STORED_PROVIDER_CONTENT_BYTES,
+            limit = MAX_PROVIDER_CONTENT_BYTES,
             "Provider content blocks too large to store; this message will replay as text"
         );
         return None;
     }
-    Some((ANTHROPIC_BACKEND.to_string(), value))
+    Some(chat_service::ProviderContent { backend: replayable_backend(), blocks: value })
 }
 
-async fn store_provider_content(
+/// Store a message's blocks after the message itself was written. The blocks are
+/// an optimisation with a defined fallback (the message replays as its text), so
+/// a failed write is logged and does not fail a message that is already saved.
+/// The durable path writes them in the message's own transaction instead.
+async fn store_provider_content_best_effort(
     db: &DbPool,
     encryption_key: &Arc<[u8; 32]>,
     message_id: &str,
-    content: Option<&(String, serde_json::Value)>,
-) -> kyomi_core::Result<()> {
-    match content {
-        Some((backend, blocks)) => {
-            chat_service::store_provider_content(db, encryption_key, message_id, backend, blocks).await
-        }
-        None => Ok(()),
+    content: &chat_service::ProviderContent,
+) {
+    if let Err(error) = chat_service::store_provider_content(db, encryption_key, message_id, content).await {
+        warn!(%message_id, "Could not store provider content blocks; the message will replay as text: {error}");
     }
 }
 
 /// A server-tool turn can span several consecutive assistant messages (a
-/// `pause_turn` continuation). The provider only accepts such a turn whole: a
-/// result without its call (an earlier part was not stored) or a call left open
-/// (the run was cut short) is a 400 on every later request. Any run of
-/// consecutive assistant messages whose stored blocks do not pair up replays as
-/// text instead; the text of every message is always intact.
-fn drop_incomplete_server_turns(messages: &mut [Message]) {
-    let mut start = 0;
-    while start < messages.len() {
-        if messages[start].role != MessageRole::Assistant {
-            start += 1;
+/// `pause_turn` continuation), and the provider only accepts it whole: a result
+/// without its call (an earlier part was not stored) or a call left open (the run
+/// was cut short) is a 400 on every later request. Each run of consecutive
+/// assistant messages is therefore replayed with all its stored blocks or as
+/// text: whole if its blocks pair up and, newest runs first, while the total fits
+/// [`MAX_PROVIDER_CONTENT_BYTES`]. The text of every message is always intact.
+fn select_replayable_server_turns(messages: &mut [Message]) {
+    let mut spent = 0usize;
+    let mut budget_exhausted = false;
+    for run in crate::web::server_tools::assistant_runs(messages).into_iter().rev() {
+        let blocks: Vec<&serde_json::Value> = messages[run.clone()]
+            .iter()
+            .filter_map(|m| m.provider_content.as_ref())
+            .flatten()
+            .collect();
+        if blocks.is_empty() {
             continue;
         }
-        let end = messages[start..]
-            .iter()
-            .position(|m| m.role != MessageRole::Assistant)
-            .map_or(messages.len(), |offset| start + offset);
-        let blocks = messages[start..end].iter().filter_map(|m| m.provider_content.as_ref()).flatten();
-        if !crate::web::server_tools::server_turn_is_complete(blocks) {
-            for message in &mut messages[start..end] {
+        let complete = crate::web::server_tools::server_turn_is_complete(blocks.iter().copied());
+        let size = serde_json::to_vec(&blocks).map(|bytes| bytes.len()).unwrap_or(usize::MAX);
+        let fits = !budget_exhausted && spent.saturating_add(size) <= MAX_PROVIDER_CONTENT_BYTES;
+        if complete && fits {
+            spent += size;
+        } else {
+            // Once one turn does not fit, every older one is text too.
+            budget_exhausted |= complete;
+            for message in &mut messages[run] {
                 message.provider_content = None;
             }
         }
-        start = end;
-    }
-}
-
-/// Replay the stored blocks of the newest messages that fit
-/// [`MAX_REPLAYED_PROVIDER_CONTENT_BYTES`]; everything else keeps only its text.
-/// A message is either replayed whole or not at all.
-fn apply_provider_content_budget(messages: &mut [Message]) {
-    let mut spent = 0usize;
-    let mut exhausted = false;
-    for message in messages.iter_mut().rev() {
-        let Some(blocks) = message.provider_content.as_ref() else { continue };
-        if !exhausted {
-            let size = serde_json::to_vec(blocks).map(|bytes| bytes.len()).unwrap_or(usize::MAX);
-            if spent.saturating_add(size) <= MAX_REPLAYED_PROVIDER_CONTENT_BYTES {
-                spent += size;
-                continue;
-            }
-            exhausted = true;
-        }
-        message.provider_content = None;
     }
 }
 
@@ -1126,7 +1117,7 @@ fn db_message_to_agent_message(msg: &chat_service::AgentMessage) -> Message {
             };
             // KYO-969: the provider's own blocks for a server-tool turn, replayed
             // unchanged. Any other backend, or no stored row, replays the text.
-            let blocks = (msg.provider_backend.as_deref() == Some(ANTHROPIC_BACKEND))
+            let blocks = (msg.provider_backend.as_deref() == Some(replayable_backend().as_str()))
                 .then(|| msg.provider_content.as_ref().and_then(|value| value.as_array().cloned()))
                 .flatten();
             message.with_provider_content(blocks)
@@ -1149,6 +1140,9 @@ fn db_message_to_agent_message(msg: &chat_service::AgentMessage) -> Message {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+mod provider_content_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -1163,7 +1157,9 @@ mod tests {
             tool_name: None,
             sent_by_user_id: None,
             current_time_user_tz: None,
-            message_source: None, provider_backend: None, provider_content: None,
+            message_source: None,
+            provider_backend: None,
+            provider_content: None,
         };
         let result = db_message_to_agent_message(&msg);
         assert_eq!(result.role, MessageRole::User);
@@ -1181,7 +1177,9 @@ mod tests {
             tool_name: None,
             sent_by_user_id: None,
             current_time_user_tz: None,
-            message_source: None, provider_backend: None, provider_content: None,
+            message_source: None,
+            provider_backend: None,
+            provider_content: None,
         };
         let result = db_message_to_agent_message(&msg);
         assert_eq!(result.role, MessageRole::Assistant);
@@ -1205,7 +1203,9 @@ mod tests {
             tool_name: None,
             sent_by_user_id: None,
             current_time_user_tz: None,
-            message_source: None, provider_backend: None, provider_content: None,
+            message_source: None,
+            provider_backend: None,
+            provider_content: None,
         };
         let result = db_message_to_agent_message(&msg);
         assert_eq!(result.role, MessageRole::Assistant);
@@ -1225,7 +1225,9 @@ mod tests {
             tool_name: Some("search_catalog".into()),
             sent_by_user_id: None,
             current_time_user_tz: None,
-            message_source: None, provider_backend: None, provider_content: None,
+            message_source: None,
+            provider_backend: None,
+            provider_content: None,
         };
         let result = db_message_to_agent_message(&msg);
         assert_eq!(result.role, MessageRole::Tool);
@@ -1244,7 +1246,9 @@ mod tests {
             tool_name: None,
             sent_by_user_id: None,
             current_time_user_tz: None,
-            message_source: None, provider_backend: None, provider_content: None,
+            message_source: None,
+            provider_backend: None,
+            provider_content: None,
         };
         let result = db_message_to_agent_message(&msg);
         assert_eq!(result.role, MessageRole::System);
@@ -1261,7 +1265,9 @@ mod tests {
             tool_name: None,
             sent_by_user_id: None,
             current_time_user_tz: None,
-            message_source: None, provider_backend: None, provider_content: None,
+            message_source: None,
+            provider_backend: None,
+            provider_content: None,
         };
         let result = db_message_to_agent_message(&msg);
         // Falls back to user.
@@ -1283,7 +1289,9 @@ mod tests {
             tool_name: None,
             sent_by_user_id: None,
             current_time_user_tz: None,
-            message_source: None, provider_backend: None, provider_content: None,
+            message_source: None,
+            provider_backend: None,
+            provider_content: None,
         };
         let result = db_message_to_agent_message(&msg);
         assert_eq!(result.role, MessageRole::Assistant);
@@ -1307,7 +1315,9 @@ mod tests {
             tool_name: None,
             sent_by_user_id: None,
             current_time_user_tz: None,
-            message_source: None, provider_backend: None, provider_content: None,
+            message_source: None,
+            provider_backend: None,
+            provider_content: None,
         };
         let result = db_message_to_agent_message(&msg);
         assert_eq!(result.role, MessageRole::Assistant);
@@ -1330,7 +1340,9 @@ mod tests {
             tool_name: None,
             sent_by_user_id: None,
             current_time_user_tz: None,
-            message_source: None, provider_backend: None, provider_content: None,
+            message_source: None,
+            provider_backend: None,
+            provider_content: None,
         };
         let result = db_message_to_agent_message(&msg);
         assert_eq!(result.role, MessageRole::Tool);
@@ -1354,7 +1366,9 @@ mod tests {
             tool_name: None,
             sent_by_user_id: None,
             current_time_user_tz: None,
-            message_source: None, provider_backend: None, provider_content: None,
+            message_source: None,
+            provider_backend: None,
+            provider_content: None,
         };
         let result = db_message_to_agent_message(&msg);
         assert_eq!(result.role, MessageRole::User);
@@ -1388,7 +1402,9 @@ mod tests {
             tool_name: None,
             sent_by_user_id: None,
             current_time_user_tz: Some("2026-08-23T09:00:00+00:00".into()),
-            message_source: Some("web".into()), provider_backend: None, provider_content: None,
+            message_source: Some("web".into()),
+            provider_backend: None,
+            provider_content: None,
         };
         let result = db_message_to_agent_message(&msg);
         assert_eq!(result.role, MessageRole::User);
@@ -1417,7 +1433,9 @@ mod tests {
             tool_name: None,
             sent_by_user_id: None,
             current_time_user_tz: Some("2026-08-23T09:00:00+00:00".into()),
-            message_source: None, provider_backend: None, provider_content: None,
+            message_source: None,
+            provider_backend: None,
+            provider_content: None,
         };
         let result = db_message_to_agent_message(&msg);
         assert_eq!(
@@ -1442,7 +1460,9 @@ mod tests {
             tool_name: None,
             sent_by_user_id: None,
             current_time_user_tz: None,
-            message_source: Some("slack".into()), provider_backend: None, provider_content: None,
+            message_source: Some("slack".into()),
+            provider_backend: None,
+            provider_content: None,
         };
         let result = db_message_to_agent_message(&msg);
         assert_eq!(
@@ -1467,7 +1487,9 @@ mod tests {
             tool_name: None,
             sent_by_user_id: None,
             current_time_user_tz: None,
-            message_source: None, provider_backend: None, provider_content: None,
+            message_source: None,
+            provider_backend: None,
+            provider_content: None,
         };
         let result = db_message_to_agent_message(&msg);
         assert_eq!(result.content, "what was Q4 revenue");
@@ -1484,7 +1506,9 @@ mod tests {
             tool_name: None,
             sent_by_user_id: Some("user-abc-12345678".into()),
             current_time_user_tz: None,
-            message_source: None, provider_backend: None, provider_content: None,
+            message_source: None,
+            provider_backend: None,
+            provider_content: None,
         };
         let result = db_message_to_agent_message(&msg);
         assert_eq!(result.role, MessageRole::User);
@@ -1502,7 +1526,9 @@ mod tests {
             tool_name: None,
             sent_by_user_id: None,
             current_time_user_tz: None,
-            message_source: None, provider_backend: None, provider_content: None,
+            message_source: None,
+            provider_backend: None,
+            provider_content: None,
         };
         let result = db_message_to_agent_message(&msg);
         assert_eq!(result.role, MessageRole::User);
@@ -1524,7 +1550,9 @@ mod tests {
             tool_name: None,
             sent_by_user_id: None,
             current_time_user_tz: None,
-            message_source: None, provider_backend: None, provider_content: None,
+            message_source: None,
+            provider_backend: None,
+            provider_content: None,
         };
         let result = db_message_to_agent_message(&msg);
         assert_eq!(result.role, MessageRole::Assistant);
@@ -1633,7 +1661,9 @@ mod tests {
             tool_name: None,
             sent_by_user_id: None,
             current_time_user_tz: None,
-            message_source: None, provider_backend: None, provider_content: None,
+            message_source: None,
+            provider_backend: None,
+            provider_content: None,
         };
         let result = db_message_to_agent_message(&msg);
         // Falls back to user since "Assistant" != "assistant".
@@ -1652,7 +1682,9 @@ mod tests {
             tool_name: None,
             sent_by_user_id: None,
             current_time_user_tz: None,
-            message_source: None, provider_backend: None, provider_content: None,
+            message_source: None,
+            provider_backend: None,
+            provider_content: None,
         };
         let result = db_message_to_agent_message(&msg);
         assert_eq!(result.role, MessageRole::User);
@@ -1771,7 +1803,7 @@ mod tests {
 
     // -- Contract: drop_pre_persisted_message (KYO-492) -----------------------
 
-    fn agent_message(message_id: &str, role: &str, content: &str) -> chat_service::AgentMessage {
+    pub(super) fn agent_message(message_id: &str, role: &str, content: &str) -> chat_service::AgentMessage {
         chat_service::AgentMessage {
             message_id: message_id.into(),
             role: role.into(),
@@ -2395,7 +2427,7 @@ mod tests {
 
     /// Legacy CallerPreInserted compatibility uses an ordinary placeholder,
     /// with no journal run. Durable fixtures must never use this variant.
-    async fn dispatch_chat_turn(
+    pub(super) async fn dispatch_chat_turn(
         db: &kyomi_core::DbPool,
         key: &Arc<[u8; 32]>,
         session_id: &str,
@@ -2415,7 +2447,7 @@ mod tests {
         (UserMessagePersistence::CallerPersisted(user_id), AssistantMessagePersistence::CallerPreInserted(assistant_id))
     }
 
-    async fn claim_durable_turn(
+    pub(super) async fn claim_durable_turn(
         db: &kyomi_core::DbPool,
         key: &Arc<[u8; 32]>,
         session_id: &str,
@@ -2481,273 +2513,6 @@ mod tests {
         assert!(next.agent_state().messages.iter().any(|message| message.content == "first committed answer"));
         assert!(next.agent_state().messages.iter().any(|message| message.content == "late history"));
         assert_eq!(next.agent_state().compacted_summary.as_deref(), Some("changed after claim"));
-    }
-
-    /// Replies to the first call with a captured provider response and to later
-    /// calls with fixed text, recording every request's messages.
-    struct CapturedThenText {
-        first: std::sync::Mutex<Option<crate::types::LLMResponse>>,
-        seen: Arc<std::sync::Mutex<Vec<Vec<Message>>>>,
-    }
-
-    #[async_trait::async_trait]
-    impl crate::provider::LLMProvider for CapturedThenText {
-        fn model(&self) -> &str {
-            "claude-test"
-        }
-
-        async fn complete(
-            &self,
-            messages: &[Message],
-            _tools: &[crate::types::Tool],
-            _options: &crate::provider::RequestOptions,
-            _user_names: &std::collections::HashMap<String, String>,
-        ) -> kyomi_core::Result<crate::types::LLMResponse> {
-            self.seen.lock().unwrap().push(messages.to_vec());
-            if let Some(response) = self.first.lock().unwrap().take() {
-                return Ok(response);
-            }
-            Ok(crate::types::LLMResponse {
-                raw_response: serde_json::Value::Null,
-                content: "second answer".into(),
-                finish_reason: "end_turn".into(),
-                usage: crate::types::AgentTokenUsage::default(),
-                tool_calls: None,
-                cost: None,
-                thinking_content: None,
-            })
-        }
-    }
-
-    fn anthropic_server_tool_config() -> crate::agent::AgentConfig {
-        crate::agent::AgentConfig {
-            server_tools: vec![crate::web::server_tools::ServerTool {
-                kind: kyomi_core::web_tools::WebToolKind::Search,
-                backend: kyomi_core::web_tools::WebBackendKind::Anthropic,
-                entry: serde_json::json!({"type": "web_search_20250305", "name": "web_search", "max_uses": 5}),
-            }],
-            ..Default::default()
-        }
-    }
-
-    fn adapter_with_server_tools(
-        db: &kyomi_core::DbPool,
-        session_id: &str,
-        key: &Arc<[u8; 32]>,
-        provider: CapturedThenText,
-    ) -> ChatAgentAdapter {
-        let agent = CustomAgent::new(
-            Box::new(provider),
-            anthropic_server_tool_config(),
-            Arc::new(crate::tools::ToolRegistry::new()),
-            crate::test_support::build_ctx(db.clone()),
-            std::collections::HashMap::new(),
-        );
-        ChatAgentAdapter::new(agent, "user-a".to_string(), "ws-1".to_string(), Some(session_id.to_string()),
-            "custom_agent".to_string(), db.clone(), key.clone())
-    }
-
-    /// The reply the provider actually returned for a web-search turn (live capture).
-    fn captured_search_message() -> serde_json::Value {
-        serde_json::from_str(include_str!("web/fixtures/anthropic_search_message.json")).expect("fixture")
-    }
-
-    /// KYO-969: a later user turn sends the provider's stored server_tool_use /
-    /// web_search_tool_result blocks back with their encrypted fields unchanged,
-    /// through the production durable path (claim, fenced write, claim again).
-    #[tokio::test]
-    async fn a_later_user_turn_resends_the_stored_server_blocks_verbatim() {
-        let db = crate::test_support::test_pool().await;
-        crate::test_support::seed_user_and_workspace(&db).await;
-        let key = Arc::new([7u8; 32]);
-        let session_id = uuid::Uuid::new_v4().to_string();
-        let captured = captured_search_message();
-        let blocks = captured["content"].as_array().unwrap().clone();
-        let live = crate::anthropic::AnthropicClient::parse_response("claude", &captured).expect("parse capture");
-        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
-
-        // Turn 1: the model searches; the answer and the provider's blocks are stored.
-        let (user, assistant) = claim_durable_turn(&db, &key, &session_id, chrono::Utc::now().timestamp_millis(), 30_000).await;
-        let mut first = adapter_with_server_tools(&db, &session_id, &key,
-            CapturedThenText { first: std::sync::Mutex::new(Some(live)), seen: seen.clone() });
-        let answer = first.chat(ChatParams {
-            message: "what is new?", cancel_token: CancellationToken::new(), current_time_user_tz: None,
-            message_source: Some("web"), user_id: Some("user-a"), user_message_persistence: &user,
-            assistant_message_persistence: &assistant,
-        }).await.expect("turn one");
-        let run = assistant.durable_run().expect("durable");
-        let store = kyomi_auth::conversation_events::ConversationStore::new(&db, &key, "user-a", "ws-1");
-        store.finish(&run.conversation_id, &run.run_id, &run.lease, chrono::Utc::now().timestamp_millis(),
-            agent_runtime::RunState::Completed, &answer).await.expect("finish turn one");
-
-        // Turn 2: a new run reads history only from the database.
-        let accepted = chat_service::prepare_chat_dispatch(chat_service::ChatDispatchParams {
-            db: &db, encryption_key: &key, ws_manager: None, user_id: "user-a", workspace_id: "ws-1", user_display_name: "Test",
-            session_id: &session_id, is_new_session: false, message: "and who wrote it?", current_time_user_tz: None,
-            message_source: Some("web"), skip_ai: false, client_msg_id: Some("turn-two"), owner_instance: "test", execution_context: None,
-        }).await.expect("accept turn two");
-        let chat_service::ChatDispatchOutcome::Ready { run_id, user_message_id, assistant_message_id, .. } = accepted else { panic!("ready") };
-        let run_id = agent_runtime::RunId(run_id);
-        let claim = store.claim(&run.conversation_id, &run_id, "second-worker", chrono::Utc::now().timestamp_millis(), 30_000)
-            .await.expect("claim turn two");
-        let user2 = UserMessagePersistence::CallerPersisted(user_message_id);
-        let assistant2 = AssistantMessagePersistence::Durable {
-            message_id: assistant_message_id,
-            run: DurableRun { conversation_id: run.conversation_id.clone(), run_id, lease: claim.snapshot.lease.expect("lease"), context: Arc::new(claim.context) },
-        };
-        let mut second = adapter_with_server_tools(&db, &session_id, &key,
-            CapturedThenText { first: std::sync::Mutex::new(None), seen: seen.clone() });
-        second.chat(ChatParams {
-            message: "and who wrote it?", cancel_token: CancellationToken::new(), current_time_user_tz: None,
-            message_source: Some("web"), user_id: Some("user-a"), user_message_persistence: &user2,
-            assistant_message_persistence: &assistant2,
-        }).await.expect("turn two");
-
-        let request = seen.lock().unwrap().last().cloned().expect("turn two request");
-        let replayed = request.iter()
-            .find(|m| m.role == MessageRole::Assistant && m.provider_content.is_some())
-            .expect("the earlier server-tool turn keeps its provider blocks");
-        assert_eq!(replayed.provider_content.as_ref().unwrap(), &blocks, "equal in value, encrypted fields included");
-        let (_, wire) = crate::anthropic::AnthropicClient::convert_messages_to_anthropic(&request, &std::collections::HashMap::new());
-        let sent = wire.iter().find(|m| m["role"] == "assistant").expect("assistant on the wire");
-        assert_eq!(sent["content"], captured["content"], "what Anthropic receives is what it returned");
-        let result_block = blocks.iter().find(|b| b["type"] == "web_search_tool_result").expect("search result block");
-        assert_eq!(sent["content"][1]["content"][0]["encrypted_content"], result_block["content"][0]["encrypted_content"]);
-    }
-
-    #[tokio::test]
-    async fn blocks_stored_through_the_legacy_insert_and_placeholder_paths_reload_too() {
-        let db = crate::test_support::test_pool().await;
-        crate::test_support::seed_user_and_workspace(&db).await;
-        let key = Arc::new([7u8; 32]);
-        let session_id = uuid::Uuid::new_v4().to_string();
-        let (user, assistant) = dispatch_chat_turn(&db, &key, &session_id, "what is new?").await;
-        let blocks = captured_search_message()["content"].as_array().unwrap().clone();
-        let intermediate = Message::assistant_with_tool_calls("looking", vec![ToolCall {
-            id: "call-1".into(), name: "noop".into(), arguments: serde_json::json!({}), arguments_error: None,
-        }]).with_provider_content(Some(blocks.clone()));
-        let mut finalmsg = Message::assistant("done").with_provider_content(Some(blocks.clone()));
-        finalmsg.message_id = assistant.tag_id().map(str::to_string);
-        for (index, msg) in [intermediate, finalmsg].iter().enumerate() {
-            persist_one_new_message(&db, &key, &session_id, msg, user.caller_persisted_id(), assistant.tag_id(),
-                MessagePersistenceScope { durable_run: None, user_id: "user-a", workspace_id: "ws-1", message_index: index })
-                .await.expect("persist");
-        }
-        let history = chat_service::get_agent_messages(&db, &key, &session_id, None).await.expect("history");
-        let with_blocks = history.iter().filter(|m| m.provider_content.is_some()).count();
-        assert_eq!(with_blocks, 2, "INSERT and placeholder-finalize paths both store the blocks");
-        for m in history.iter().filter(|m| m.provider_content.is_some()) {
-            assert_eq!(db_message_to_agent_message(m).provider_content.as_ref(), Some(&blocks));
-        }
-    }
-
-    #[test]
-    fn stored_blocks_are_replayed_only_for_the_anthropic_format_and_when_present() {
-        let blocks = captured_search_message()["content"].clone();
-        let row = |backend: Option<&str>, content: Option<serde_json::Value>| chat_service::AgentMessage {
-            provider_backend: backend.map(str::to_string),
-            provider_content: content,
-            ..agent_message("m", "assistant", "text")
-        };
-        assert!(db_message_to_agent_message(&row(Some("anthropic"), Some(blocks.clone()))).provider_content.is_some());
-        assert!(db_message_to_agent_message(&row(Some("gemini"), Some(blocks.clone()))).provider_content.is_none(), "another format replays text");
-        assert!(db_message_to_agent_message(&row(None, None)).provider_content.is_none(), "old sessions replay text");
-        assert!(db_message_to_agent_message(&row(Some("anthropic"), Some(serde_json::json!({"not": "an array"})))).provider_content.is_none());
-    }
-
-    #[test]
-    fn blocks_over_the_storage_limit_are_not_stored_and_never_truncated() {
-        let big = serde_json::json!({"type": "text", "text": "x".repeat(MAX_STORED_PROVIDER_CONTENT_BYTES)});
-        assert!(storable_provider_content(&Message::assistant("t").with_provider_content(Some(vec![big]))).is_none());
-        let small = captured_search_message()["content"].as_array().unwrap().clone();
-        let (backend, stored) = storable_provider_content(&Message::assistant("t").with_provider_content(Some(small.clone()))).expect("fits");
-        assert_eq!(backend, "anthropic");
-        assert_eq!(stored, serde_json::Value::Array(small));
-        assert!(storable_provider_content(&Message::user("u").with_provider_content(Some(vec![serde_json::json!({})]))).is_none(), "assistant messages only");
-    }
-
-    #[test]
-    fn the_replay_budget_keeps_newest_whole_turns_and_sends_older_ones_as_text() {
-        let part = MAX_REPLAYED_PROVIDER_CONTENT_BYTES / 2 - 64;
-        let blocks = |tag: &str| vec![serde_json::json!({"type": "text", "text": format!("{tag}{}", "x".repeat(part))})];
-        let mut messages = vec![
-            Message::assistant("oldest").with_provider_content(Some(blocks("a"))),
-            Message::assistant("old").with_provider_content(Some(blocks("b"))),
-            Message::assistant("plain"),
-            Message::assistant("newer").with_provider_content(Some(blocks("c"))),
-            Message::assistant("newest").with_provider_content(Some(blocks("d"))),
-        ];
-        let newest = messages[4].provider_content.clone();
-        let newer = messages[3].provider_content.clone();
-        apply_provider_content_budget(&mut messages);
-        assert_eq!(messages[4].provider_content, newest, "kept whole, unedited");
-        assert_eq!(messages[3].provider_content, newer, "kept whole, unedited");
-        assert!(messages[1].provider_content.is_none() && messages[0].provider_content.is_none(), "older turns fall back to text");
-        assert_eq!(messages[0].content, "oldest", "their text is intact");
-        // A single turn bigger than the whole budget is sent as text.
-        let mut single = vec![Message::assistant("huge").with_provider_content(Some(vec![
-            serde_json::json!({"type": "text", "text": "x".repeat(MAX_REPLAYED_PROVIDER_CONTENT_BYTES)}),
-        ]))];
-        apply_provider_content_budget(&mut single);
-        assert!(single[0].provider_content.is_none());
-    }
-
-    fn fixture_blocks(raw: &str) -> Vec<serde_json::Value> {
-        serde_json::from_str::<serde_json::Value>(raw).expect("fixture")["content"].as_array().expect("content").clone()
-    }
-
-    /// Live capture, checked against the real API on 2026-11-17: the paused
-    /// message plus its continuation, both with their blocks, was accepted (200);
-    /// the continuation alone (paused part as text) was rejected (400: a
-    /// `web_fetch_tool_result` with no matching call).
-    #[test]
-    fn a_paused_turn_replays_blocks_only_when_every_part_was_stored() {
-        let paused = fixture_blocks(include_str!("web/fixtures/anthropic_pause_turn_message.json"));
-        let continuation = fixture_blocks(include_str!("web/fixtures/anthropic_pause_turn_continuation_message.json"));
-        let blocked = |b: &Vec<serde_json::Value>| Message::assistant("text").with_provider_content(Some(b.clone()));
-
-        let mut both = vec![Message::user("q"), blocked(&paused), blocked(&continuation), Message::user("next")];
-        drop_incomplete_server_turns(&mut both);
-        assert_eq!(both[1].provider_content.as_ref(), Some(&paused));
-        assert_eq!(both[2].provider_content.as_ref(), Some(&continuation));
-
-        let mut only_continuation = vec![Message::user("q"), Message::assistant("partial"), blocked(&continuation), Message::user("next")];
-        drop_incomplete_server_turns(&mut only_continuation);
-        assert!(only_continuation.iter().all(|m| m.provider_content.is_none()), "a result without its call replays as text");
-        assert_eq!(only_continuation[2].content, "text", "text intact");
-
-        let mut cut_short = vec![Message::user("q"), blocked(&paused), Message::assistant("cut short"), Message::user("next")];
-        drop_incomplete_server_turns(&mut cut_short);
-        assert!(cut_short.iter().all(|m| m.provider_content.is_none()), "a call left open replays as text");
-
-        let search = fixture_blocks(include_str!("web/fixtures/anthropic_search_message.json"));
-        let mut separate = vec![Message::user("q"), blocked(&search), Message::user("q2"), blocked(&paused), Message::assistant("x"), Message::user("q3")];
-        drop_incomplete_server_turns(&mut separate);
-        assert!(separate[1].provider_content.is_some(), "a complete turn elsewhere is unaffected");
-        assert!(separate[3].provider_content.is_none());
-    }
-
-    #[tokio::test]
-    async fn deleting_a_message_deletes_its_stored_blocks() {
-        let db = crate::test_support::test_pool().await;
-        crate::test_support::seed_user_and_workspace(&db).await;
-        let key = Arc::new([7u8; 32]);
-        let session_id = uuid::Uuid::new_v4().to_string();
-        let (user, assistant) = dispatch_chat_turn(&db, &key, &session_id, "q").await;
-        let mut msg = Message::assistant("a").with_provider_content(Some(captured_search_message()["content"].as_array().unwrap().clone()));
-        msg.message_id = assistant.tag_id().map(str::to_string);
-        persist_one_new_message(&db, &key, &session_id, &msg, user.caller_persisted_id(), assistant.tag_id(),
-            MessagePersistenceScope { durable_run: None, user_id: "user-a", workspace_id: "ws-1", message_index: 1 })
-            .await.expect("persist");
-        let id = assistant.tag_id().unwrap().to_string();
-        let count = |db: &kyomi_core::DbPool| {
-            let id = id.clone();
-            let db = db.clone();
-            async move { kyomi_core::db_fetch_scalar!(&db, i64, "SELECT COUNT(*) FROM chat_message_provider_content WHERE message_id=$1", &id).unwrap() }
-        };
-        assert_eq!(count(&db).await, 1);
-        kyomi_core::db_execute!(&db, "DELETE FROM chat_messages WHERE message_id=$1", &id).expect("delete message");
-        assert_eq!(count(&db).await, 0, "cascade keeps blocks aligned with their message");
     }
 
     #[tokio::test]

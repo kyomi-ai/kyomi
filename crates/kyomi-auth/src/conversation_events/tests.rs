@@ -1742,7 +1742,7 @@ async fn lifecycle_review_regressions(db: &DbPool) {
         tool_call_id: None,
         name: None,
         tool_calls: None,
-        provider_content: Some(("anthropic".into(), blocks.clone())),
+        provider_content: Some(crate::chat_service::ProviderContent { backend: "anthropic".into(), blocks: blocks.clone() }),
     };
     store
         .fenced_message(&conversation, &receipt.run_id, &lease, 1103, &with_blocks)
@@ -2055,6 +2055,10 @@ async fn lifecycle_review_regressions(db: &DbPool) {
         .await
         .unwrap();
     assert_eq!(restored.context.config, Some(config));
+    // KYO-969: the run-claim query loads the stored provider blocks too.
+    let claimed_with_blocks = restored.context.messages.iter().find(|item| item.message_id == with_blocks.message_id).unwrap();
+    assert_eq!(claimed_with_blocks.provider_backend.as_deref(), Some("anthropic"));
+    assert_eq!(claimed_with_blocks.provider_content.as_ref(), Some(&blocks));
     assert_eq!(
         restored
             .context
@@ -2171,6 +2175,14 @@ async fn lifecycle_review_regressions(db: &DbPool) {
     crate::chat_service::delete_session(db, &owner, &sid, Some(&wid))
         .await
         .unwrap();
+    let left = kyomi_core::db_fetch_scalar!(
+        db,
+        i64,
+        "SELECT COUNT(*) FROM chat_message_provider_content WHERE message_id=$1",
+        &with_blocks.message_id
+    )
+    .unwrap();
+    assert_eq!(left, 0, "deleting the conversation deletes the stored blocks");
 }
 
 async fn lease_wait_cannot_resurrect(db: &DbPool, other: &DbPool) {
