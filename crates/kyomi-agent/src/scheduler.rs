@@ -98,6 +98,10 @@ pub struct WatchScheduler {
     last_cleanup: Arc<Mutex<Option<Instant>>>,
 }
 
+/// How long past its own deadline a batch-mode run may still be unfinished
+/// before it is stopped: the realtime tail budget (10 minutes) plus slack.
+const BATCH_REAP_GRACE_MINUTES: i64 = 40;
+
 /// Dependencies required to construct a [`WatchScheduler`].
 ///
 /// Packaged into a struct to keep the constructor signature under clippy's
@@ -493,6 +497,19 @@ impl WatchScheduler {
                AND COALESCE(llm_mode, 'realtime') <> 'batch' \
                AND started_at < $1"
         );
+        // A batch-mode run is exempt from the 30-minute rule above (it waits for
+        // hours), but not forever: far past its own deadline it is stopped.
+        match watch_batch_service::reap_overdue_runs(
+            &self.db,
+            Utc::now(),
+            chrono::Duration::minutes(BATCH_REAP_GRACE_MINUTES),
+        )
+        .await
+        {
+            Ok(n) if n > 0 => warn!(count = n, "Stopped batch-mode runs that were far past their deadline"),
+            Ok(_) => {}
+            Err(e) => error!(error = %e, "Failed to reap overdue batch runs"),
+        }
         match kyomi_core::db_execute!(
             self.db,
             &orphan_sql,
@@ -658,6 +675,28 @@ impl WatchScheduler {
         // Signal the poll loop to stop
         self.cancel.cancel();
 
+        // Batch-mode runs cannot finish within a shutdown grace period by
+        // design and are resumable, so stop them and hand their leases back
+        // first: waiting out the grace period for them would let a SIGKILL
+        // arrive before the release, and a heartbeat could re-extend a lease
+        // released too late.
+        match watch_batch_service::my_batch_watch_ids(&self.db, crate::batch_run::instance_id()).await {
+            Ok(watch_ids) => {
+                let mut active = self.active_executions.lock().await;
+                for wid in watch_ids {
+                    if let Some(handle) = active.remove(&wid) {
+                        handle.abort();
+                    }
+                }
+            }
+            Err(e) => error!(error = %e, "Failed to list this instance's batch runs on shutdown"),
+        }
+        match watch_batch_service::release_all_leases(&self.db, crate::batch_run::instance_id(), Utc::now()).await {
+            Ok(n) if n > 0 => info!(count = n, "Released batch-mode run leases for resumption"),
+            Ok(_) => {}
+            Err(e) => error!(error = %e, "Failed to release batch-mode run leases on shutdown"),
+        }
+
         // Wait for active executions with timeout
         let active = {
             let active = self.active_executions.lock().await;
@@ -736,20 +775,6 @@ impl WatchScheduler {
                     "Marked running executions as interrupted by shutdown"
                 );
             }
-        }
-
-        // Batch-mode runs are not failed by a restart: hand their leases back
-        // so another instance (or this one, after restart) resumes them now.
-        match watch_batch_service::release_all_leases(
-            &self.db,
-            crate::batch_run::instance_id(),
-            Utc::now(),
-        )
-        .await
-        {
-            Ok(n) if n > 0 => info!(count = n, "Released batch-mode run leases for resumption"),
-            Ok(_) => {}
-            Err(e) => error!(error = %e, "Failed to release batch-mode run leases on shutdown"),
         }
 
         info!("Watch scheduler shutdown complete");

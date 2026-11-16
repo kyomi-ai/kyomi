@@ -459,6 +459,14 @@ async fn a_tool_using_batch_run_survives_two_restarts_and_never_resubmits_a_fini
     assert_eq!(executions(&db).await.len(), 1);
     let e = kyomi_auth::watch_service::get_execution_by_id_only(&db, id, "ws-1", "user-a").await.unwrap().unwrap();
     assert_eq!(e.batch_ids.as_deref(), Some(r#"["batch_1","batch_2"]"#));
+    // Usage: the execution total covers the whole run; billing never exceeds
+    // the real usage (a replayed call is not billed a second time).
+    assert_eq!((e.input_tokens, e.output_tokens), (40, 18), "two calls of 20 in / 9 out");
+    let billed: (i64,) = sqlx::query_as("SELECT COALESCE(SUM(input_tokens), 0) FROM api_usage_log")
+        .fetch_one(kyomi_test_db::sqlite_pool(&db))
+        .await
+        .unwrap();
+    assert!(billed.0 > 0 && billed.0 <= 40, "billed {} input tokens for a run that used 40", billed.0);
     let sessions: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM chat_sessions WHERE session_type = 'watch_execution'")
         .fetch_one(kyomi_test_db::sqlite_pool(&db))
         .await
@@ -552,4 +560,47 @@ async fn a_tool_using_run_that_hits_its_deadline_finishes_its_realtime_tail() {
     assert_eq!(status_of(&db, id).await, "no_alert", "the realtime tail must complete, not be cut off");
     assert_eq!(fake.posts("/batches"), 1, "no batch after the deadline");
     assert_eq!(fake.realtime_calls.load(Ordering::SeqCst), 2, "the tool call and the verdict ran in realtime");
+}
+
+#[tokio::test]
+async fn resuming_after_the_watch_provider_changed_fails_loudly_instead_of_misreading_stored_calls() {
+    let db = crate::test_support::test_pool().await;
+    crate::test_support::seed_user_and_workspace(&db).await;
+    insert_watch(&db, Utc::now() + chrono::Duration::hours(6)).await;
+    let fake = FakeOpenRouter::start(false).await;
+    let (life1, id) = start_waiting_run(&db, config(&fake, 60)).await;
+    crash(&db, life1, id).await;
+
+    // An admin moves watches to another provider meanwhile.
+    let mut changed = (*config(&fake, 60)).clone();
+    changed.llm_watch.provider = Some("anthropic".into());
+    changed.llm_watch.api_key = Some("k".into());
+    let (_s, driver) = resume(&db, Arc::new(changed)).await;
+    driver.await.unwrap();
+
+    assert_eq!(status_of(&db, id).await, "error");
+    let e = kyomi_auth::watch_service::get_execution_by_id_only(&db, id, "ws-1", "user-a").await.unwrap().unwrap();
+    assert!(e.error_message.unwrap().contains("provider changed"));
+    assert_eq!(fake.realtime_calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn a_watch_disabled_during_the_wait_does_not_deliver_when_the_batch_finishes() {
+    let db = crate::test_support::test_pool().await;
+    crate::test_support::seed_user_and_workspace(&db).await;
+    insert_watch(&db, Utc::now() + chrono::Duration::hours(6)).await;
+    let fake = FakeOpenRouter::start(false).await;
+    let (run, id) = start_waiting_run(&db, config(&fake, 60)).await;
+
+    sqlx::query("UPDATE watches SET enabled = 0 WHERE watch_id = 'w1'")
+        .execute(kyomi_test_db::sqlite_pool(&db))
+        .await
+        .unwrap();
+    fake.finish_all();
+    tokio::time::timeout(Duration::from_secs(20), run).await.expect("run never ended").unwrap();
+
+    assert_eq!(status_of(&db, id).await, "error", "a disabled watch must not complete and deliver");
+    let e = kyomi_auth::watch_service::get_execution_by_id_only(&db, id, "ws-1", "user-a").await.unwrap().unwrap();
+    assert!(e.error_message.unwrap().contains("disabled"));
+    assert!(!e.alert_triggered);
 }

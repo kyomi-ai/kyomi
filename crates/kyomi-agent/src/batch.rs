@@ -214,7 +214,7 @@ impl BatchLLMProvider for crate::anthropic::AnthropicClient {
             .to_string();
         let text = kyomi_core::retry::retry_with_backoff(|| async {
             let r = self
-                .batch_request_url(reqwest::Method::GET, &results_url)
+                .authed_request(reqwest::Method::GET, &results_url)
                 .send()
                 .await
                 .map_err(|e| unreachable_err("Anthropic", e))?;

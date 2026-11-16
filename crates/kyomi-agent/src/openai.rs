@@ -272,11 +272,18 @@ impl OpenAIProvider {
     /// same authentication and attribution headers as the realtime call.
     pub(crate) fn batch_request(&self, method: reqwest::Method, path: &str) -> reqwest::RequestBuilder {
         let url = format!("{}{path}", self.base.base_url.trim_end_matches('/'));
-        self.base
+        let request = self
+            .base
             .client
             .request(method, url)
             .header("Authorization", format!("Bearer {}", self.base.api_key))
-            .header("Content-Type", "application/json")
+            .header("Content-Type", "application/json");
+        Self::with_openrouter_headers(request)
+    }
+
+    /// OpenRouter's attribution headers, shared by the realtime and batch calls.
+    fn with_openrouter_headers(request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        request
             .header("X-OpenRouter-Title", "Kyomi")
             .header("HTTP-Referer", "https://kyomi.ai")
     }
@@ -334,10 +341,8 @@ impl OpenAIProvider {
             .header("Authorization", format!("Bearer {}", self.base.api_key))
             .header("Content-Type", "application/json");
 
-        if self.base.base_url.contains("openrouter.ai") {
-            request = request
-                .header("X-OpenRouter-Title", "Kyomi")
-                .header("HTTP-Referer", "https://kyomi.ai");
+        if crate::batch::is_openrouter(&self.base.base_url) {
+            request = Self::with_openrouter_headers(request);
         }
 
         let response = request

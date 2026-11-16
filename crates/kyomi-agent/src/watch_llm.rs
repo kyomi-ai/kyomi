@@ -87,18 +87,7 @@ pub fn validate_instance(app_config: &Config) -> Result<(), String> {
     if !app_config.llm_configured() {
         return Ok(());
     }
-    let default_workspace = WorkspaceAiConfig {
-        provider: kyomi_auth::workspace_ai_config::WorkspaceAiProvider::Kyomi,
-        model: None,
-        api_key: None,
-        base_url: None,
-        title_model: None,
-        context_window: 0,
-        sampling: Default::default(),
-        sampling_warnings: Vec::new(),
-        watch_llm: Default::default(),
-        watch_llm_warnings: Vec::new(),
-    };
+    let default_workspace = WorkspaceAiConfig::kyomi_default();
     validate_selection(&default_workspace, app_config)
         .map_err(|e| format!("invalid watch LLM configuration (LLM_WATCH_*): {e}"))
 }

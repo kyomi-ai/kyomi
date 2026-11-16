@@ -120,6 +120,23 @@ pub struct WorkspaceAiConfig {
 }
 
 impl WorkspaceAiConfig {
+    /// A workspace on Kyomi-managed credentials with nothing configured: the
+    /// baseline for checks that only need the instance configuration.
+    pub fn kyomi_default() -> Self {
+        Self {
+            provider: WorkspaceAiProvider::Kyomi,
+            model: None,
+            api_key: None,
+            base_url: None,
+            title_model: None,
+            context_window: 0,
+            sampling: Default::default(),
+            sampling_warnings: Vec::new(),
+            watch_llm: Default::default(),
+            watch_llm_warnings: Vec::new(),
+        }
+    }
+
     /// `true` when the workspace uses its own provider credentials.
     pub fn is_byok(&self) -> bool {
         self.provider != WorkspaceAiProvider::Kyomi
@@ -529,6 +546,15 @@ pub async fn update_watch_llm(
         }
     };
 
+    if let Some(value) = new_key {
+        kyomi_core::db_execute!(
+            db,
+            "UPDATE workspaces SET watch_ai_api_key_encrypted = $1 WHERE workspace_id = $2",
+            value.as_deref(),
+            workspace_id
+        )?;
+    }
+
     let edits: Vec<(&'static str, Option<serde_json::Value>)> = vec![
         (w::KEY_PROVIDER, settings.provider.clone().map(Into::into)),
         (w::KEY_MODEL, settings.model.clone().map(Into::into)),
@@ -560,14 +586,6 @@ pub async fn update_watch_llm(
         return Err(WorkspaceAiConfigError::WorkspaceNotFound(workspace_id.to_string()));
     }
 
-    if let Some(value) = new_key {
-        kyomi_core::db_execute!(
-            db,
-            "UPDATE workspaces SET watch_ai_api_key_encrypted = $1 WHERE workspace_id = $2",
-            value.as_deref(),
-            workspace_id
-        )?;
-    }
     Ok(())
 }
 
@@ -956,6 +974,12 @@ mod tests {
     }
 
     // --- Watch LLM override (KYO-973) -------------------------------------
+
+    #[test]
+    fn watch_key_change_debug_never_prints_the_key() {
+        let shown = format!("{:?}", WatchKeyChange::Set("sk-watch-secret".into()));
+        assert!(!shown.contains("sk-watch-secret"), "{shown}");
+    }
 
     fn watch_settings() -> kyomi_core::watch_llm::WatchLlmSettings {
         use kyomi_core::watch_llm::{BatchFailurePolicy, WatchLlmMode, WatchLlmSettings};

@@ -395,6 +395,9 @@ pub struct WatchBatchRun {
     /// Position of the next model call of the run, shared by every turn of one
     /// attempt (see [`crate::batch_run::BatchRunContext::call_seq`]).
     pub call_seq: Arc<std::sync::atomic::AtomicI32>,
+    /// Usage of calls answered from the cache during this attempt; excluded
+    /// from billing (see [`crate::batch_run::ReplayedUsage`]).
+    pub replayed: Arc<std::sync::Mutex<crate::batch_run::ReplayedUsage>>,
 }
 
 /// [`execute_agent_chat`] with per-run [`ExecutionExtras`].
@@ -475,6 +478,7 @@ pub async fn execute_agent_chat_with(
                         lease_lost: run.lease_lost.clone(),
                         on_waiting: run.on_waiting.clone(),
                         call_seq: run.call_seq.clone(),
+                        replayed: run.replayed.clone(),
                     },
                 ));
             }
@@ -740,7 +744,23 @@ pub async fn execute_agent_chat_with(
     // against `ai_credits_used_usd`. Writing 0 keeps the single source of
     // truth for billing consistent without a parallel BYOK-only code path.
     const AI_COST_MULTIPLIER: f64 = 1.1;
-    if input_tokens > 0 || output_tokens > 0 {
+    // A resumed batch run replays calls from its cache; they were billed when
+    // first made, so only the calls actually made now are billed here. (A call
+    // resolved by an attempt that died before logging is therefore never
+    // billed: under- rather than double-billing.)
+    let (billed_input, billed_output, total_cost) = match &extras.watch_batch {
+        Some(run) => {
+            let r = run.replayed.lock().map(|r| *r).unwrap_or_default();
+            (
+                input_tokens.saturating_sub(r.input_tokens as _),
+                output_tokens.saturating_sub(r.output_tokens as _),
+                (total_cost - r.cost).max(0.0),
+            )
+        }
+        None => (input_tokens, output_tokens, total_cost),
+    };
+    if billed_input > 0 || billed_output > 0 {
+        let (input_tokens, output_tokens) = (billed_input, billed_output);
         let total_tokens = (input_tokens + output_tokens) as i32;
         // BYOK: `cost_estimate = 0.0` (not billed against Kyomi credits) and
         //       `provider_cost_usd = total_cost` so we keep observability into

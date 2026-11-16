@@ -877,6 +877,7 @@ pub async fn execute_watch_with(
         started_at,
         stored_deadline,
         lease_lost: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        is_batch: Arc::new(std::sync::atomic::AtomicBool::new(false)),
     };
 
     // Run the execution, capturing errors to ensure we always clean up
@@ -914,6 +915,22 @@ pub async fn execute_watch_with(
         Err(_) if run.lease_lost.load(std::sync::atomic::Ordering::SeqCst) => {
             // Another instance took over this batch run; the record is theirs.
             info!(watch_id = %watch_id, execution_id, "Lost the run's lease to another instance; stopping");
+        }
+        Err(e) if run.is_batch.load(std::sync::atomic::Ordering::SeqCst)
+            && !watch_batch_service::claim_lease(
+                db,
+                execution_id,
+                crate::batch_run::instance_id(),
+                Utc::now() + chrono::Duration::seconds(crate::batch_run::LEASE_TTL_SECONDS),
+                Utc::now(),
+            )
+            .await
+            .unwrap_or(true) =>
+        {
+            // A batch run failed, but another instance owns it now: its record
+            // is theirs to finish, not ours to mark failed.
+            run.lease_lost.store(true, std::sync::atomic::Ordering::SeqCst);
+            info!(watch_id = %watch_id, execution_id, error = %e, "Batch run failed after losing its lease; leaving the record to its new owner");
         }
         Err(e) => {
             error!(watch_id = %watch_id, error = %e, "Watch execution failed");
@@ -1020,6 +1037,9 @@ struct RunSetup {
     stored_deadline: Option<DateTime<Utc>>,
     /// Set when this instance loses the run's lease.
     lease_lost: Arc<std::sync::atomic::AtomicBool>,
+    /// Set once the run is known to be a batch-mode run (its terminal writes
+    /// are then fenced by the lease).
+    is_batch: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// Data produced by [`prepare_watch_dispatch`] for the caller to attach to
@@ -1271,11 +1291,24 @@ async fn execute_watch_inner(
     let provider_name = selection.provider_config.provider.to_string();
     let configured_model = selection.provider_config.model.clone().unwrap_or_default();
     let plan = match run.kind {
-        RunKind::Resume { .. } => crate::watch_llm::RunPlan::Batch {
-            deadline: run.stored_deadline.ok_or_else(|| {
-                kyomi_core::Error::Internal("batch run has no stored deadline".into())
-            })?,
-        },
+        RunKind::Resume { execution_id } => {
+            // The stored calls belong to the provider the run started with.
+            // Resuming on another one would parse their bodies with the wrong
+            // adapter and poll their batch ids against the wrong vendor.
+            let recorded = watch_batch_service::run_provider(db, execution_id).await?;
+            if let Some(recorded) = recorded.filter(|r| *r != provider_name) {
+                return Err(kyomi_core::Error::Internal(format!(
+                    "the watch LLM provider changed from {recorded} to {provider_name} while a \
+                     batch run was in progress; the run cannot be resumed. Its pending batch, if \
+                     any, was not cancelled"
+                )));
+            }
+            crate::watch_llm::RunPlan::Batch {
+                deadline: run.stored_deadline.ok_or_else(|| {
+                    kyomi_core::Error::Internal("batch run has no stored deadline".into())
+                })?,
+            }
+        }
         RunKind::Manual | RunKind::Scheduled => {
             let plan = crate::watch_llm::plan_run(
                 &selection.resolved,
@@ -1316,6 +1349,10 @@ async fn execute_watch_inner(
             plan
         }
     };
+    run.is_batch.store(
+        matches!(plan, crate::watch_llm::RunPlan::Batch { .. }),
+        std::sync::atomic::Ordering::SeqCst,
+    );
     let extras = match &plan {
         crate::watch_llm::RunPlan::Batch { deadline } => crate::execution::ExecutionExtras {
             watch_batch: Some(crate::execution::WatchBatchRun {
@@ -1323,6 +1360,7 @@ async fn execute_watch_inner(
                 deadline: *deadline,
                 lease_lost: run.lease_lost.clone(),
                 call_seq: Arc::new(std::sync::atomic::AtomicI32::new(0)),
+                replayed: Arc::new(std::sync::Mutex::new(crate::batch_run::ReplayedUsage::default())),
                 on_waiting: Some({
                     let ws = ws_manager.clone();
                     let workspace_id = watch.workspace_id.clone();
@@ -1686,6 +1724,13 @@ async fn execute_watch_inner(
             run.lease_lost.store(true, std::sync::atomic::Ordering::SeqCst);
             return Err(kyomi_core::Error::Internal(
                 "watch run lease was taken by another instance".into(),
+            ));
+        }
+        // The wait can be hours: a watch disabled or deleted meanwhile must not
+        // deliver. (A realtime run is seconds long and is not re-checked.)
+        if !load_watch(db, watch_id).await?.is_some_and(|w| w.enabled) {
+            return Err(kyomi_core::Error::Internal(
+                "Watch was removed or disabled while a batch run was in progress".into(),
             ));
         }
     }

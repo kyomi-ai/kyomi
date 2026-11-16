@@ -279,12 +279,12 @@ impl AnthropicClient {
     /// same authentication headers as the realtime call.
     pub(crate) fn batch_request(&self, method: reqwest::Method, path: &str) -> reqwest::RequestBuilder {
         let url = format!("{}{path}", self.base.base_url.trim_end_matches('/'));
-        self.batch_request_url(method, &url)
+        self.authed_request(method, &url)
     }
 
     /// As [`batch_request`](Self::batch_request) for an absolute URL the API
     /// returned (the batch `results_url`).
-    pub(crate) fn batch_request_url(&self, method: reqwest::Method, url: &str) -> reqwest::RequestBuilder {
+    pub(crate) fn authed_request(&self, method: reqwest::Method, url: &str) -> reqwest::RequestBuilder {
         self.base
             .client
             .request(method, url)
@@ -340,13 +340,7 @@ impl AnthropicClient {
     async fn call_api(&self, body: &serde_json::Value) -> kyomi_core::Result<serde_json::Value> {
         let url = format!("{}/v1/messages", self.base.base_url.trim_end_matches('/'));
         let response = self
-            .base
-            .client
-            .post(&url)
-            .header("x-api-key", &self.base.api_key)
-            .header("anthropic-version", ANTHROPIC_VERSION)
-            .header("anthropic-beta", PROMPT_CACHING_BETA)
-            .header("content-type", "application/json")
+            .authed_request(reqwest::Method::POST, &url)
             .json(body)
             .send()
             .await
@@ -396,12 +390,12 @@ impl AnthropicClient {
     // Response Parsing
     // -----------------------------------------------------------------------
 
-    /// Parse the Anthropic API JSON response into an [`LLMResponse`].
     /// Parse a vendor response body (realtime or batch result) as this client's model.
     pub(crate) fn parse_response_body(&self, response: &serde_json::Value) -> kyomi_core::Result<LLMResponse> {
         Self::parse_response(&self.base.model, response)
     }
 
+    /// Parse the Anthropic API JSON response into an [`LLMResponse`].
     fn parse_response(
         model: &str,
         response: &serde_json::Value,

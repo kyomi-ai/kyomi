@@ -1019,4 +1019,18 @@ mod reasoning_usage_tests {
         assert!(!reasoning_exhausted_budget(&response("partial", "length", None)));
         assert!(!reasoning_exhausted_budget(&response("", "end_turn", None)));
     }
+
+    #[test]
+    fn provider_config_debug_never_prints_the_api_key() {
+        let c = LLMProviderConfig {
+            provider: ProviderKind::Anthropic,
+            api_key: "sk-super-secret".into(),
+            model: None,
+            base_url: None,
+            context_window: 0,
+        };
+        let shown = format!("{c:?}");
+        assert!(!shown.contains("sk-super-secret"), "{shown}");
+        assert!(shown.contains("redacted"));
+    }
 }

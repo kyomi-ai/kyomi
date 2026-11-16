@@ -507,6 +507,46 @@ pub struct RunInfo {
     pub batch_deadline_at: Option<DateTime<Utc>>,
 }
 
+#[derive(sqlx::FromRow)]
+struct ProviderRow {
+    llm_provider: Option<String>,
+}
+
+/// The provider a run recorded when it started.
+pub async fn run_provider(db: &DbPool, execution_id: i32) -> kyomi_core::Result<Option<String>> {
+    Ok(kyomi_core::db_fetch_optional!(
+        db,
+        ProviderRow,
+        "SELECT llm_provider FROM watch_executions WHERE id = $1",
+        execution_id
+    )
+    .map_err(|e| db_err("load run provider", e))?
+    .and_then(|r| r.llm_provider))
+}
+
+/// Fail batch-mode runs that are far past their deadline and still unfinished:
+/// a driver that is alive (its heartbeat keeps the lease) but wedged, or runs
+/// no instance can resume. Without this a hung run would block the watch's
+/// future occurrences and manual runs forever. Returns how many were failed.
+pub async fn reap_overdue_runs(
+    db: &DbPool,
+    now: DateTime<Utc>,
+    grace: chrono::Duration,
+) -> kyomi_core::Result<u64> {
+    let is_pg = db.is_postgres();
+    let now_fn = kyomi_core::sql_compat::now(is_pg);
+    let sql = format!(
+        "UPDATE watch_executions \
+         SET status = 'error', completed_at = {now_fn}, \
+             error_message = 'Batch run exceeded its deadline and was stopped' \
+         WHERE llm_mode = 'batch' AND completed_at IS NULL \
+           AND status IN ('running', 'waiting_batch') \
+           AND batch_deadline_at IS NOT NULL AND batch_deadline_at < $1"
+    );
+    let res = kyomi_core::db_execute!(db, &sql, now - grace).map_err(|e| db_err("reap overdue runs", e))?;
+    Ok(res.rows_affected())
+}
+
 /// Load the record of an unfinished batch-mode run (`None` once it finished).
 pub async fn unfinished_run(db: &DbPool, execution_id: i32) -> kyomi_core::Result<Option<RunInfo>> {
     kyomi_core::db_fetch_optional!(
@@ -517,6 +557,23 @@ pub async fn unfinished_run(db: &DbPool, execution_id: i32) -> kyomi_core::Resul
         execution_id
     )
     .map_err(|e| db_err("load run", e))
+}
+
+/// Watch ids of this instance's unfinished batch-mode runs.
+pub async fn my_batch_watch_ids(db: &DbPool, owner: &str) -> kyomi_core::Result<Vec<String>> {
+    #[derive(sqlx::FromRow)]
+    struct W {
+        watch_id: Option<String>,
+    }
+    let rows = kyomi_core::db_fetch_all!(
+        db,
+        W,
+        "SELECT watch_id FROM watch_executions \
+         WHERE lease_owner = $1 AND llm_mode = 'batch' AND completed_at IS NULL",
+        owner
+    )
+    .map_err(|e| db_err("list own batch runs", e))?;
+    Ok(rows.into_iter().filter_map(|r| r.watch_id).collect())
 }
 
 /// An unfinished batch-mode run nobody is driving.
@@ -795,5 +852,58 @@ mod tests {
         assert!(ok, "the existing stale-realtime recovery is unchanged");
         let e = crate::watch_service::get_execution_by_id_only(&db, id, "ws1", "u1").await.unwrap().unwrap();
         assert_eq!(e.status, kyomi_core::WatchExecutionStatus::Error);
+    }
+
+    // -- Hung-run reaping and run facts ----------------------------------------
+
+    async fn set_deadline(db: &DbPool, id: i32, ago: Duration) {
+        sqlx::query("UPDATE watch_executions SET batch_deadline_at = $1 WHERE id = $2")
+            .bind(Utc::now() - ago)
+            .bind(id)
+            .execute(sqlite_pool(db))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_batch_run_far_past_its_deadline_is_reaped_even_with_a_live_lease_and_others_are_not() {
+        let db = test_pool().await;
+        let id = batch_run(&db, "wedged-but-heartbeating", Duration::seconds(120)).await;
+        let grace = Duration::minutes(40);
+
+        // Within the grace window: left alone.
+        set_deadline(&db, id, Duration::minutes(10)).await;
+        assert_eq!(reap_overdue_runs(&db, Utc::now(), grace).await.unwrap(), 0);
+
+        // Far past: stopped, despite its lease being renewed.
+        set_deadline(&db, id, Duration::minutes(90)).await;
+        assert_eq!(reap_overdue_runs(&db, Utc::now(), grace).await.unwrap(), 1);
+        let e = crate::watch_service::get_execution_by_id_only(&db, id, "ws1", "u1").await.unwrap().unwrap();
+        assert_eq!(e.status, kyomi_core::WatchExecutionStatus::Error);
+        assert!(e.completed_at.is_some());
+        assert!(e.error_message.unwrap().contains("exceeded its deadline"));
+        // The wedged driver is displaced: its next lease renewal fails.
+        let now = Utc::now();
+        assert!(!claim_lease(&db, id, "wedged-but-heartbeating", now + Duration::seconds(90), now).await.unwrap());
+        // And the watch can run again.
+        let (ok, _) = crate::watch_service::can_run_watch_now(&db, "w1", "ws1", "u1").await.unwrap();
+        assert!(ok);
+    }
+
+    #[tokio::test]
+    async fn realtime_runs_are_never_reaped_by_the_batch_deadline_rule() {
+        let db = test_pool().await;
+        let id = execution(&db).await;
+        record_run_llm(&db, id, &RunLlm { provider: "anthropic", model: "m", mode: "realtime", deadline: Some(Utc::now() - Duration::days(3)), fallback_reason: None, lease: None }).await.unwrap();
+        assert_eq!(reap_overdue_runs(&db, Utc::now(), Duration::minutes(40)).await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn run_provider_and_own_batch_runs_are_reported() {
+        let db = test_pool().await;
+        let id = batch_run(&db, "me", Duration::seconds(120)).await;
+        assert_eq!(run_provider(&db, id).await.unwrap().as_deref(), Some("anthropic"));
+        assert_eq!(my_batch_watch_ids(&db, "me").await.unwrap(), vec!["w1".to_string()]);
+        assert!(my_batch_watch_ids(&db, "someone-else").await.unwrap().is_empty());
     }
 }
