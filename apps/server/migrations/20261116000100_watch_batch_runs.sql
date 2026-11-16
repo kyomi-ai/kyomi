@@ -21,12 +21,15 @@ CREATE INDEX IF NOT EXISTS idx_watch_executions_batch_lease
     ON watch_executions (lease_expires_at)
     WHERE llm_mode = 'batch' AND completed_at IS NULL;
 
--- One row per LLM call a batch-mode run makes. (execution_id, request_hash) is
--- the replay key: a resumed run rebuilds the same request, finds its finished
--- response here and does not resubmit.
+-- One row per LLM call a batch-mode run makes. (execution_id, call_index) is
+-- the replay key: a resumed run replays from the start and its nth model call is
+-- answered by the nth row (the finished response, the vendor batch still being
+-- polled, or the recorded outcome), so a call is never resubmitted even when the
+-- replayed tool results differ. request_hash is kept as a drift check only.
 CREATE TABLE IF NOT EXISTS watch_batch_calls (
     call_id varchar(50) PRIMARY KEY,
     execution_id integer NOT NULL REFERENCES watch_executions(id) ON DELETE CASCADE,
+    call_index integer NOT NULL,
     request_hash varchar(64) NOT NULL,
     provider varchar(50) NOT NULL,
     model varchar(200) NOT NULL,
@@ -36,5 +39,5 @@ CREATE TABLE IF NOT EXISTS watch_batch_calls (
     error_message text,
     submitted_at timestamp with time zone NOT NULL DEFAULT now(),
     completed_at timestamp with time zone,
-    UNIQUE (execution_id, request_hash)
+    UNIQUE (execution_id, call_index)
 );

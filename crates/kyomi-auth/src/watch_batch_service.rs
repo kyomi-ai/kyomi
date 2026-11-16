@@ -11,11 +11,15 @@
 //!   lapses any instance may claim the run with a compare-and-swap and resume
 //!   it, and exactly one wins.
 //! * **A per-call response cache**, `watch_batch_calls`, keyed by
-//!   `(execution_id, request_hash)`. A resumed run replays from the start; a
-//!   call it already made (same request body, same hash) is answered from the
-//!   cache, a submitted-but-unfinished call is re-polled by its vendor batch
-//!   id, and only a genuinely new request is submitted. Response bodies are
-//!   encrypted at rest like chat messages.
+//!   `(execution_id, call_index)`: the nth model call of the run. A resumed run
+//!   replays from the start; its nth call is answered from the nth row (a
+//!   finished response from the cache, a submitted-but-unfinished call by
+//!   re-polling its vendor batch id), and only a call with no row is
+//!   submitted. Keying by position rather than by request hash is what keeps a
+//!   resume from resubmitting when replayed tool results, or context such as
+//!   recent alerts, differ from the first attempt. The request hash is stored
+//!   as a drift check only. Response bodies are encrypted at rest like chat
+//!   messages.
 
 use chrono::{DateTime, Utc};
 use kyomi_core::DbPool;
@@ -75,6 +79,8 @@ impl BatchCallState {
 pub struct BatchCall {
     pub call_id: String,
     pub execution_id: i32,
+    /// Position of the call within the run (0-based).
+    pub call_index: i32,
     pub request_hash: String,
     pub provider: String,
     pub model: String,
@@ -89,6 +95,7 @@ pub struct BatchCall {
 struct CallRow {
     call_id: String,
     execution_id: i32,
+    call_index: i32,
     request_hash: String,
     provider: String,
     model: String,
@@ -98,13 +105,14 @@ struct CallRow {
     error_message: Option<String>,
 }
 
-const CALL_COLUMNS: &str = "call_id, execution_id, request_hash, provider, model, \
+const CALL_COLUMNS: &str = "call_id, execution_id, call_index, request_hash, provider, model, \
      vendor_batch_id, state, response_encrypted, error_message";
 
 fn to_call(row: CallRow, key: &[u8; 32]) -> kyomi_core::Result<BatchCall> {
     Ok(BatchCall {
         call_id: row.call_id,
         execution_id: row.execution_id,
+        call_index: row.call_index,
         request_hash: row.request_hash,
         provider: row.provider,
         model: row.model,
@@ -123,30 +131,31 @@ fn db_err(what: &str, e: impl std::fmt::Display) -> kyomi_core::Error {
     kyomi_core::Error::Internal(format!("watch batch {what}: {e}"))
 }
 
-/// The call recorded for `(execution_id, request_hash)`, if any.
+/// The call recorded at position `call_index` of the run, if any.
 pub async fn find_call(
     db: &DbPool,
     key: &[u8; 32],
     execution_id: i32,
-    request_hash: &str,
+    call_index: i32,
 ) -> kyomi_core::Result<Option<BatchCall>> {
     let sql = format!(
         "SELECT {CALL_COLUMNS} FROM watch_batch_calls \
-         WHERE execution_id = $1 AND request_hash = $2"
+         WHERE execution_id = $1 AND call_index = $2"
     );
-    kyomi_core::db_fetch_optional!(db, CallRow, &sql, execution_id, request_hash)
+    kyomi_core::db_fetch_optional!(db, CallRow, &sql, execution_id, call_index)
         .map_err(|e| db_err("lookup", e))?
         .map(|r| to_call(r, key))
         .transpose()
 }
 
-/// Record that a call is about to be submitted. Returns the existing row when
-/// another writer (or this run before a crash) already recorded the same
-/// request, so a request is never recorded twice.
+/// Record that the call at `call_index` is about to be submitted. Returns the
+/// existing row when this run (before a crash) or another writer already
+/// recorded that position, so a position is never recorded twice.
 pub async fn begin_call(
     db: &DbPool,
     key: &[u8; 32],
     execution_id: i32,
+    call_index: i32,
     request_hash: &str,
     provider: &str,
     model: &str,
@@ -155,20 +164,42 @@ pub async fn begin_call(
     kyomi_core::db_execute!(
         db,
         "INSERT INTO watch_batch_calls \
-            (call_id, execution_id, request_hash, provider, model, state, submitted_at) \
-         VALUES ($1, $2, $3, $4, $5, 'submitting', $6) \
-         ON CONFLICT (execution_id, request_hash) DO NOTHING",
+            (call_id, execution_id, call_index, request_hash, provider, model, state, submitted_at) \
+         VALUES ($1, $2, $3, $4, $5, $6, 'submitting', $7) \
+         ON CONFLICT (execution_id, call_index) DO NOTHING",
         &call_id,
         execution_id,
+        call_index,
         request_hash,
         provider,
         model,
         Utc::now()
     )
     .map_err(|e| db_err("record call", e))?;
-    find_call(db, key, execution_id, request_hash)
+    find_call(db, key, execution_id, call_index)
         .await?
         .ok_or_else(|| db_err("record call", "row vanished after insert"))
+}
+
+/// Keep the realtime response that replaced a failed or abandoned batch, so a
+/// resumed run is answered from it instead of calling the model again.
+pub async fn attach_fallback_response(
+    db: &DbPool,
+    key: &[u8; 32],
+    call_id: &str,
+    response: &serde_json::Value,
+) -> kyomi_core::Result<()> {
+    let encrypted = encryption::encrypt_json(response, key)?;
+    kyomi_core::db_execute!(
+        db,
+        "UPDATE watch_batch_calls SET response_encrypted = $1 \
+         WHERE call_id = $2 AND state IN ('failed', 'expired', 'abandoned') \
+           AND response_encrypted IS NULL",
+        encrypted,
+        call_id
+    )
+    .map_err(|e| db_err("attach fallback response", e))?;
+    Ok(())
 }
 
 /// Attach the vendor batch id once the submit succeeded.
@@ -290,6 +321,39 @@ pub async fn sync_batch_ids(db: &DbPool, execution_id: i32) -> kyomi_core::Resul
         execution_id
     )
     .map_err(|e| db_err("sync batch ids", e))?;
+    Ok(())
+}
+
+#[derive(sqlx::FromRow)]
+struct SessionRow {
+    session_id: Option<String>,
+}
+
+/// The chat session recorded on an execution, if any.
+pub async fn execution_session(db: &DbPool, execution_id: i32) -> kyomi_core::Result<Option<String>> {
+    Ok(kyomi_core::db_fetch_optional!(
+        db,
+        SessionRow,
+        "SELECT session_id FROM watch_executions WHERE id = $1",
+        execution_id
+    )
+    .map_err(|e| db_err("load session", e))?
+    .and_then(|r| r.session_id))
+}
+
+/// Record the chat session an execution's current attempt runs in.
+pub async fn set_execution_session(
+    db: &DbPool,
+    execution_id: i32,
+    session_id: &str,
+) -> kyomi_core::Result<()> {
+    kyomi_core::db_execute!(
+        db,
+        "UPDATE watch_executions SET session_id = $1 WHERE id = $2",
+        session_id,
+        execution_id
+    )
+    .map_err(|e| db_err("set session", e))?;
     Ok(())
 }
 
@@ -517,27 +581,30 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn begin_call_is_idempotent_per_request_and_distinct_per_hash() {
+    async fn begin_call_is_idempotent_per_position_and_distinct_across_positions() {
         let db = test_pool().await;
         let id = execution(&db).await;
-        let a = begin_call(&db, &KEY, id, "h1", "anthropic", "m").await.unwrap();
-        let again = begin_call(&db, &KEY, id, "h1", "anthropic", "m").await.unwrap();
-        assert_eq!(a.call_id, again.call_id, "the same request must not be recorded twice");
-        let b = begin_call(&db, &KEY, id, "h2", "anthropic", "m").await.unwrap();
+        let a = begin_call(&db, &KEY, id, 0, "h1", "anthropic", "m").await.unwrap();
+        // The same position with a *different* request (replayed tool results
+        // changed) still resolves to the same call: that is the point.
+        let again = begin_call(&db, &KEY, id, 0, "h-drifted", "anthropic", "m").await.unwrap();
+        assert_eq!(a.call_id, again.call_id, "a position must not be recorded twice");
+        assert_eq!(again.request_hash, "h1", "the original request hash is kept as the drift check");
+        let b = begin_call(&db, &KEY, id, 1, "h2", "anthropic", "m").await.unwrap();
         assert_ne!(a.call_id, b.call_id);
-        assert_eq!(a.state, BatchCallState::Submitting);
+        assert_eq!((a.state, b.call_index), (BatchCallState::Submitting, 1));
     }
 
     #[tokio::test]
     async fn a_finished_call_round_trips_its_response_encrypted_and_is_never_overwritten() {
         let db = test_pool().await;
         let id = execution(&db).await;
-        let c = begin_call(&db, &KEY, id, "h1", "anthropic", "m").await.unwrap();
+        let c = begin_call(&db, &KEY, id, 0, "h1", "anthropic", "m").await.unwrap();
         mark_submitted(&db, &c.call_id, "msgbatch_1").await.unwrap();
         let body = serde_json::json!({"content": [{"type": "text", "text": "secret-finding"}]});
         assert!(finish_call(&db, &KEY, &c.call_id, BatchCallState::Succeeded, Some(&body), None).await.unwrap());
 
-        let got = find_call(&db, &KEY, id, "h1").await.unwrap().unwrap();
+        let got = find_call(&db, &KEY, id, 0).await.unwrap().unwrap();
         assert_eq!(got.state, BatchCallState::Succeeded);
         assert_eq!(got.vendor_batch_id.as_deref(), Some("msgbatch_1"));
         assert_eq!(got.response, Some(body));
@@ -551,18 +618,36 @@ mod tests {
 
         // A late failure / abandon cannot overwrite the recorded response.
         assert!(!finish_call(&db, &KEY, &c.call_id, BatchCallState::Abandoned, None, Some("late")).await.unwrap());
-        assert_eq!(find_call(&db, &KEY, id, "h1").await.unwrap().unwrap().state, BatchCallState::Succeeded);
+        assert_eq!(find_call(&db, &KEY, id, 0).await.unwrap().unwrap().state, BatchCallState::Succeeded);
+    }
+
+    #[tokio::test]
+    async fn a_fallback_response_is_kept_once_for_an_abandoned_call_and_never_for_a_succeeded_one() {
+        let db = test_pool().await;
+        let id = execution(&db).await;
+        let abandoned = begin_call(&db, &KEY, id, 0, "h1", "anthropic", "m").await.unwrap();
+        finish_call(&db, &KEY, &abandoned.call_id, BatchCallState::Abandoned, None, Some("deadline")).await.unwrap();
+        let first = serde_json::json!({"content": "realtime one"});
+        attach_fallback_response(&db, &KEY, &abandoned.call_id, &first).await.unwrap();
+        attach_fallback_response(&db, &KEY, &abandoned.call_id, &serde_json::json!({"content": "second"})).await.unwrap();
+        let got = find_call(&db, &KEY, id, 0).await.unwrap().unwrap();
+        assert_eq!((got.state, got.response), (BatchCallState::Abandoned, Some(first)), "the first fallback response wins");
+
+        let ok = begin_call(&db, &KEY, id, 1, "h2", "anthropic", "m").await.unwrap();
+        finish_call(&db, &KEY, &ok.call_id, BatchCallState::Succeeded, Some(&serde_json::json!({"a": 1})), None).await.unwrap();
+        attach_fallback_response(&db, &KEY, &ok.call_id, &serde_json::json!({"a": 2})).await.unwrap();
+        assert_eq!(find_call(&db, &KEY, id, 1).await.unwrap().unwrap().response, Some(serde_json::json!({"a": 1})));
     }
 
     #[tokio::test]
     async fn batch_ids_are_listed_in_submission_order_and_synced_to_the_execution() {
         let db = test_pool().await;
         let id = execution(&db).await;
-        for (h, b) in [("h1", "b1"), ("h2", "b2")] {
-            let c = begin_call(&db, &KEY, id, h, "anthropic", "m").await.unwrap();
+        for (i, b) in [(0, "b1"), (1, "b2")] {
+            let c = begin_call(&db, &KEY, id, i, &format!("h{i}"), "anthropic", "m").await.unwrap();
             mark_submitted(&db, &c.call_id, b).await.unwrap();
         }
-        let _unsubmitted = begin_call(&db, &KEY, id, "h3", "anthropic", "m").await.unwrap();
+        let _unsubmitted = begin_call(&db, &KEY, id, 2, "h3", "anthropic", "m").await.unwrap();
         assert_eq!(batch_ids(&db, id).await.unwrap(), vec!["b1", "b2"]);
         sync_batch_ids(&db, id).await.unwrap();
         let e = crate::watch_service::get_execution_by_id_only(&db, id, "ws1", "u1").await.unwrap().unwrap();
@@ -666,9 +751,49 @@ mod tests {
     async fn calls_are_removed_with_their_execution() {
         let db = test_pool().await;
         let id = execution(&db).await;
-        begin_call(&db, &KEY, id, "h1", "anthropic", "m").await.unwrap();
+        begin_call(&db, &KEY, id, 0, "h1", "anthropic", "m").await.unwrap();
         sqlx::query("PRAGMA foreign_keys = ON").execute(sqlite_pool(&db)).await.unwrap();
         sqlx::query("DELETE FROM watch_executions WHERE id = $1").bind(id).execute(sqlite_pool(&db)).await.unwrap();
-        assert!(find_call(&db, &KEY, id, "h1").await.unwrap().is_none());
+        assert!(find_call(&db, &KEY, id, 0).await.unwrap().is_none());
+    }
+
+    // -- "Run now" must neither kill nor run beside a batch run ----------------
+
+    async fn backdate(db: &DbPool, id: i32, minutes: i64) {
+        sqlx::query("UPDATE watch_executions SET started_at = $1 WHERE id = $2")
+            .bind(Utc::now() - Duration::minutes(minutes))
+            .bind(id)
+            .execute(sqlite_pool(db))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn run_now_does_not_expire_a_long_running_batch_run_and_is_refused_while_it_runs() {
+        let db = test_pool().await;
+        let id = batch_run(&db, "me", Duration::seconds(120)).await;
+        backdate(&db, id, 180).await; // hours old, as a batch run legitimately is
+
+        let (ok, why) = crate::watch_service::can_run_watch_now(&db, "w1", "ws1", "u1").await.unwrap();
+        assert!(!ok, "a live batch run blocks a manual run");
+        assert_eq!(why, "Watch is already running");
+        let e = crate::watch_service::get_execution_by_id_only(&db, id, "ws1", "u1").await.unwrap().unwrap();
+        assert_eq!(e.status, kyomi_core::WatchExecutionStatus::Running, "the 5-minute expiry must not kill a batch run");
+        assert!(e.completed_at.is_none());
+
+        set_waiting(&db, id, true).await.unwrap();
+        let (ok, _) = crate::watch_service::can_run_watch_now(&db, "w1", "ws1", "u1").await.unwrap();
+        assert!(!ok, "a run waiting on a batch also blocks a manual run");
+    }
+
+    #[tokio::test]
+    async fn run_now_still_expires_a_stuck_realtime_run() {
+        let db = test_pool().await;
+        let id = execution(&db).await;
+        backdate(&db, id, 10).await;
+        let (ok, _) = crate::watch_service::can_run_watch_now(&db, "w1", "ws1", "u1").await.unwrap();
+        assert!(ok, "the existing stale-realtime recovery is unchanged");
+        let e = crate::watch_service::get_execution_by_id_only(&db, id, "ws1", "u1").await.unwrap().unwrap();
+        assert_eq!(e.status, kyomi_core::WatchExecutionStatus::Error);
     }
 }

@@ -139,12 +139,14 @@ pub fn plan_run(
     if resolved.mode != WatchLlmMode::Batch {
         return Ok(RunPlan::Realtime { reason: None });
     }
-    support?;
+    // A manual run is realtime whatever the provider can do, so it is decided
+    // before batch support is checked.
     if !scheduled {
         return Ok(RunPlan::Realtime {
             reason: Some("manual runs always use realtime".into()),
         });
     }
+    support?;
     let window = chrono::Duration::minutes(i64::from(resolved.batch_window_minutes));
     let hard_cap = now + chrono::Duration::minutes(i64::from(MAX_BATCH_WINDOW_MINUTES));
     let Some(next) = next_run_at else {
@@ -477,6 +479,12 @@ mod tests {
     fn an_overdue_or_past_next_run_is_realtime() {
         let p = plan_run(&resolved(WatchLlmMode::Batch, 60), Ok(()), true, Some(at() - Duration::minutes(5)), at()).unwrap();
         assert!(matches!(p, RunPlan::Realtime { reason: Some(_) }));
+    }
+
+    #[test]
+    fn a_manual_run_is_realtime_even_when_the_configured_provider_has_no_batch_api() {
+        let p = plan_run(&resolved(WatchLlmMode::Batch, 60), Err("no batch api".into()), false, None, at()).unwrap();
+        assert!(matches!(p, RunPlan::Realtime { reason: Some(r) } if r.contains("manual")));
     }
 
     #[test]

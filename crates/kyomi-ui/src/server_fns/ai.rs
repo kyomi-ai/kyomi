@@ -407,8 +407,11 @@ pub async fn update_watch_llm(values: WatchLlmValues) -> Result<(), ServerFnErro
     let mut candidate = kyomi_auth::workspace_ai_config::load(ac.db(), &ac.ws_id)
         .await
         .into_sfn()?;
+    // Only the *presence* of a key matters to validation; the stored value is
+    // never loaded here.
+    const KEY_PRESENT_FOR_VALIDATION: &str = "<key present>";
     candidate.watch_llm = WatchLlmSettings {
-        api_key: will_have_key.then(|| "placeholder".to_string()),
+        api_key: will_have_key.then(|| KEY_PRESENT_FOR_VALIDATION.to_string()),
         ..settings.clone()
     };
     candidate.watch_llm.validate().map_err(|e| bad("watch LLM", e))?;

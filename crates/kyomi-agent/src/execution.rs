@@ -392,6 +392,9 @@ pub struct WatchBatchRun {
     pub lease_lost: Arc<std::sync::atomic::AtomicBool>,
     /// Told when the run starts or stops waiting on a batch.
     pub on_waiting: Option<crate::batch_run::WaitingHook>,
+    /// Position of the next model call of the run, shared by every turn of one
+    /// attempt (see [`crate::batch_run::BatchRunContext::call_seq`]).
+    pub call_seq: Arc<std::sync::atomic::AtomicI32>,
 }
 
 /// [`execute_agent_chat`] with per-run [`ExecutionExtras`].
@@ -471,6 +474,7 @@ pub async fn execute_agent_chat_with(
                         poll_interval: crate::batch_run::poll_interval(),
                         lease_lost: run.lease_lost.clone(),
                         on_waiting: run.on_waiting.clone(),
+                        call_seq: run.call_seq.clone(),
                     },
                 ));
             }

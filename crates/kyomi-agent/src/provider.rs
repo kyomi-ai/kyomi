@@ -249,7 +249,9 @@ impl ProviderKind {
 // ---------------------------------------------------------------------------
 
 /// Configuration needed to instantiate an [`LLMProvider`].
-#[derive(Debug, Clone)]
+///
+/// `Debug` is written by hand so the API key can never reach a log line.
+#[derive(Clone)]
 pub struct LLMProviderConfig {
     /// Which provider backend to use.
     pub provider: ProviderKind,
@@ -261,6 +263,18 @@ pub struct LLMProviderConfig {
     pub base_url: Option<String>,
     /// Context window size in tokens (0 = unknown, use hardcoded lookup).
     pub context_window: u32,
+}
+
+impl fmt::Debug for LLMProviderConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("LLMProviderConfig")
+            .field("provider", &self.provider)
+            .field("api_key", &"<redacted>")
+            .field("model", &self.model)
+            .field("base_url", &self.base_url)
+            .field("context_window", &self.context_window)
+            .finish()
+    }
 }
 
 // ---------------------------------------------------------------------------

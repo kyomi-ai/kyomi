@@ -92,16 +92,41 @@ pub fn batch_support(provider: ProviderKind, base_url: Option<&str>) -> Result<(
     }
 }
 
+/// Whether `base_url` points at OpenRouter: its host is `openrouter.ai` or a
+/// subdomain. (Under test only, a `/openrouter.ai/` path segment on a loopback
+/// server also counts, so the real adapter selection runs against a fake.)
 pub(crate) fn is_openrouter(base_url: &str) -> bool {
-    base_url.contains("openrouter.ai")
+    let host = base_url
+        .split_once("://")
+        .map_or(base_url, |(_, rest)| rest)
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or_default()
+        .rsplit('@')
+        .next()
+        .unwrap_or_default()
+        .split(':')
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if host == "openrouter.ai" || host.ends_with(".openrouter.ai") {
+        return true;
+    }
+    #[cfg(test)]
+    if base_url.contains("/openrouter.ai/") {
+        return true;
+    }
+    false
 }
 
 fn http_error(vendor: &str, status: reqwest::StatusCode, body: &str) -> kyomi_core::Error {
     let msg = crate::provider::extract_error_message(body)
         .unwrap_or_else(|| format!("HTTP {status}"));
     match status.as_u16() {
-        401 | 403 => kyomi_core::Error::Unauthorized(format!("{vendor} batch authentication failed: {msg}")),
-        400 | 404 | 410 | 413 | 422 => {
+        401 => kyomi_core::Error::Unauthorized(format!("{vendor} batch authentication failed: {msg}")),
+        // 403 is a policy refusal, not a bad key (e.g. OpenRouter refuses batch
+        // for an account under a guardrail with content rules).
+        400 | 403 | 404 | 410 | 413 | 422 => {
             kyomi_core::Error::BadRequest(format!("{vendor} batch request rejected ({status}): {msg}"))
         }
         429 => kyomi_core::Error::TooManyRequests(format!("{vendor} batch rate limited: {msg}"), 0),
@@ -398,6 +423,22 @@ mod tests {
     }
 
     #[test]
+    fn openrouter_is_recognised_by_host_not_by_substring() {
+        for yes in ["https://openrouter.ai/api/v1", "https://OpenRouter.ai:443/api/v1", "https://eu.openrouter.ai/api/v1"] {
+            assert!(is_openrouter(yes), "{yes}");
+        }
+        for no in [
+            "https://notopenrouter.ai/v1",
+            "https://openrouter.ai.evil.example/v1",
+            "https://evil.example/openrouter.ai",
+            "https://evil.example/?next=openrouter.ai",
+            "http://localhost:11434/v1",
+        ] {
+            assert!(!is_openrouter(no), "{no}");
+        }
+    }
+
+    #[test]
     fn the_provider_batch_accessor_follows_the_support_matrix() {
         let direct = AnthropicClient::new("k".into(), None).unwrap();
         assert!(LLMProvider::batch(&direct).is_some());
@@ -479,6 +520,22 @@ mod tests {
                 assert_eq!(client.parse_response(&body).unwrap().content, "done");
             }
         }
+    }
+
+    #[test]
+    fn a_policy_refusal_is_a_rejected_request_not_an_authentication_failure() {
+        let e = http_error("OpenRouter", reqwest::StatusCode::FORBIDDEN, r#"{"error":{"message":"Batch is not available under a guardrail with prompt-injection rules"}}"#);
+        assert!(matches!(&e, kyomi_core::Error::BadRequest(m) if m.contains("guardrail")), "{e:?}");
+    }
+
+    /// A real Anthropic batch result body (captured live 2026-11-16, ids scrubbed).
+    #[test]
+    fn a_captured_live_anthropic_batch_result_parses_with_the_realtime_parser() {
+        let body: Value = serde_json::from_str(include_str!("testdata/anthropic_batch_result.json")).unwrap();
+        let client = AnthropicClient::new("k".into(), Some("claude-haiku-5-5".into())).unwrap();
+        let parsed = client.parse_response(&body).unwrap();
+        assert_eq!(parsed.content.trim(), "OK");
+        assert_eq!((parsed.usage.input_tokens, parsed.usage.output_tokens), (18, 4));
     }
 
     #[tokio::test]
@@ -565,5 +622,90 @@ mod tests {
         let err = p.submit("r", &json!({"model": "m"})).await.unwrap_err();
         assert!(matches!(&err, kyomi_core::Error::BadRequest(m) if m.contains("no batch variant")), "{err:?}");
         assert!(!p.cancel("batch_9").await.unwrap(), "OpenRouter documents no cancel endpoint");
+    }
+
+    // -- Live verification (ignored; needs real keys in the environment) --------
+    //
+    // `cargo test -p kyomi-agent --lib live_ -- --ignored --nocapture` with
+    // KYO973_LIVE_ANTHROPIC_KEY / KYO973_LIVE_OPENROUTER_KEY (+ optional
+    // KYO973_LIVE_OPENROUTER_MODEL) set. Each makes one tiny batch request
+    // through the real adapter, waits for it, and writes the scrubbed vendor
+    // result body to KYO973_LIVE_OUT_DIR when set. Keys are never printed.
+
+    async fn live_roundtrip(batch: &dyn BatchLLMProvider, name: &str) -> Option<Value> {
+        let body = batch.build_body(
+            &[Message::user("Reply with exactly: OK")],
+            &[],
+            &RequestOptions::new(16).with_temperature(None),
+            &HashMap::new(),
+        );
+        let custom_id = format!("kyo973-live-{name}");
+        let id = batch.submit(&custom_id, &body).await.expect("live submit");
+        println!("{name}: submitted batch {id}");
+        let started = std::time::Instant::now();
+        loop {
+            match batch.poll(&id, &custom_id).await.expect("live poll") {
+                BatchPoll::Pending => {
+                    assert!(started.elapsed() < std::time::Duration::from_secs(40 * 60), "{name}: still pending after 40 minutes (batch {id})");
+                    tokio::time::sleep(std::time::Duration::from_secs(20)).await;
+                }
+                BatchPoll::Succeeded(body) => {
+                    println!("{name}: succeeded after {:?}", started.elapsed());
+                    let parsed = batch.parse_response(&body).expect("parse live response");
+                    println!("{name}: text={:?} in={} out={}", parsed.content.trim(), parsed.usage.input_tokens, parsed.usage.output_tokens);
+                    return Some(body);
+                }
+                other => {
+                    println!("{name}: ended {other:?}");
+                    return None;
+                }
+            }
+        }
+    }
+
+    fn scrub(mut v: Value) -> Value {
+        fn walk(v: &mut Value) {
+            match v {
+                Value::Object(m) => {
+                    for (k, val) in m.iter_mut() {
+                        if matches!(k.as_str(), "id" | "request_id" | "provider" | "system_fingerprint" | "generation_id") {
+                            *val = Value::String("scrubbed".into());
+                        } else {
+                            walk(val);
+                        }
+                    }
+                }
+                Value::Array(a) => a.iter_mut().for_each(walk),
+                _ => {}
+            }
+        }
+        walk(&mut v);
+        v
+    }
+
+    fn save(name: &str, body: &Value) {
+        if let Ok(dir) = std::env::var("KYO973_LIVE_OUT_DIR") {
+            std::fs::write(format!("{dir}/{name}.json"), serde_json::to_string_pretty(&scrub(body.clone())).unwrap()).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "live: needs KYO973_LIVE_ANTHROPIC_KEY"]
+    async fn live_anthropic_batch_roundtrip() {
+        let Ok(key) = std::env::var("KYO973_LIVE_ANTHROPIC_KEY") else { return };
+        let client = AnthropicClient::new(key, Some("claude-haiku-5-5".into())).unwrap();
+        let body = live_roundtrip(&client, "anthropic").await.expect("anthropic batch did not succeed");
+        save("anthropic_batch_result", &body);
+    }
+
+    #[tokio::test]
+    #[ignore = "live: needs KYO973_LIVE_OPENROUTER_KEY"]
+    async fn live_openrouter_batch_roundtrip() {
+        let Ok(key) = std::env::var("KYO973_LIVE_OPENROUTER_KEY") else { return };
+        let model = std::env::var("KYO973_LIVE_OPENROUTER_MODEL").unwrap_or_else(|_| "deepseek/deepseek-chat".into());
+        let p = OpenAIProvider::new(key, Some(model), Some("https://openrouter.ai/api/v1".into())).unwrap();
+        assert!(LLMProvider::batch(&p).is_some());
+        let body = live_roundtrip(&p, "openrouter").await.expect("openrouter batch did not succeed");
+        save("openrouter_batch_result", &body);
     }
 }

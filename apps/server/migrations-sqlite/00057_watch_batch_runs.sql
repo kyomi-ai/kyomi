@@ -15,6 +15,7 @@ CREATE INDEX IF NOT EXISTS idx_watch_executions_batch_lease
 CREATE TABLE IF NOT EXISTS watch_batch_calls (
     call_id TEXT NOT NULL PRIMARY KEY,
     execution_id INTEGER NOT NULL REFERENCES watch_executions(id) ON DELETE CASCADE,
+    call_index INTEGER NOT NULL,
     request_hash TEXT NOT NULL,
     provider TEXT NOT NULL,
     model TEXT NOT NULL,
@@ -24,5 +25,5 @@ CREATE TABLE IF NOT EXISTS watch_batch_calls (
     error_message TEXT,
     submitted_at TEXT NOT NULL DEFAULT (datetime('now')),
     completed_at TEXT,
-    UNIQUE (execution_id, request_hash)
+    UNIQUE (execution_id, call_index)
 );

@@ -980,6 +980,36 @@ pub async fn execute_watch_with(
     Ok(())
 }
 
+/// An agent turn reports its own failure as a normal result (`status` is not
+/// `completed`, `response_text` is an apology), so for a batch run, where the
+/// failure can be a displaced driver or a batch the failure policy says must
+/// fail the run, that has to become the run's error here. Otherwise the text
+/// would go through JSON validation and the correction retry as if the model
+/// had answered badly, and the run would end as a quiet "no alert".
+fn ensure_batch_attempt_succeeded(
+    extras: &crate::execution::ExecutionExtras,
+    run: &RunSetup,
+    result: &crate::execution::AgentExecutionResult,
+) -> kyomi_core::Result<()> {
+    if extras.watch_batch.is_none() {
+        return Ok(());
+    }
+    if run.lease_lost.load(std::sync::atomic::Ordering::SeqCst) {
+        return Err(kyomi_core::Error::Internal(
+            "watch run lease was taken by another instance".into(),
+        ));
+    }
+    if result.status != "completed" {
+        return Err(kyomi_core::Error::Internal(
+            result
+                .error
+                .clone()
+                .unwrap_or_else(|| "watch batch run failed".to_string()),
+        ));
+    }
+    Ok(())
+}
+
 /// Per-run facts [`execute_watch_inner`] needs besides the watch itself.
 struct RunSetup {
     kind: RunKind,
@@ -1292,6 +1322,7 @@ async fn execute_watch_inner(
                 execution_id,
                 deadline: *deadline,
                 lease_lost: run.lease_lost.clone(),
+                call_seq: Arc::new(std::sync::atomic::AtomicI32::new(0)),
                 on_waiting: Some({
                     let ws = ws_manager.clone();
                     let workspace_id = watch.workspace_id.clone();
@@ -1315,15 +1346,26 @@ async fn execute_watch_inner(
         },
         crate::watch_llm::RunPlan::Realtime { .. } => crate::execution::ExecutionExtras::default(),
     };
-    // A batch run legitimately waits far longer than the realtime guard; its
-    // own bound is the batch deadline.
+    // A batch run legitimately waits far longer than the realtime guard: it may
+    // wait until its deadline, and then still needs the full realtime budget to
+    // finish (the fallback tail), so the bound is the wait plus the guard.
     let max_duration = match &plan {
         crate::watch_llm::RunPlan::Batch { deadline } => (*deadline - Utc::now())
             .to_std()
-            .unwrap_or(std::time::Duration::from_secs(1))
-            .max(MAX_WATCH_DURATION),
+            .unwrap_or_default()
+            + MAX_WATCH_DURATION,
         crate::watch_llm::RunPlan::Realtime { .. } => MAX_WATCH_DURATION,
     };
+    // Keep the lease alive for the whole run, whatever it is doing, and stop if
+    // another instance takes it. Dropped (and stopped) when this function ends.
+    let _heartbeat = matches!(plan, crate::watch_llm::RunPlan::Batch { .. }).then(|| {
+        crate::batch_run::LeaseHeartbeat::start(
+            db.clone(),
+            execution_id,
+            crate::batch_run::instance_id().to_string(),
+            run.lease_lost.clone(),
+        )
+    });
 
     // 6. Build enhanced system prompt with ChartML reference and watch context.
     // The run's stored start time, not "now": a resumed run must rebuild the
@@ -1347,6 +1389,11 @@ async fn execute_watch_inner(
     );
 
     // 7. Create watch_execution session (hidden from chat list)
+    let previous_session = if matches!(run.kind, RunKind::Resume { .. }) {
+        watch_batch_service::execution_session(db, execution_id).await?
+    } else {
+        None
+    };
     let session_id = uuid::Uuid::new_v4().to_string();
     chat_service::create_session_with_id(
         db,
@@ -1358,6 +1405,14 @@ async fn execute_watch_inner(
         None,
     )
     .await?;
+    // Record the session now, not only at completion, so an interrupted
+    // attempt's session can be found and removed when the run resumes.
+    watch_batch_service::set_execution_session(db, execution_id, &session_id).await?;
+    if let Some(old) = previous_session.filter(|old| *old != session_id)
+        && let Err(e) = chat_service::delete_session(db, &watch.created_by, &old, Some(&watch.workspace_id)).await
+    {
+        warn!(execution_id, session_id = %old, error = %e, "Failed to remove the interrupted attempt's session (non-fatal)");
+    }
 
     info!(
         session_id = %session_id,
@@ -1423,6 +1478,7 @@ async fn execute_watch_inner(
         extras.clone(),
     )
     .await?;
+    ensure_batch_attempt_succeeded(&extras, run, &agent_result)?;
     // The configured model may be the provider default; record the real one.
     if let Some(model) = agent_result.model.as_deref()
         && let Err(e) = kyomi_core::db_execute!(
@@ -1542,6 +1598,7 @@ async fn execute_watch_inner(
                     .await
                     {
                         Ok(retry_result) => {
+                            ensure_batch_attempt_succeeded(&extras, run, &retry_result)?;
                             raw_response = retry_result.response_text;
                             // Accumulate retry tokens for accurate billing
                             input_tokens += retry_result
@@ -1613,6 +1670,25 @@ async fn execute_watch_inner(
     let validated_data = validated_data.ok_or_else(|| {
         kyomi_core::Error::Internal("Failed to validate watch response".into())
     })?;
+
+    // A batch run finalizes and delivers only while it still owns the run: a
+    // displaced driver must not write a result or send a duplicate alert.
+    if extras.watch_batch.is_some() {
+        let still_mine = watch_batch_service::claim_lease(
+            db,
+            execution_id,
+            crate::batch_run::instance_id(),
+            Utc::now() + chrono::Duration::seconds(crate::batch_run::LEASE_TTL_SECONDS),
+            Utc::now(),
+        )
+        .await?;
+        if !still_mine {
+            run.lease_lost.store(true, std::sync::atomic::Ordering::SeqCst);
+            return Err(kyomi_core::Error::Internal(
+                "watch run lease was taken by another instance".into(),
+            ));
+        }
+    }
 
     // 11. Determine the stored/delivered terminal state. A guard stop is an
     // Error with its human message, never an empty successful report.

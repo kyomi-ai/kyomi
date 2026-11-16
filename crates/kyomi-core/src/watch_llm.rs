@@ -155,8 +155,8 @@ impl WatchLlmSettings {
     pub fn validate(&self) -> Result<(), InvalidSetting> {
         if self.sets_connection() && (self.provider.is_none() || self.api_key.is_none()) {
             return Err(InvalidSetting(
-                "a watch LLM provider, API key and base URL must be set together: \
-                 provider and API key are both required when either is configured"
+                "a watch LLM provider and API key must be set together: both are required \
+                 when either, or a base URL, is configured"
                     .into(),
             ));
         }

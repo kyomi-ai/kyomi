@@ -3,38 +3,51 @@
 //! The batch-mode LLM provider for a watch run (KYO-973).
 //!
 //! [`BatchingProvider`] wraps the run's realtime provider. Each `complete()`
-//! call becomes: build the exact realtime request body, look it up in the
-//! run's durable call cache, and either return the cached response, re-poll a
-//! batch already submitted for it, or submit a new one and wait.
+//! call is the *nth model call of the run*; it is answered from the run's
+//! durable call row at position n if there is one (a finished response, or a
+//! vendor batch still being polled), and otherwise submitted as a new batch and
+//! waited for.
 //!
-//! Because every call is keyed by the hash of its request body, a run that is
-//! resumed after a restart simply replays from the start: calls it already
-//! made are answered from the cache and nothing is resubmitted; the first call
-//! it had not finished is re-polled by its vendor batch id.
+//! Because calls are keyed by position, not by request hash, a run that is
+//! resumed after a restart simply replays from the start: nothing already paid
+//! for is resubmitted even if replayed tool results (or context such as recent
+//! alerts) differ from the first attempt. The request hash is recorded only so
+//! drift can be logged.
 //!
-//! The wait is a lightweight poll loop that renews the run's lease. If the
-//! lease is lost to another instance this instance stops quietly
-//! ([`BatchRunContext::lease_lost`]); the record belongs to the new owner.
+//! The wait is a lightweight poll loop. The run's lease is renewed by a
+//! heartbeat for the whole run ([`LeaseHeartbeat`]) as well as on every call; if
+//! it is lost to another instance this instance stops quietly
+//! ([`BatchRunContext::lease_lost`]), because the record belongs to the new
+//! owner. A sibling pattern for chat runs is `durable_chat`; this is a smaller
+//! compare-and-swap lease on `watch_executions` because a watch run has no
+//! conversation event store.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use kyomi_auth::watch_batch_service::{self as store, BatchCallState};
+use kyomi_auth::watch_batch_service::{self as store, BatchCall, BatchCallState};
 use kyomi_core::watch_llm::BatchFailurePolicy;
 use kyomi_core::DbPool;
 use sha2::{Digest, Sha256};
 use tracing::{info, warn};
 
-use crate::batch::BatchPoll;
+use crate::batch::{BatchLLMProvider, BatchPoll};
 use crate::provider::{LLMProvider, RequestOptions};
 use crate::types::{LLMResponse, Message, Tool};
 
 /// How often a waiting run polls the vendor (both vendors suggest ~1/minute).
 pub const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(60);
+
+/// How long a lease lasts without renewal. Renewed by the heartbeat.
+pub const LEASE_TTL_SECONDS: i64 = 180;
+
+/// How often the heartbeat renews the lease: a sixth of the TTL, so several
+/// consecutive renewals can fail before the lease lapses.
+pub const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
 
 /// The poll interval a run uses. A test can shorten it process-wide; no
 /// production path does.
@@ -49,16 +62,22 @@ pub fn poll_interval() -> Duration {
     DEFAULT_POLL_INTERVAL
 }
 
+/// The heartbeat interval; shortened with the poll interval under test.
+pub fn heartbeat_interval() -> Duration {
+    poll_interval().min(HEARTBEAT_INTERVAL)
+}
+
 #[cfg(test)]
 pub(crate) static TEST_POLL_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
-/// How long a lease lasts without renewal. Renewed every poll.
-pub const LEASE_TTL_SECONDS: i64 = 180;
 
 /// Process-wide instance identity used as the lease owner.
 pub fn instance_id() -> &'static str {
     static ID: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     ID.get_or_init(|| format!("{}:{}", std::process::id(), uuid::Uuid::new_v4()))
+}
+
+fn lease_expiry() -> DateTime<Utc> {
+    Utc::now() + chrono::Duration::seconds(LEASE_TTL_SECONDS)
 }
 
 /// Told when the run starts or stops waiting on a batch, so the UI can show it
@@ -79,14 +98,55 @@ pub struct BatchRunContext {
     /// Set when this instance lost the run's lease to another instance.
     pub lease_lost: Arc<AtomicBool>,
     pub on_waiting: Option<WaitingHook>,
+    /// Position of the next model call of the run, shared by every provider of
+    /// one attempt (the main turn and the JSON-correction retry).
+    pub call_seq: Arc<AtomicI32>,
+}
+
+/// Renews a batch run's lease for as long as it is alive, whatever the run is
+/// doing (waiting, replaying tool calls, or finishing in realtime). Sets
+/// `lease_lost` when another instance owns the run.
+pub struct LeaseHeartbeat {
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl LeaseHeartbeat {
+    pub fn start(db: DbPool, execution_id: i32, owner: String, lease_lost: Arc<AtomicBool>) -> Self {
+        let task = tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(heartbeat_interval()).await;
+                match store::claim_lease(&db, execution_id, &owner, lease_expiry(), Utc::now()).await {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        lease_lost.store(true, Ordering::SeqCst);
+                        return;
+                    }
+                    // A transient DB error must not end a healthy run: the lease
+                    // only lapses after several missed renewals.
+                    Err(e) => warn!(execution_id, error = %e, "failed to renew the batch run lease; will retry"),
+                }
+            }
+        });
+        Self { task }
+    }
+}
+
+impl Drop for LeaseHeartbeat {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
 }
 
 pub struct BatchingProvider {
     inner: Box<dyn LLMProvider>,
     provider_name: String,
     ctx: BatchRunContext,
-    /// Once the run stops batching (deadline), every later call is realtime.
-    realtime_only: AtomicBool,
+}
+
+/// Whether this instance still owns the run.
+enum Lease {
+    Held,
+    Lost,
 }
 
 impl BatchingProvider {
@@ -95,45 +155,63 @@ impl BatchingProvider {
             inner,
             provider_name: provider_name.to_string(),
             ctx,
-            realtime_only: AtomicBool::new(false),
         }
     }
 
-    fn lease_expiry() -> DateTime<Utc> {
-        Utc::now() + chrono::Duration::seconds(LEASE_TTL_SECONDS)
-    }
-
-    async fn set_waiting(&self, waiting: bool) -> kyomi_core::Result<()> {
-        store::set_waiting(&self.ctx.db, self.ctx.execution_id, waiting).await?;
+    async fn set_waiting(&self, waiting: bool) {
+        if let Err(e) = store::set_waiting(&self.ctx.db, self.ctx.execution_id, waiting).await {
+            warn!(execution_id = self.ctx.execution_id, error = %e, "failed to update the waiting status");
+        }
         if let Some(hook) = &self.ctx.on_waiting {
             hook(waiting).await;
         }
-        Ok(())
     }
 
-    /// Renew the lease; `Err` when another instance owns the run now.
-    async fn hold_lease(&self) -> kyomi_core::Result<()> {
-        let held = store::claim_lease(
-            &self.ctx.db,
-            self.ctx.execution_id,
-            &self.ctx.owner,
-            Self::lease_expiry(),
-            Utc::now(),
-        )
-        .await?;
-        if held {
-            Ok(())
-        } else {
-            self.ctx.lease_lost.store(true, Ordering::SeqCst);
-            Err(kyomi_core::Error::Internal(
-                "watch run lease was taken by another instance".into(),
-            ))
+    /// Renew the lease. A lost lease is final; a database error is not (the
+    /// run keeps going and the lease only lapses after several misses).
+    async fn hold_lease(&self) -> Lease {
+        if self.ctx.lease_lost.load(Ordering::SeqCst) {
+            return Lease::Lost;
         }
+        match store::claim_lease(&self.ctx.db, self.ctx.execution_id, &self.ctx.owner, lease_expiry(), Utc::now()).await {
+            Ok(true) => Lease::Held,
+            Ok(false) => {
+                self.ctx.lease_lost.store(true, Ordering::SeqCst);
+                Lease::Lost
+            }
+            Err(e) => {
+                warn!(execution_id = self.ctx.execution_id, error = %e, "failed to renew the batch run lease; will retry");
+                Lease::Held
+            }
+        }
+    }
+
+    fn lease_lost_error() -> kyomi_core::Error {
+        kyomi_core::Error::Internal("watch run lease was taken by another instance".into())
+    }
+
+    /// Realtime call that also keeps its response for replay.
+    async fn realtime_and_keep(
+        &self,
+        call: Option<&BatchCall>,
+        messages: &[Message],
+        tools: &[Tool],
+        options: &RequestOptions,
+        user_names: &HashMap<String, String>,
+    ) -> kyomi_core::Result<LLMResponse> {
+        let response = self.inner.complete(messages, tools, options, user_names).await?;
+        if let Some(call) = call
+            && let Err(e) = store::attach_fallback_response(&self.ctx.db, &self.ctx.encryption_key, &call.call_id, &response.raw_response).await
+        {
+            warn!(execution_id = self.ctx.execution_id, error = %e, "failed to keep the realtime fallback response");
+        }
+        Ok(response)
     }
 
     /// Apply the failure policy to a batch that did not produce a response.
     async fn on_batch_failure(
         &self,
+        call: &BatchCall,
         reason: String,
         messages: &[Message],
         tools: &[Tool],
@@ -144,12 +222,38 @@ impl BatchingProvider {
         store::note_fallback(&self.ctx.db, self.ctx.execution_id, &reason).await?;
         match self.ctx.failure_policy {
             BatchFailurePolicy::RealtimeRetry => {
-                self.inner.complete(messages, tools, options, user_names).await
+                self.realtime_and_keep(Some(call), messages, tools, options, user_names).await
             }
             BatchFailurePolicy::Error => Err(kyomi_core::Error::Internal(format!(
                 "watch batch failed: {reason}"
             ))),
         }
+    }
+
+    /// The nth call hit the run's deadline: stop waiting, abandon the batch (a
+    /// late result is ignored) and answer in realtime. This is the guard that
+    /// keeps a slow batch from delaying or dropping an alert, so it applies
+    /// whatever the failure policy.
+    async fn on_deadline(
+        &self,
+        batch: &dyn BatchLLMProvider,
+        call: &BatchCall,
+        messages: &[Message],
+        tools: &[Tool],
+        options: &RequestOptions,
+        user_names: &HashMap<String, String>,
+    ) -> kyomi_core::Result<LLMResponse> {
+        let reason = "batch not finished before the next scheduled run was due; \
+                      cancelled and re-run in realtime"
+            .to_string();
+        store::finish_call(&self.ctx.db, &self.ctx.encryption_key, &call.call_id, BatchCallState::Abandoned, None, Some(&reason)).await?;
+        if let Some(vendor_id) = &call.vendor_batch_id
+            && let Err(e) = batch.cancel(vendor_id).await
+        {
+            warn!(batch_id = %vendor_id, error = %e, "failed to cancel the abandoned batch");
+        }
+        store::note_fallback(&self.ctx.db, self.ctx.execution_id, &reason).await?;
+        self.realtime_and_keep(Some(call), messages, tools, options, user_names).await
     }
 }
 
@@ -166,81 +270,96 @@ impl LLMProvider for BatchingProvider {
         options: &RequestOptions,
         user_names: &HashMap<String, String>,
     ) -> kyomi_core::Result<LLMResponse> {
-        if self.realtime_only.load(Ordering::SeqCst) {
-            return self.inner.complete(messages, tools, options, user_names).await;
-        }
         let batch = self.inner.batch().ok_or_else(|| {
             kyomi_core::Error::Internal(format!(
                 "batch mode is not supported by the {} provider; use realtime",
                 self.provider_name
             ))
         })?;
-        let body = batch.build_body(messages, tools, options, user_names);
-        let hash = request_hash(&body);
-        let call = store::begin_call(
-            &self.ctx.db,
-            &self.ctx.encryption_key,
-            self.ctx.execution_id,
-            &hash,
-            &self.provider_name,
-            self.inner.model(),
-        )
-        .await?;
-
-        // Answered by an earlier attempt of this run: no network, no cost.
-        match call.state {
-            BatchCallState::Succeeded => {
-                let response = call.response.as_ref().ok_or_else(|| {
-                    kyomi_core::Error::Internal("succeeded batch call has no stored response".into())
-                })?;
-                return batch.parse_response(response);
-            }
-            BatchCallState::Failed | BatchCallState::Expired | BatchCallState::Abandoned => {
-                let reason = call
-                    .error_message
-                    .clone()
-                    .unwrap_or_else(|| format!("earlier batch call ended {}", call.state.as_str()));
-                return self.on_batch_failure(reason, messages, tools, options, user_names).await;
-            }
-            BatchCallState::Submitting | BatchCallState::Pending => {}
+        let index = self.ctx.call_seq.fetch_add(1, Ordering::SeqCst);
+        let key = &self.ctx.encryption_key;
+        if matches!(self.hold_lease().await, Lease::Lost) {
+            return Err(Self::lease_lost_error());
         }
 
-        self.hold_lease().await?;
-        let vendor_id = match &call.vendor_batch_id {
-            Some(id) => id.clone(),
-            None => {
-                let id = batch.submit(&call.call_id, &body).await;
-                let id = match id {
-                    Ok(id) => id,
-                    Err(e) => {
-                        // Never submitted: no vendor batch to wait for.
-                        store::finish_call(
-                            &self.ctx.db,
-                            &self.ctx.encryption_key,
-                            &call.call_id,
-                            BatchCallState::Failed,
-                            None,
-                            Some(&e.to_string()),
-                        )
-                        .await?;
-                        return self
-                            .on_batch_failure(format!("batch submit failed: {e}"), messages, tools, options, user_names)
-                            .await;
+        let body = batch.build_body(messages, tools, options, user_names);
+        let hash = request_hash(&body);
+        let past_deadline = Utc::now() >= self.ctx.deadline;
+
+        // The nth call already has a row: this is a replay of an earlier attempt.
+        let existing = store::find_call(&self.ctx.db, key, self.ctx.execution_id, index).await?;
+        let call = match existing {
+            Some(call) => {
+                if call.request_hash != hash {
+                    info!(execution_id = self.ctx.execution_id, index, "replayed request differs from the recorded one; answering from the recorded call");
+                }
+                match call.state {
+                    BatchCallState::Succeeded => {
+                        let response = call.response.as_ref().ok_or_else(|| {
+                            kyomi_core::Error::Internal("succeeded batch call has no stored response".into())
+                        })?;
+                        return batch.parse_response(response);
                     }
-                };
-                store::mark_submitted(&self.ctx.db, &call.call_id, &id).await?;
-                store::sync_batch_ids(&self.ctx.db, self.ctx.execution_id).await?;
-                info!(execution_id = self.ctx.execution_id, batch_id = %id, "submitted watch batch");
-                id
+                    // A realtime answer was already obtained for this position.
+                    BatchCallState::Failed | BatchCallState::Expired | BatchCallState::Abandoned => {
+                        if let Some(response) = &call.response {
+                            return batch.parse_response(response);
+                        }
+                        if call.state == BatchCallState::Abandoned {
+                            // The deadline fallback, not a failure: no policy applies.
+                            return self.realtime_and_keep(Some(&call), messages, tools, options, user_names).await;
+                        }
+                        let reason = call.error_message.clone().unwrap_or_else(|| format!("earlier batch call ended {}", call.state.as_str()));
+                        return self.on_batch_failure(&call, reason, messages, tools, options, user_names).await;
+                    }
+                    BatchCallState::Submitting | BatchCallState::Pending => call,
+                }
+            }
+            None => {
+                if past_deadline {
+                    // No time left to wait: this and every later call is realtime,
+                    // and nothing is submitted.
+                    store::note_fallback(&self.ctx.db, self.ctx.execution_id, "run reached its batch deadline; remaining calls ran in realtime").await?;
+                    return self.inner.complete(messages, tools, options, user_names).await;
+                }
+                store::begin_call(&self.ctx.db, key, self.ctx.execution_id, index, &hash, &self.provider_name, self.inner.model()).await?
             }
         };
 
-        self.set_waiting(true).await?;
+        let vendor_id = match &call.vendor_batch_id {
+            Some(id) => id.clone(),
+            None if past_deadline => {
+                // Recorded but never submitted, and out of time.
+                return self.on_deadline(batch, &call, messages, tools, options, user_names).await;
+            }
+            None => match batch.submit(&call.call_id, &body).await {
+                Ok(id) => {
+                    store::mark_submitted(&self.ctx.db, &call.call_id, &id).await?;
+                    info!(execution_id = self.ctx.execution_id, batch_id = %id, "submitted watch batch");
+                    id
+                }
+                Err(e) => {
+                    // Never submitted: no vendor batch to wait for.
+                    store::finish_call(&self.ctx.db, key, &call.call_id, BatchCallState::Failed, None, Some(&e.to_string())).await?;
+                    return self
+                        .on_batch_failure(&call, format!("batch submit failed: {e}"), messages, tools, options, user_names)
+                        .await;
+                }
+            },
+        };
+        let call = BatchCall { vendor_batch_id: Some(vendor_id.clone()), ..call };
+        if let Err(e) = store::sync_batch_ids(&self.ctx.db, self.ctx.execution_id).await {
+            warn!(execution_id = self.ctx.execution_id, error = %e, "failed to record the batch id on the execution");
+        }
+
+        self.set_waiting(true).await;
         let outcome = loop {
             if Utc::now() >= self.ctx.deadline {
                 break None;
             }
-            self.hold_lease().await?;
+            if matches!(self.hold_lease().await, Lease::Lost) {
+                return Err(Self::lease_lost_error());
+            }
             match batch.poll(&vendor_id, &call.call_id).await {
                 Ok(BatchPoll::Pending) => tokio::time::sleep(self.ctx.poll_interval).await,
                 Ok(other) => break Some(other),
@@ -253,39 +372,24 @@ impl LLMProvider for BatchingProvider {
                 Err(e) => break Some(BatchPoll::Failed(e.to_string())),
             }
         };
-        self.set_waiting(false).await?;
+        self.set_waiting(false).await;
 
         match outcome {
             Some(BatchPoll::Succeeded(response)) => {
-                store::finish_call(&self.ctx.db, &self.ctx.encryption_key, &call.call_id, BatchCallState::Succeeded, Some(&response), None).await?;
+                store::finish_call(&self.ctx.db, key, &call.call_id, BatchCallState::Succeeded, Some(&response), None).await?;
                 batch.parse_response(&response)
             }
             Some(BatchPoll::Failed(reason)) => {
-                store::finish_call(&self.ctx.db, &self.ctx.encryption_key, &call.call_id, BatchCallState::Failed, None, Some(&reason)).await?;
-                self.on_batch_failure(reason, messages, tools, options, user_names).await
+                store::finish_call(&self.ctx.db, key, &call.call_id, BatchCallState::Failed, None, Some(&reason)).await?;
+                self.on_batch_failure(&call, reason, messages, tools, options, user_names).await
             }
             Some(BatchPoll::Expired) => {
                 let reason = "the provider batch expired before completing".to_string();
-                store::finish_call(&self.ctx.db, &self.ctx.encryption_key, &call.call_id, BatchCallState::Expired, None, Some(&reason)).await?;
-                self.on_batch_failure(reason, messages, tools, options, user_names).await
+                store::finish_call(&self.ctx.db, key, &call.call_id, BatchCallState::Expired, None, Some(&reason)).await?;
+                self.on_batch_failure(&call, reason, messages, tools, options, user_names).await
             }
             Some(BatchPoll::Pending) => unreachable!("pending never breaks the poll loop"),
-            // Deadline: the next scheduled run is too close to keep waiting.
-            // Abandon the batch (a late result is ignored), and finish this
-            // run, and every remaining call of it, in realtime so a slow
-            // batch can never delay or drop an alert.
-            None => {
-                let reason = "batch not finished before the next scheduled run was due; \
-                              cancelled and re-run in realtime"
-                    .to_string();
-                store::finish_call(&self.ctx.db, &self.ctx.encryption_key, &call.call_id, BatchCallState::Abandoned, None, Some(&reason)).await?;
-                if let Err(e) = batch.cancel(&vendor_id).await {
-                    warn!(batch_id = %vendor_id, error = %e, "failed to cancel the abandoned batch");
-                }
-                store::note_fallback(&self.ctx.db, self.ctx.execution_id, &reason).await?;
-                self.realtime_only.store(true, Ordering::SeqCst);
-                self.inner.complete(messages, tools, options, user_names).await
-            }
+            None => self.on_deadline(batch, &call, messages, tools, options, user_names).await,
         }
     }
 
@@ -353,6 +457,7 @@ mod tests {
             poll_interval: Duration::from_millis(5),
             lease_lost: Arc::new(AtomicBool::new(false)),
             on_waiting: None,
+            call_seq: Arc::new(AtomicI32::new(0)),
         }
     }
 
@@ -426,7 +531,7 @@ mod tests {
                 ctx(&f, chrono::Duration::hours(1), BatchFailurePolicy::RealtimeRetry),
             );
             let b = body.inner.batch().unwrap().build_body(&msgs(), &[], &RequestOptions::new(256), &HashMap::new());
-            let c = store::begin_call(&f.db, &KEY, f.execution_id, &request_hash(&b), "anthropic", "claude-x").await.unwrap();
+            let c = store::begin_call(&f.db, &KEY, f.execution_id, 0, &request_hash(&b), "anthropic", "claude-x").await.unwrap();
             Box::leak(
                 json!({"custom_id": c.call_id, "result": {"type": "succeeded", "message": serde_json::from_str::<Value>(&anthropic_text_reply("batched answer")).unwrap()}})
                     .to_string()
@@ -476,7 +581,7 @@ mod tests {
         let f = fixture().await;
         let b = AnthropicClient::with_base_url("k".into(), Some("claude-x".into()), "http://unused".into()).unwrap();
         let body = crate::batch::BatchLLMProvider::build_body(&b, &msgs(), &[], &RequestOptions::new(256), &HashMap::new());
-        let c = store::begin_call(&f.db, &KEY, f.execution_id, &request_hash(&body), "anthropic", "claude-x").await.unwrap();
+        let c = store::begin_call(&f.db, &KEY, f.execution_id, 0, &request_hash(&body), "anthropic", "claude-x").await.unwrap();
         store::mark_submitted(&f.db, &c.call_id, "msgbatch_old").await.unwrap();
         store::finish_call(&f.db, &KEY, &c.call_id, BatchCallState::Succeeded, Some(&serde_json::from_str(&anthropic_text_reply("from the first life")).unwrap()), None).await.unwrap();
 
@@ -552,7 +657,7 @@ mod tests {
         let f = fixture().await;
         let (handler, _) = anthropic_batches(usize::MAX, "");
         let server = FakeHttpServer::start(handler).await;
-        let p = provider(&server, ctx(&f, chrono::Duration::milliseconds(60), BatchFailurePolicy::Error));
+        let p = provider(&server, ctx(&f, chrono::Duration::milliseconds(1500), BatchFailurePolicy::Error));
         // Even under the Error policy the deadline guard falls back: it is not a failure.
         assert_eq!(call(&p).await.unwrap().content, "realtime answer");
         assert_eq!(count(&server, "POST", "/v1/messages/batches/msgbatch_1/cancel"), 1, "the batch is cancelled");
@@ -597,5 +702,87 @@ mod tests {
         let p = BatchingProvider::new(Box::new(plain), "openai", ctx(&f, chrono::Duration::hours(1), BatchFailurePolicy::RealtimeRetry));
         assert!(call(&p).await.unwrap_err().to_string().contains("not supported"));
         assert!(server.requests().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_replayed_call_whose_request_drifted_still_resumes_the_same_batch_and_never_resubmits() {
+        let f = fixture().await;
+        // First life submitted the call for position 0 with one request ...
+        let (h1, _) = anthropic_batches(usize::MAX, "");
+        let s1 = FakeHttpServer::start(h1).await;
+        let p1 = provider(&s1, ctx(&f, chrono::Duration::hours(1), BatchFailurePolicy::RealtimeRetry));
+        let t = tokio::spawn(async move { call(&p1).await });
+        tokio::time::timeout(Duration::from_secs(20), async {
+            while count(&s1, "POST", "/v1/messages/batches") == 0 {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("never submitted");
+        t.abort();
+
+        // ... and the replay builds a *different* request for position 0 (a
+        // replayed tool result changed). It must poll the recorded batch.
+        let line = ended_line(&f, "answer to the original").await;
+        let (h2, _) = anthropic_batches(0, line);
+        let s2 = FakeHttpServer::start(h2).await;
+        let p2 = provider(&s2, ctx(&f, chrono::Duration::hours(1), BatchFailurePolicy::RealtimeRetry));
+        let drifted = vec![Message::system("sys"), Message::user("check, with different replayed data")];
+        let r = p2.complete(&drifted, &[], &RequestOptions::new(256), &HashMap::new()).await.unwrap();
+        assert_eq!(r.content, "answer to the original");
+        assert_eq!(count(&s2, "POST", "/v1/messages/batches"), 0, "a drifted request must not resubmit a paid batch");
+        assert_eq!(store::batch_ids(&f.db, f.execution_id).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_replayed_deadline_fallback_is_answered_from_the_stored_realtime_response_even_under_the_error_policy() {
+        let f = fixture().await;
+        // Life 1: deadline hit, answered in realtime, response kept.
+        let (handler, _) = anthropic_batches(usize::MAX, "");
+        let s1 = FakeHttpServer::start(handler).await;
+        let p1 = provider(&s1, ctx(&f, chrono::Duration::milliseconds(1500), BatchFailurePolicy::Error));
+        assert_eq!(call(&p1).await.unwrap().content, "realtime answer");
+        assert_eq!(count(&s1, "POST", "/v1/messages"), 1);
+
+        // Life 2 (a resume): the same position is served from the row, no HTTP at all.
+        let s2 = FakeHttpServer::start(|_| (500, "{}".into())).await;
+        let p2 = provider(&s2, ctx(&f, chrono::Duration::milliseconds(1500), BatchFailurePolicy::Error));
+        assert_eq!(call(&p2).await.unwrap().content, "realtime answer");
+        assert!(s2.requests().is_empty(), "the kept fallback response must be replayed without a model call");
+    }
+
+    #[tokio::test]
+    async fn a_call_with_no_time_left_goes_straight_to_realtime_without_submitting() {
+        let f = fixture().await;
+        let (handler, _) = anthropic_batches(0, "");
+        let server = FakeHttpServer::start(handler).await;
+        let p = provider(&server, ctx(&f, chrono::Duration::seconds(-1), BatchFailurePolicy::RealtimeRetry));
+        assert_eq!(call(&p).await.unwrap().content, "realtime answer");
+        assert_eq!(count(&server, "POST", "/v1/messages/batches"), 0, "nothing is submitted after the deadline");
+        assert_eq!(count(&server, "POST", "/v1/messages"), 1);
+    }
+
+    #[tokio::test]
+    async fn the_heartbeat_keeps_the_lease_alive_and_signals_when_another_instance_takes_it() {
+        let f = fixture().await;
+        TEST_POLL_MS.store(5, Ordering::Relaxed);
+        let lost = Arc::new(AtomicBool::new(false));
+        let _hb = LeaseHeartbeat::start(f.db.clone(), f.execution_id, "me".into(), lost.clone());
+        // Let the lease nearly lapse; the heartbeat must extend it.
+        kyomi_core::db_execute!(f.db, "UPDATE watch_executions SET lease_expires_at = $1 WHERE id = $2", Utc::now() + chrono::Duration::milliseconds(50), f.execution_id).unwrap();
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        let runs = store::resumable_runs(&f.db, Utc::now(), 10).await.unwrap();
+        assert!(runs.is_empty(), "a heartbeating run is never resumable");
+        assert!(!lost.load(Ordering::SeqCst));
+
+        // Another instance takes over: the heartbeat reports the loss.
+        kyomi_core::db_execute!(f.db, "UPDATE watch_executions SET lease_owner = 'someone-else', lease_expires_at = $1 WHERE id = $2", Utc::now() + chrono::Duration::seconds(120), f.execution_id).unwrap();
+        tokio::time::timeout(Duration::from_secs(20), async {
+            while !lost.load(Ordering::SeqCst) {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the heartbeat never noticed the takeover");
     }
 }

@@ -1404,7 +1404,8 @@ pub async fn can_run_watch_now(
     let stale_count: i64 = kyomi_core::db_fetch_scalar!(
         db,
         i64,
-        "SELECT COUNT(*) FROM watch_executions WHERE watch_id = $1 AND status = 'running' AND started_at < $2",
+        "SELECT COUNT(*) FROM watch_executions WHERE watch_id = $1 AND status = 'running' \
+           AND COALESCE(llm_mode, 'realtime') <> 'batch' AND started_at < $2",
         watch_id,
         stale_cutoff
     )
@@ -1417,7 +1418,8 @@ pub async fn can_run_watch_now(
             r#"UPDATE watch_executions
                SET status = 'error', completed_at = {now},
                    error_message = 'Execution timed out after 5 minutes'
-               WHERE watch_id = $1 AND status = 'running' AND started_at < $2"#,
+               WHERE watch_id = $1 AND status = 'running'
+                 AND COALESCE(llm_mode, 'realtime') <> 'batch' AND started_at < $2"#,
             now = sql_compat::now(is_pg),
         );
 
@@ -1433,11 +1435,15 @@ pub async fn can_run_watch_now(
         );
     }
 
-    // After expiring stale ones, check if any are genuinely still running
+    // After expiring stale ones, check if any are genuinely still running.
+    // A batch-mode run (KYO-973) is exempt from the 5-minute expiry above (it
+    // legitimately waits for hours, governed by its lease and deadline) and
+    // counts as running while it waits on a batch.
     let running_count: i64 = kyomi_core::db_fetch_scalar!(
         db,
         i64,
-        "SELECT COUNT(*) FROM watch_executions WHERE watch_id = $1 AND status = 'running' LIMIT 1",
+        "SELECT COUNT(*) FROM watch_executions WHERE watch_id = $1 \
+           AND status IN ('running', 'waiting_batch') LIMIT 1",
         watch_id
     )
     .map_err(|e| {
@@ -1714,7 +1720,6 @@ pub async fn get_alerts_history(
                we.started_at, we.completed_at, we.status, we.agent_response, we.error_message,
                we.input_tokens, we.output_tokens, we.cost_estimate, we.execution_trace,
                we.alert_triggered, we.notification_id, we.read_at, we.deleted_at, we.deleted_by,
-               we.llm_provider, we.llm_model, we.llm_mode, we.batch_ids, we.batch_fallback_reason,
                we.created_by
         FROM watch_executions we
         WHERE we.workspace_id = $1
