@@ -506,7 +506,19 @@ impl WatchScheduler {
         )
         .await
         {
-            Ok(n) if n > 0 => warn!(count = n, "Stopped batch-mode runs that were far past their deadline"),
+            Ok(stopped) if !stopped.is_empty() => {
+                warn!(count = stopped.len(), "Stopped batch-mode runs that were far past their deadline");
+                for watch_id in stopped.into_iter().flatten() {
+                    // A driver wedged on this instance would otherwise keep the
+                    // watch blocked: stop it, and show the failure.
+                    if let Some(handle) = self.active_executions.lock().await.remove(&watch_id) {
+                        handle.abort();
+                    }
+                    if let Err(e) = watch_service::update_watch_run_status(&self.db, &watch_id, "error", None).await {
+                        error!(watch_id = %watch_id, error = %e, "Failed to update the status of a reaped watch");
+                    }
+                }
+            }
             Ok(_) => {}
             Err(e) => error!(error = %e, "Failed to reap overdue batch runs"),
         }
@@ -682,11 +694,16 @@ impl WatchScheduler {
         // released too late.
         match watch_batch_service::my_batch_watch_ids(&self.db, crate::batch_run::instance_id()).await {
             Ok(watch_ids) => {
-                let mut active = self.active_executions.lock().await;
-                for wid in watch_ids {
-                    if let Some(handle) = active.remove(&wid) {
-                        handle.abort();
-                    }
+                let handles: Vec<_> = {
+                    let mut active = self.active_executions.lock().await;
+                    watch_ids.iter().filter_map(|wid| active.remove(wid)).collect()
+                };
+                for handle in handles {
+                    handle.abort();
+                    // Wait for the driver (and with it its lease heartbeat) to be
+                    // gone before releasing, or the heartbeat could re-extend a
+                    // lease released a moment earlier.
+                    let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
                 }
             }
             Err(e) => error!(error = %e, "Failed to list this instance's batch runs on shutdown"),

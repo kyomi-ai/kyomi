@@ -84,18 +84,6 @@ fn lease_expiry() -> DateTime<Utc> {
 /// live. Best-effort: a failure here never affects the run.
 pub type WaitingHook = Arc<dyn Fn(bool) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> + Send + Sync>;
 
-/// Usage of model calls that were answered from the run's call cache instead of
-/// being made (a replay after a restart). Those calls were already billed, or
-/// never will be; billing the replay again would charge the workspace twice, so
-/// `execute_agent_chat` subtracts this from what it logs. The execution's own
-/// token totals still include them, so they describe the whole run.
-#[derive(Debug, Default, Clone, Copy)]
-pub struct ReplayedUsage {
-    pub input_tokens: u32,
-    pub output_tokens: u32,
-    pub cost: f64,
-}
-
 /// Everything a batch-mode run needs besides the provider.
 #[derive(Clone)]
 pub struct BatchRunContext {
@@ -113,8 +101,6 @@ pub struct BatchRunContext {
     /// Position of the next model call of the run, shared by every provider of
     /// one attempt (the main turn and the JSON-correction retry).
     pub call_seq: Arc<AtomicI32>,
-    /// Usage of calls answered from the cache during this attempt.
-    pub replayed: Arc<std::sync::Mutex<ReplayedUsage>>,
 }
 
 /// Renews a batch run's lease for as long as it is alive, whatever the run is
@@ -200,15 +186,17 @@ impl BatchingProvider {
         }
     }
 
-    /// Parse a stored response and account for it as replayed (already billed).
-    fn replay(&self, batch: &dyn BatchLLMProvider, stored: &serde_json::Value) -> kyomi_core::Result<LLMResponse> {
-        let response = batch.parse_response(stored)?;
-        if let Ok(mut r) = self.ctx.replayed.lock() {
-            r.input_tokens += response.usage.input_tokens;
-            r.output_tokens += response.usage.output_tokens;
-            r.cost += response.cost.unwrap_or(0.0);
+    /// Remember what a call used, on its row, so the run is billed once from
+    /// durable per-call usage (see `watch_batch_service::claim_usage_billing`).
+    async fn record_usage(&self, call: &BatchCall, response: &LLMResponse) {
+        let usage = store::CallUsage {
+            input_tokens: i32::try_from(response.usage.input_tokens).unwrap_or(i32::MAX),
+            output_tokens: i32::try_from(response.usage.output_tokens).unwrap_or(i32::MAX),
+            cost_usd: response.cost,
+        };
+        if let Err(e) = store::record_call_usage(&self.ctx.db, &call.call_id, usage).await {
+            warn!(execution_id = self.ctx.execution_id, error = %e, "failed to record a batch call's usage");
         }
-        Ok(response)
     }
 
     fn lease_lost_error() -> kyomi_core::Error {
@@ -229,6 +217,9 @@ impl BatchingProvider {
             && let Err(e) = store::attach_fallback_response(&self.ctx.db, &self.ctx.encryption_key, &call.call_id, &response.raw_response).await
         {
             warn!(execution_id = self.ctx.execution_id, error = %e, "failed to keep the realtime fallback response");
+        }
+        if let Some(call) = call {
+            self.record_usage(call, &response).await;
         }
         Ok(response)
     }
@@ -323,12 +314,12 @@ impl LLMProvider for BatchingProvider {
                         let response = call.response.as_ref().ok_or_else(|| {
                             kyomi_core::Error::Internal("succeeded batch call has no stored response".into())
                         })?;
-                        return self.replay(batch, response);
+                        return batch.parse_response(response);
                     }
                     // A realtime answer was already obtained for this position.
                     BatchCallState::Failed | BatchCallState::Expired | BatchCallState::Abandoned => {
                         if let Some(response) = &call.response {
-                            return self.replay(batch, response);
+                            return batch.parse_response(response);
                         }
                         if call.state == BatchCallState::Abandoned {
                             // The deadline fallback, not a failure: no policy applies.
@@ -407,7 +398,9 @@ impl LLMProvider for BatchingProvider {
         match outcome {
             Some(BatchPoll::Succeeded(response)) => {
                 store::finish_call(&self.ctx.db, key, &call.call_id, BatchCallState::Succeeded, Some(&response), None).await?;
-                batch.parse_response(&response)
+                let parsed = batch.parse_response(&response)?;
+                self.record_usage(&call, &parsed).await;
+                Ok(parsed)
             }
             Some(BatchPoll::Failed(reason)) => {
                 store::finish_call(&self.ctx.db, key, &call.call_id, BatchCallState::Failed, None, Some(&reason)).await?;
@@ -488,7 +481,6 @@ mod tests {
             lease_lost: Arc::new(AtomicBool::new(false)),
             on_waiting: None,
             call_seq: Arc::new(AtomicI32::new(0)),
-            replayed: Arc::new(std::sync::Mutex::new(ReplayedUsage::default())),
         }
     }
 
@@ -818,30 +810,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn calls_answered_from_the_cache_are_accounted_as_replayed_and_live_calls_are_not() {
+    async fn each_live_call_records_its_usage_on_its_row_and_a_replay_records_nothing_more() {
         let f = fixture().await;
-        // Position 0 finished in an earlier life.
-        let b = AnthropicClient::with_base_url("k".into(), Some("claude-x".into()), "http://unused".into()).unwrap();
-        let body = crate::batch::BatchLLMProvider::build_body(&b, &msgs(), &[], &RequestOptions::new(256), &HashMap::new());
-        let c = store::begin_call(&f.db, &KEY, f.execution_id, 0, &request_hash(&body), "anthropic", "claude-x").await.unwrap();
-        store::mark_submitted(&f.db, &c.call_id, "msgbatch_old").await.unwrap();
-        store::finish_call(&f.db, &KEY, &c.call_id, BatchCallState::Succeeded, Some(&serde_json::from_str(&anthropic_text_reply("old")).unwrap()), None).await.unwrap();
-
         let (handler, _) = anthropic_batches(0, "");
         let server = FakeHttpServer::start(handler).await;
-        let context = ctx(&f, chrono::Duration::hours(1), BatchFailurePolicy::RealtimeRetry);
-        let replayed = context.replayed.clone();
-        let p = provider(&server, context);
-        assert_eq!(call(&p).await.unwrap().content, "old");
-        let r = *replayed.lock().unwrap();
-        assert_eq!((r.input_tokens, r.output_tokens), (11, 7), "a cached call was already billed and must not be billed again");
+        // Position 0: a realtime answer (past the deadline); usage 11 in / 7 out.
+        let p = provider(&server, ctx(&f, chrono::Duration::seconds(-1), BatchFailurePolicy::RealtimeRetry));
+        call(&p).await.unwrap();
+        let first = store::run_usage(&f.db, f.execution_id).await.unwrap();
+        assert_eq!((first.input_tokens, first.output_tokens), (11, 7));
 
-        // A call made now (position 1, no row, past the deadline => realtime) is live.
+        // A restart replays position 0 from its row: the run's usage is unchanged.
         let p2 = provider(&server, ctx(&f, chrono::Duration::seconds(-1), BatchFailurePolicy::RealtimeRetry));
-        let live_ctx_replayed = p2.ctx.replayed.clone();
-        p2.ctx.call_seq.store(1, Ordering::SeqCst);
         call(&p2).await.unwrap();
-        assert_eq!(live_ctx_replayed.lock().unwrap().input_tokens, 0, "a call actually made is not a replay");
+        assert_eq!(store::run_usage(&f.db, f.execution_id).await.unwrap(), first, "a replayed call must not add usage");
+
+        // A new position adds its own.
+        let other = vec![Message::system("sys"), Message::user("second")];
+        p2.complete(&other, &[], &RequestOptions::new(256), &HashMap::new()).await.unwrap();
+        let both = store::run_usage(&f.db, f.execution_id).await.unwrap();
+        assert_eq!((both.input_tokens, both.output_tokens), (22, 14));
     }
 
     #[tokio::test]

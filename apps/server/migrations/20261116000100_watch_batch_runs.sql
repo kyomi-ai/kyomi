@@ -5,6 +5,7 @@
 -- batch_ids           JSON array text of the vendor batch ids this run submitted
 -- batch_fallback_reason  why a batch-configured run (or part of one) ran realtime
 -- batch_deadline_at   latest time the run may still wait on a batch
+-- usage_billed_at     set once when the run's usage was written to api_usage_log
 -- lease_owner / lease_expires_at  which instance is driving a batch-mode run;
 --                     an expired lease lets any instance resume it
 ALTER TABLE watch_executions ADD COLUMN llm_provider varchar(50);
@@ -15,6 +16,7 @@ ALTER TABLE watch_executions ADD COLUMN batch_fallback_reason text;
 ALTER TABLE watch_executions ADD COLUMN batch_deadline_at timestamp with time zone;
 ALTER TABLE watch_executions ADD COLUMN lease_owner varchar(200);
 ALTER TABLE watch_executions ADD COLUMN lease_expires_at timestamp with time zone;
+ALTER TABLE watch_executions ADD COLUMN usage_billed_at timestamp with time zone;
 
 -- Resume scan: unfinished batch-mode runs by lease expiry.
 CREATE INDEX IF NOT EXISTS idx_watch_executions_batch_lease
@@ -37,6 +39,9 @@ CREATE TABLE IF NOT EXISTS watch_batch_calls (
     state varchar(20) NOT NULL,
     response_encrypted text,
     error_message text,
+    input_tokens integer NOT NULL DEFAULT 0,
+    output_tokens integer NOT NULL DEFAULT 0,
+    cost_usd double precision,
     submitted_at timestamp with time zone NOT NULL DEFAULT now(),
     completed_at timestamp with time zone,
     UNIQUE (execution_id, call_index)

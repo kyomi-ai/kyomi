@@ -363,6 +363,64 @@ fn build_agent_config(
     }
 }
 
+/// Markup applied to provider cost to cover payment processing fees.
+const AI_COST_MULTIPLIER: f64 = 1.1;
+
+/// `(cost_estimate, provider_cost_usd)` to record for `total_cost` of provider
+/// spend: BYOK usage is not billed against Kyomi credits (`0.0`) but keeps the
+/// real spend for observability; Kyomi-managed usage is billed with the markup.
+pub(crate) fn billed_amounts(is_byok: bool, total_cost: f64) -> (f64, Option<f64>) {
+    if is_byok {
+        (0.0, Some(total_cost))
+    } else {
+        (total_cost * AI_COST_MULTIPLIER, None)
+    }
+}
+
+/// Write one `api_usage_log` row for a whole batch-mode watch run (KYO-973).
+/// Called once per run, at completion, with the usage summed from its call
+/// rows, so a run that was resumed or retried is neither double-billed nor
+/// missing the calls of an attempt that died.
+pub(crate) async fn log_batch_run_usage(
+    db: &DbPool,
+    run: &BatchRunBilling<'_>,
+    usage: kyomi_auth::watch_batch_service::CallUsage,
+) {
+    if usage.input_tokens <= 0 && usage.output_tokens <= 0 {
+        return;
+    }
+    let (billed_cost, provider_cost_usd) = billed_amounts(run.is_byok, usage.cost_usd.unwrap_or(0.0));
+    if let Err(e) = kyomi_core::db_execute!(
+        db,
+        API_USAGE_LOG_INSERT_SQL,
+        run.user_id,
+        run.workspace_id,
+        run.session_id,
+        chrono::Utc::now(),
+        run.provider,
+        run.model,
+        usage.input_tokens,
+        usage.output_tokens,
+        usage.input_tokens + usage.output_tokens,
+        billed_cost,
+        run.component,
+        provider_cost_usd
+    ) {
+        warn!(error = %e, "Failed to log batch run usage to database");
+    }
+}
+
+/// Who a batch-mode run's usage is billed to.
+pub(crate) struct BatchRunBilling<'a> {
+    pub user_id: &'a str,
+    pub workspace_id: &'a str,
+    pub session_id: &'a str,
+    pub provider: &'a str,
+    pub model: &'a str,
+    pub component: &'a str,
+    pub is_byok: bool,
+}
+
 /// Execute the agent chat loop for a single user message.
 ///
 /// This is the main entry point that coordinates all the pieces:
@@ -395,9 +453,6 @@ pub struct WatchBatchRun {
     /// Position of the next model call of the run, shared by every turn of one
     /// attempt (see [`crate::batch_run::BatchRunContext::call_seq`]).
     pub call_seq: Arc<std::sync::atomic::AtomicI32>,
-    /// Usage of calls answered from the cache during this attempt; excluded
-    /// from billing (see [`crate::batch_run::ReplayedUsage`]).
-    pub replayed: Arc<std::sync::Mutex<crate::batch_run::ReplayedUsage>>,
 }
 
 /// [`execute_agent_chat`] with per-run [`ExecutionExtras`].
@@ -478,7 +533,6 @@ pub async fn execute_agent_chat_with(
                         lease_lost: run.lease_lost.clone(),
                         on_waiting: run.on_waiting.clone(),
                         call_seq: run.call_seq.clone(),
-                        replayed: run.replayed.clone(),
                     },
                 ));
             }
@@ -743,24 +797,11 @@ pub async fn execute_agent_chat_with(
     // sums `cost_estimate` from this table and must not charge BYOK usage
     // against `ai_credits_used_usd`. Writing 0 keeps the single source of
     // truth for billing consistent without a parallel BYOK-only code path.
-    const AI_COST_MULTIPLIER: f64 = 1.1;
-    // A resumed batch run replays calls from its cache; they were billed when
-    // first made, so only the calls actually made now are billed here. (A call
-    // resolved by an attempt that died before logging is therefore never
-    // billed: under- rather than double-billing.)
-    let (billed_input, billed_output, total_cost) = match &extras.watch_batch {
-        Some(run) => {
-            let r = run.replayed.lock().map(|r| *r).unwrap_or_default();
-            (
-                input_tokens.saturating_sub(r.input_tokens as _),
-                output_tokens.saturating_sub(r.output_tokens as _),
-                (total_cost - r.cost).max(0.0),
-            )
-        }
-        None => (input_tokens, output_tokens, total_cost),
-    };
-    if billed_input > 0 || billed_output > 0 {
-        let (input_tokens, output_tokens) = (billed_input, billed_output);
+    // A batch-mode watch run is billed once, at its completion, from the usage
+    // recorded on its call rows (see `watch_execution`): this turn's tracker
+    // only sees the calls it made or replayed, so billing it here would
+    // double-bill a resumed run and miss the calls of an attempt that died.
+    if (input_tokens > 0 || output_tokens > 0) && extras.watch_batch.is_none() {
         let total_tokens = (input_tokens + output_tokens) as i32;
         // BYOK: `cost_estimate = 0.0` (not billed against Kyomi credits) and
         //       `provider_cost_usd = total_cost` so we keep observability into
@@ -769,11 +810,7 @@ pub async fn execute_agent_chat_with(
         // Kyomi: `cost_estimate = total_cost * markup` (billed) and
         //       `provider_cost_usd = NULL` — `cost_estimate` already reflects
         //       the real cost, so the extra column would be redundant.
-        let (billed_cost, provider_cost_usd): (f64, Option<f64>) = if is_byok {
-            (0.0, Some(total_cost))
-        } else {
-            (total_cost * AI_COST_MULTIPLIER, None)
-        };
+        let (billed_cost, provider_cost_usd) = billed_amounts(is_byok, total_cost);
         let provider_str = provider_kind.to_string();
         if let Some(run) = config.assistant_message_persistence.durable_run() {
             let usage = kyomi_auth::conversation_events::ApiUsageWrite {

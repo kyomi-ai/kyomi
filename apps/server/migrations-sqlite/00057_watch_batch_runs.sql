@@ -7,6 +7,7 @@ ALTER TABLE watch_executions ADD COLUMN batch_fallback_reason TEXT;
 ALTER TABLE watch_executions ADD COLUMN batch_deadline_at TEXT;
 ALTER TABLE watch_executions ADD COLUMN lease_owner TEXT;
 ALTER TABLE watch_executions ADD COLUMN lease_expires_at TEXT;
+ALTER TABLE watch_executions ADD COLUMN usage_billed_at TEXT;
 
 CREATE INDEX IF NOT EXISTS idx_watch_executions_batch_lease
     ON watch_executions (lease_expires_at)
@@ -23,6 +24,9 @@ CREATE TABLE IF NOT EXISTS watch_batch_calls (
     state TEXT NOT NULL,
     response_encrypted TEXT,
     error_message TEXT,
+    input_tokens INTEGER NOT NULL DEFAULT 0,
+    output_tokens INTEGER NOT NULL DEFAULT 0,
+    cost_usd REAL,
     submitted_at TEXT NOT NULL DEFAULT (datetime('now')),
     completed_at TEXT,
     UNIQUE (execution_id, call_index)

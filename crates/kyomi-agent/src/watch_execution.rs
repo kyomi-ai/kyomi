@@ -925,6 +925,8 @@ pub async fn execute_watch_with(
                 Utc::now(),
             )
             .await
+            // A database error cannot show the lease was lost: fail open (treat
+            // it as still ours) and let the terminal write below decide.
             .unwrap_or(true) =>
         {
             // A batch run failed, but another instance owns it now: its record
@@ -1360,7 +1362,6 @@ async fn execute_watch_inner(
                 deadline: *deadline,
                 lease_lost: run.lease_lost.clone(),
                 call_seq: Arc::new(std::sync::atomic::AtomicI32::new(0)),
-                replayed: Arc::new(std::sync::Mutex::new(crate::batch_run::ReplayedUsage::default())),
                 on_waiting: Some({
                     let ws = ws_manager.clone();
                     let workspace_id = watch.workspace_id.clone();
@@ -1733,6 +1734,31 @@ async fn execute_watch_inner(
                 "Watch was removed or disabled while a batch run was in progress".into(),
             ));
         }
+    }
+
+    // A batch-mode run is billed exactly once, here, from the usage recorded on
+    // its call rows: across restarts, retries and a displaced driver's partial
+    // work every call is counted once, and a call is never billed again when a
+    // resumed run replays it.
+    if extras.watch_batch.is_some()
+        && watch_batch_service::claim_usage_billing(db, execution_id, Utc::now()).await?
+    {
+        let usage = watch_batch_service::run_usage(db, execution_id).await?;
+        let model = agent_result.model.clone().unwrap_or_else(|| configured_model.clone());
+        crate::execution::log_batch_run_usage(
+            db,
+            &crate::execution::BatchRunBilling {
+                user_id: &watch.created_by,
+                workspace_id: &watch.workspace_id,
+                session_id: &session_id,
+                provider: &provider_name,
+                model: &model,
+                component: "kyomi_watch",
+                is_byok: selection.workspace_billed,
+            },
+            usage,
+        )
+        .await;
     }
 
     // 11. Determine the stored/delivered terminal state. A guard stop is an

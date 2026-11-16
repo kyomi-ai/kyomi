@@ -459,14 +459,14 @@ async fn a_tool_using_batch_run_survives_two_restarts_and_never_resubmits_a_fini
     assert_eq!(executions(&db).await.len(), 1);
     let e = kyomi_auth::watch_service::get_execution_by_id_only(&db, id, "ws-1", "user-a").await.unwrap().unwrap();
     assert_eq!(e.batch_ids.as_deref(), Some(r#"["batch_1","batch_2"]"#));
-    // Usage: the execution total covers the whole run; billing never exceeds
-    // the real usage (a replayed call is not billed a second time).
+    // Usage: the execution total covers the whole run, and the run is billed
+    // exactly once for every call it made, across all three process lives.
     assert_eq!((e.input_tokens, e.output_tokens), (40, 18), "two calls of 20 in / 9 out");
-    let billed: (i64,) = sqlx::query_as("SELECT COALESCE(SUM(input_tokens), 0) FROM api_usage_log")
-        .fetch_one(kyomi_test_db::sqlite_pool(&db))
+    let billed: Vec<(i64, i64)> = sqlx::query_as("SELECT input_tokens, output_tokens FROM api_usage_log")
+        .fetch_all(kyomi_test_db::sqlite_pool(&db))
         .await
         .unwrap();
-    assert!(billed.0 > 0 && billed.0 <= 40, "billed {} input tokens for a run that used 40", billed.0);
+    assert_eq!(billed, vec![(40, 18)], "one usage row for the whole run: no replay is billed twice and no call is missed");
     let sessions: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM chat_sessions WHERE session_type = 'watch_execution'")
         .fetch_one(kyomi_test_db::sqlite_pool(&db))
         .await

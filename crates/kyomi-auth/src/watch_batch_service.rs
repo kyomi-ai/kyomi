@@ -181,6 +181,70 @@ pub async fn begin_call(
         .ok_or_else(|| db_err("record call", "row vanished after insert"))
 }
 
+/// Token usage and provider-reported cost of one model call.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct CallUsage {
+    pub input_tokens: i32,
+    pub output_tokens: i32,
+    pub cost_usd: Option<f64>,
+}
+
+/// Record what a call used. Usage lives on the call row, not in the turn's
+/// in-memory tracker, so it survives a restart and is counted exactly once
+/// when the run is billed (see [`claim_usage_billing`]).
+pub async fn record_call_usage(db: &DbPool, call_id: &str, usage: CallUsage) -> kyomi_core::Result<()> {
+    kyomi_core::db_execute!(
+        db,
+        "UPDATE watch_batch_calls SET input_tokens = $1, output_tokens = $2, cost_usd = $3 \
+         WHERE call_id = $4",
+        usage.input_tokens,
+        usage.output_tokens,
+        usage.cost_usd,
+        call_id
+    )
+    .map_err(|e| db_err("record call usage", e))?;
+    Ok(())
+}
+
+#[derive(sqlx::FromRow)]
+struct UsageRow {
+    input_tokens: i64,
+    output_tokens: i64,
+    cost_usd: f64,
+}
+
+/// Total usage of every call of the run, whichever attempt or instance made it.
+pub async fn run_usage(db: &DbPool, execution_id: i32) -> kyomi_core::Result<CallUsage> {
+    let row = kyomi_core::db_fetch_one!(
+        db,
+        UsageRow,
+        "SELECT COALESCE(SUM(input_tokens), 0) AS input_tokens, \
+                COALESCE(SUM(output_tokens), 0) AS output_tokens, \
+                COALESCE(SUM(cost_usd), 0.0) AS cost_usd \
+         FROM watch_batch_calls WHERE execution_id = $1",
+        execution_id
+    )
+    .map_err(|e| db_err("sum run usage", e))?;
+    Ok(CallUsage {
+        input_tokens: i32::try_from(row.input_tokens).unwrap_or(i32::MAX),
+        output_tokens: i32::try_from(row.output_tokens).unwrap_or(i32::MAX),
+        cost_usd: (row.cost_usd > 0.0).then_some(row.cost_usd),
+    })
+}
+
+/// Take the right to bill this run's usage. True exactly once per run, so the
+/// run is billed once however many attempts, restarts or retries it took.
+pub async fn claim_usage_billing(db: &DbPool, execution_id: i32, now: DateTime<Utc>) -> kyomi_core::Result<bool> {
+    let res = kyomi_core::db_execute!(
+        db,
+        "UPDATE watch_executions SET usage_billed_at = $1 WHERE id = $2 AND usage_billed_at IS NULL",
+        now,
+        execution_id
+    )
+    .map_err(|e| db_err("claim usage billing", e))?;
+    Ok(res.rows_affected() == 1)
+}
+
 /// Keep the realtime response that replaced a failed or abandoned batch, so a
 /// resumed run is answered from it instead of calling the model again.
 pub async fn attach_fallback_response(
@@ -527,24 +591,46 @@ pub async fn run_provider(db: &DbPool, execution_id: i32) -> kyomi_core::Result<
 /// Fail batch-mode runs that are far past their deadline and still unfinished:
 /// a driver that is alive (its heartbeat keeps the lease) but wedged, or runs
 /// no instance can resume. Without this a hung run would block the watch's
-/// future occurrences and manual runs forever. Returns how many were failed.
+/// future occurrences and manual runs forever. Returns the watch ids of the
+/// runs it stopped.
 pub async fn reap_overdue_runs(
     db: &DbPool,
     now: DateTime<Utc>,
     grace: chrono::Duration,
-) -> kyomi_core::Result<u64> {
+) -> kyomi_core::Result<Vec<Option<String>>> {
+    #[derive(sqlx::FromRow)]
+    struct Overdue {
+        id: i32,
+        watch_id: Option<String>,
+    }
+    let cutoff = now - grace;
+    let overdue = kyomi_core::db_fetch_all!(
+        db,
+        Overdue,
+        "SELECT id, watch_id FROM watch_executions \
+         WHERE llm_mode = 'batch' AND completed_at IS NULL \
+           AND status IN ('running', 'waiting_batch') \
+           AND batch_deadline_at IS NOT NULL AND batch_deadline_at < $1",
+        cutoff
+    )
+    .map_err(|e| db_err("list overdue runs", e))?;
     let is_pg = db.is_postgres();
-    let now_fn = kyomi_core::sql_compat::now(is_pg);
     let sql = format!(
         "UPDATE watch_executions \
          SET status = 'error', completed_at = {now_fn}, \
              error_message = 'Batch run exceeded its deadline and was stopped' \
-         WHERE llm_mode = 'batch' AND completed_at IS NULL \
-           AND status IN ('running', 'waiting_batch') \
-           AND batch_deadline_at IS NOT NULL AND batch_deadline_at < $1"
+         WHERE id = $1 AND completed_at IS NULL",
+        now_fn = kyomi_core::sql_compat::now(is_pg)
     );
-    let res = kyomi_core::db_execute!(db, &sql, now - grace).map_err(|e| db_err("reap overdue runs", e))?;
-    Ok(res.rows_affected())
+    let mut stopped = Vec::new();
+    for run in overdue {
+        // Per run, so a driver that finished in between is not overwritten.
+        let res = kyomi_core::db_execute!(db, &sql, run.id).map_err(|e| db_err("reap overdue run", e))?;
+        if res.rows_affected() == 1 {
+            stopped.push(run.watch_id);
+        }
+    }
+    Ok(stopped)
 }
 
 /// Load the record of an unfinished batch-mode run (`None` once it finished).
@@ -873,11 +959,11 @@ mod tests {
 
         // Within the grace window: left alone.
         set_deadline(&db, id, Duration::minutes(10)).await;
-        assert_eq!(reap_overdue_runs(&db, Utc::now(), grace).await.unwrap(), 0);
+        assert!(reap_overdue_runs(&db, Utc::now(), grace).await.unwrap().is_empty());
 
         // Far past: stopped, despite its lease being renewed.
         set_deadline(&db, id, Duration::minutes(90)).await;
-        assert_eq!(reap_overdue_runs(&db, Utc::now(), grace).await.unwrap(), 1);
+        assert_eq!(reap_overdue_runs(&db, Utc::now(), grace).await.unwrap(), vec![Some("w1".to_string())]);
         let e = crate::watch_service::get_execution_by_id_only(&db, id, "ws1", "u1").await.unwrap().unwrap();
         assert_eq!(e.status, kyomi_core::WatchExecutionStatus::Error);
         assert!(e.completed_at.is_some());
@@ -895,7 +981,7 @@ mod tests {
         let db = test_pool().await;
         let id = execution(&db).await;
         record_run_llm(&db, id, &RunLlm { provider: "anthropic", model: "m", mode: "realtime", deadline: Some(Utc::now() - Duration::days(3)), fallback_reason: None, lease: None }).await.unwrap();
-        assert_eq!(reap_overdue_runs(&db, Utc::now(), Duration::minutes(40)).await.unwrap(), 0);
+        assert!(reap_overdue_runs(&db, Utc::now(), Duration::minutes(40)).await.unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -905,5 +991,21 @@ mod tests {
         assert_eq!(run_provider(&db, id).await.unwrap().as_deref(), Some("anthropic"));
         assert_eq!(my_batch_watch_ids(&db, "me").await.unwrap(), vec!["w1".to_string()]);
         assert!(my_batch_watch_ids(&db, "someone-else").await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn usage_is_summed_over_every_call_of_the_run_and_billed_exactly_once() {
+        let db = test_pool().await;
+        let id = execution(&db).await;
+        let a = begin_call(&db, &KEY, id, 0, "h0", "anthropic", "m").await.unwrap();
+        let b = begin_call(&db, &KEY, id, 1, "h1", "anthropic", "m").await.unwrap();
+        record_call_usage(&db, &a.call_id, CallUsage { input_tokens: 20, output_tokens: 9, cost_usd: None }).await.unwrap();
+        record_call_usage(&db, &b.call_id, CallUsage { input_tokens: 15, output_tokens: 5, cost_usd: Some(0.001) }).await.unwrap();
+        let total = run_usage(&db, id).await.unwrap();
+        assert_eq!((total.input_tokens, total.output_tokens, total.cost_usd), (35, 14, Some(0.001)));
+        assert_eq!(run_usage(&db, 999_999).await.unwrap(), CallUsage::default());
+
+        assert!(claim_usage_billing(&db, id, Utc::now()).await.unwrap());
+        assert!(!claim_usage_billing(&db, id, Utc::now()).await.unwrap(), "a run is billed once, however many attempts it took");
     }
 }
