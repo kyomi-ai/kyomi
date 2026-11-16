@@ -1070,7 +1070,7 @@ async fn bill_batch_run(db: &DbPool, watch: &Watch, execution_id: i32, run: &Run
     match watch_batch_service::bill_run_once(
         db,
         execution_id,
-        crate::batch_run::instance_id(),
+        watch_batch_service::BillingFence::LeaseOwner(crate::batch_run::instance_id()),
         Utc::now(),
         &bill,
         crate::execution::batch_run_amounts(is_byok),
@@ -1403,6 +1403,7 @@ async fn execute_watch_inner(
                     deadline,
                     fallback_reason: reason,
                     lease,
+                    workspace_billed: selection.workspace_billed,
                 },
             )
             .await?;

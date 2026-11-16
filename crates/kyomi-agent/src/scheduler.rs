@@ -330,6 +330,36 @@ impl WatchScheduler {
         active.insert(watch_id.to_string(), handle);
     }
 
+    /// Bill the calls a reaped batch run paid for before it was stopped.
+    async fn bill_reaped_run(&self, run: &watch_batch_service::ReapedRun) {
+        let (Some(user_id), Some(workspace_id), Some(provider)) =
+            (run.created_by.as_deref(), run.workspace_id.as_deref(), run.llm_provider.as_deref())
+        else {
+            return;
+        };
+        let bill = watch_batch_service::UsageBill {
+            insert_sql: crate::execution::BATCH_RUN_USAGE_INSERT_SQL,
+            user_id,
+            workspace_id,
+            session_id: run.session_id.as_deref().unwrap_or(""),
+            provider,
+            model: run.llm_model.as_deref().unwrap_or(""),
+            component: "kyomi_watch",
+        };
+        if let Err(e) = watch_batch_service::bill_run_once(
+            &self.db,
+            run.id,
+            watch_batch_service::BillingFence::StoppedRun,
+            Utc::now(),
+            &bill,
+            crate::execution::batch_run_amounts(run.llm_workspace_billed),
+        )
+        .await
+        {
+            error!(execution_id = run.id, error = %e, "Failed to bill a reaped batch run");
+        }
+    }
+
     /// Resume batch-mode runs whose driving instance is gone (KYO-973).
     ///
     /// A run is resumable when its lease lapsed (crash, restart) or was
@@ -508,7 +538,11 @@ impl WatchScheduler {
         {
             Ok(stopped) if !stopped.is_empty() => {
                 warn!(count = stopped.len(), "Stopped batch-mode runs that were far past their deadline");
-                for watch_id in stopped.into_iter().flatten() {
+                // What a stopped run paid for before the stop is still billed.
+                for run in &stopped {
+                    self.bill_reaped_run(run).await;
+                }
+                for watch_id in stopped.into_iter().filter_map(|r| r.watch_id) {
                     // A driver wedged on this instance would otherwise keep the
                     // watch blocked: stop it, and show the failure.
                     if let Some(handle) = self.active_executions.lock().await.remove(&watch_id) {

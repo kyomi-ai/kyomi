@@ -227,6 +227,16 @@ pub struct UsageBill<'a> {
     pub component: &'a str,
 }
 
+/// Who may bill a run.
+#[derive(Clone, Copy)]
+pub enum BillingFence<'a> {
+    /// The instance holding the run's live lease (a run in progress or just ending).
+    LeaseOwner(&'a str),
+    /// Anyone, for a run that has already been stopped (completed) by the reaper
+    /// and so has no driver: bills what was paid before the stop.
+    StoppedRun,
+}
+
 /// Bill a batch-mode run's usage exactly once: claim the billing, sum the run's
 /// call usage and write the `api_usage_log` row **in one transaction**. A crash
 /// or abort at any point rolls the whole thing back (the run can still be
@@ -238,18 +248,30 @@ pub struct UsageBill<'a> {
 pub async fn bill_run_once(
     db: &DbPool,
     execution_id: i32,
-    owner: &str,
+    fence: BillingFence<'_>,
     now: DateTime<Utc>,
     bill: &UsageBill<'_>,
     amounts: impl Fn(CallUsage) -> (f64, Option<f64>),
 ) -> kyomi_core::Result<bool> {
     kyomi_core::db_with_pool!(db, |p| {
         let mut tx = p.begin().await.map_err(|e| db_err("begin billing", e))?;
-        let claimed = sqlx::query(
-            "UPDATE watch_executions SET usage_billed_at = $1 \
-             WHERE id = $2 AND usage_billed_at IS NULL AND lease_owner = $3 \
-               AND lease_expires_at > $1 AND llm_mode = 'batch'",
-        )
+        let claim_sql = match fence {
+            BillingFence::LeaseOwner(_) => {
+                "UPDATE watch_executions SET usage_billed_at = $1 \
+                 WHERE id = $2 AND usage_billed_at IS NULL AND lease_owner = $3 \
+                   AND lease_expires_at > $1 AND llm_mode = 'batch'"
+            }
+            BillingFence::StoppedRun => {
+                "UPDATE watch_executions SET usage_billed_at = $1 \
+                 WHERE id = $2 AND usage_billed_at IS NULL AND $3 = $3 \
+                   AND completed_at IS NOT NULL AND llm_mode = 'batch'"
+            }
+        };
+        let owner = match fence {
+            BillingFence::LeaseOwner(o) => o,
+            BillingFence::StoppedRun => "",
+        };
+        let claimed = sqlx::query(claim_sql)
         .bind(now)
         .bind(execution_id)
         .bind(owner)
@@ -412,6 +434,9 @@ pub struct RunLlm<'a> {
     /// `(owner, expires_at)`: taken for a batch run so it is resumable from
     /// its first instant.
     pub lease: Option<(&'a str, DateTime<Utc>)>,
+    /// Whether usage is billed to the workspace's own key (not Kyomi credits);
+    /// kept so a run stopped by the reaper can still be billed correctly.
+    pub workspace_billed: bool,
 }
 
 /// Record which provider/model/mode a run uses.
@@ -424,8 +449,8 @@ pub async fn record_run_llm(
         db,
         "UPDATE watch_executions SET llm_provider = $1, llm_model = $2, llm_mode = $3, \
              batch_deadline_at = $4, batch_fallback_reason = $5, \
-             lease_owner = $6, lease_expires_at = $7 \
-         WHERE id = $8",
+             lease_owner = $6, lease_expires_at = $7, llm_workspace_billed = $8 \
+         WHERE id = $9",
         run.provider,
         run.model,
         run.mode,
@@ -433,6 +458,7 @@ pub async fn record_run_llm(
         run.fallback_reason,
         run.lease.map(|l| l.0),
         run.lease.map(|l| l.1),
+        run.workspace_billed,
         execution_id
     )
     .map_err(|e| db_err("record run llm", e))?;
@@ -653,26 +679,36 @@ pub async fn run_provider(db: &DbPool, execution_id: i32) -> kyomi_core::Result<
     .and_then(|r| r.llm_provider))
 }
 
+/// A batch run the reaper stopped, with what is needed to bill its usage.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct ReapedRun {
+    pub id: i32,
+    pub watch_id: Option<String>,
+    pub created_by: Option<String>,
+    pub workspace_id: Option<String>,
+    pub session_id: Option<String>,
+    pub llm_provider: Option<String>,
+    pub llm_model: Option<String>,
+    pub llm_workspace_billed: bool,
+}
+
 /// Fail batch-mode runs that are far past their deadline and still unfinished:
 /// a driver that is alive (its heartbeat keeps the lease) but wedged, or runs
 /// no instance can resume. Without this a hung run would block the watch's
-/// future occurrences and manual runs forever. Returns the watch ids of the
-/// runs it stopped.
+/// future occurrences and manual runs forever. Returns the runs it stopped, so
+/// the caller can bill what they paid for and stop a local driver.
 pub async fn reap_overdue_runs(
     db: &DbPool,
     now: DateTime<Utc>,
     grace: chrono::Duration,
-) -> kyomi_core::Result<Vec<Option<String>>> {
-    #[derive(sqlx::FromRow)]
-    struct Overdue {
-        id: i32,
-        watch_id: Option<String>,
-    }
+) -> kyomi_core::Result<Vec<ReapedRun>> {
     let cutoff = now - grace;
     let overdue = kyomi_core::db_fetch_all!(
         db,
-        Overdue,
-        "SELECT id, watch_id FROM watch_executions \
+        ReapedRun,
+        "SELECT id, watch_id, created_by, workspace_id, session_id, llm_provider, llm_model, \
+                llm_workspace_billed \
+         FROM watch_executions \
          WHERE llm_mode = 'batch' AND completed_at IS NULL \
            AND status IN ('running', 'waiting_batch') \
            AND batch_deadline_at IS NOT NULL AND batch_deadline_at < $1",
@@ -692,7 +728,7 @@ pub async fn reap_overdue_runs(
         // Per run, so a driver that finished in between is not overwritten.
         let res = kyomi_core::db_execute!(db, &sql, run.id).map_err(|e| db_err("reap overdue run", e))?;
         if res.rows_affected() == 1 {
-            stopped.push(run.watch_id);
+            stopped.push(run);
         }
     }
     Ok(stopped)
@@ -783,14 +819,14 @@ mod tests {
     async fn another_batch_run(db: &DbPool, owner: &str, lease_for: Duration) -> i32 {
         let e = crate::watch_service::create_execution(db, "w1", "W", "ws1", kyomi_core::WatchMode::Alert, "u1").await.unwrap();
         let now = Utc::now();
-        record_run_llm(db, e.id, &RunLlm { provider: "anthropic", model: "m", mode: "batch", deadline: Some(now + Duration::hours(3)), fallback_reason: None, lease: Some((owner, now + lease_for)) }).await.unwrap();
+        record_run_llm(db, e.id, &RunLlm { provider: "anthropic", model: "m", mode: "batch", deadline: Some(now + Duration::hours(3)), fallback_reason: None, lease: Some((owner, now + lease_for)), workspace_billed: false }).await.unwrap();
         e.id
     }
 
     async fn batch_run(db: &DbPool, owner: &str, lease_for: Duration) -> i32 {
         let id = execution(db).await;
         let now = Utc::now();
-        record_run_llm(db, id, &RunLlm { provider: "anthropic", model: "m", mode: "batch", deadline: Some(now + Duration::hours(3)), fallback_reason: None, lease: Some((owner, now + lease_for)) })
+        record_run_llm(db, id, &RunLlm { provider: "anthropic", model: "m", mode: "batch", deadline: Some(now + Duration::hours(3)), fallback_reason: None, lease: Some((owner, now + lease_for)), workspace_billed: false })
             .await
             .unwrap();
         id
@@ -915,7 +951,7 @@ mod tests {
         let id2 = {
             // Reuse the same watch for a second execution.
             let e = crate::watch_service::create_execution(&db, "w1", "W", "ws1", kyomi_core::WatchMode::Alert, "u1").await.unwrap();
-            record_run_llm(&db, e.id, &RunLlm { provider: "anthropic", model: "m", mode: "batch", deadline: None, fallback_reason: None, lease: Some(("a", now + Duration::seconds(60))) }).await.unwrap();
+            record_run_llm(&db, e.id, &RunLlm { provider: "anthropic", model: "m", mode: "batch", deadline: None, fallback_reason: None, lease: Some(("a", now + Duration::seconds(60))), workspace_billed: false }).await.unwrap();
             e.id
         };
         release_lease(&db, id2, "someone-else", now - Duration::seconds(1)).await.unwrap();
@@ -930,7 +966,7 @@ mod tests {
     async fn realtime_runs_are_never_resumable() {
         let db = test_pool().await;
         let id = execution(&db).await;
-        record_run_llm(&db, id, &RunLlm { provider: "anthropic", model: "m", mode: "realtime", deadline: None, fallback_reason: Some("schedule gap 30m is shorter than the 60m batch window"), lease: None }).await.unwrap();
+        record_run_llm(&db, id, &RunLlm { provider: "anthropic", model: "m", mode: "realtime", deadline: None, fallback_reason: Some("schedule gap 30m is shorter than the 60m batch window"), lease: None, workspace_billed: false }).await.unwrap();
         assert!(resumable_runs(&db, Utc::now(), 10).await.unwrap().is_empty());
         let e = crate::watch_service::get_execution_by_id_only(&db, id, "ws1", "u1").await.unwrap().unwrap();
         assert_eq!(e.llm_mode.as_deref(), Some("realtime"));
@@ -1036,7 +1072,8 @@ mod tests {
 
         // Far past: stopped, despite its lease being renewed.
         set_deadline(&db, id, Duration::minutes(90)).await;
-        assert_eq!(reap_overdue_runs(&db, Utc::now(), grace).await.unwrap(), vec![Some("w1".to_string())]);
+        let reaped = reap_overdue_runs(&db, Utc::now(), grace).await.unwrap();
+        assert_eq!(reaped.iter().map(|r| (r.id, r.watch_id.clone())).collect::<Vec<_>>(), vec![(id, Some("w1".to_string()))]);
         let e = crate::watch_service::get_execution_by_id_only(&db, id, "ws1", "u1").await.unwrap().unwrap();
         assert_eq!(e.status, kyomi_core::WatchExecutionStatus::Error);
         assert!(e.completed_at.is_some());
@@ -1053,7 +1090,7 @@ mod tests {
     async fn realtime_runs_are_never_reaped_by_the_batch_deadline_rule() {
         let db = test_pool().await;
         let id = execution(&db).await;
-        record_run_llm(&db, id, &RunLlm { provider: "anthropic", model: "m", mode: "realtime", deadline: Some(Utc::now() - Duration::days(3)), fallback_reason: None, lease: None }).await.unwrap();
+        record_run_llm(&db, id, &RunLlm { provider: "anthropic", model: "m", mode: "realtime", deadline: Some(Utc::now() - Duration::days(3)), fallback_reason: None, lease: None, workspace_billed: false }).await.unwrap();
         assert!(reap_overdue_runs(&db, Utc::now(), Duration::minutes(40)).await.unwrap().is_empty());
     }
 
@@ -1087,24 +1124,52 @@ mod tests {
         let bill = UsageBill { insert_sql: INSERT, user_id: "u1", workspace_id: "ws1", session_id: "s", provider: "anthropic", model: "m", component: "kyomi_watch" };
         let amounts = |u: CallUsage| (u.cost_usd.unwrap_or(0.0) * 1.1, None);
         let now = Utc::now();
-        assert!(!bill_run_once(&db, id, "someone-else", now, &bill, amounts).await.unwrap(), "a displaced driver must not bill");
+        assert!(!bill_run_once(&db, id, BillingFence::LeaseOwner("someone-else"), now, &bill, amounts).await.unwrap(), "a displaced driver must not bill");
         let rows = |db: &DbPool| { let db = db.clone(); async move { sqlx::query_as::<_, (i64, i64)>("SELECT input_tokens, output_tokens FROM api_usage_log").fetch_all(sqlite_pool(&db)).await.unwrap() } };
         assert!(rows(&db).await.is_empty(), "a refused claim writes nothing");
-        assert!(bill_run_once(&db, id, "me", now, &bill, amounts).await.unwrap());
+        assert!(bill_run_once(&db, id, BillingFence::LeaseOwner("me"), now, &bill, amounts).await.unwrap());
         assert_eq!(rows(&db).await, vec![(35, 14)]);
-        assert!(!bill_run_once(&db, id, "me", now, &bill, amounts).await.unwrap(), "a run is billed once, however many attempts it took");
+        assert!(!bill_run_once(&db, id, BillingFence::LeaseOwner("me"), now, &bill, amounts).await.unwrap(), "a run is billed once, however many attempts it took");
         assert_eq!(rows(&db).await.len(), 1);
 
         // A lapsed lease cannot bill either.
         let id2 = another_batch_run(&db, "me", Duration::seconds(-5)).await;
-        assert!(!bill_run_once(&db, id2, "me", Utc::now(), &bill, amounts).await.unwrap());
+        assert!(!bill_run_once(&db, id2, BillingFence::LeaseOwner("me"), Utc::now(), &bill, amounts).await.unwrap());
 
         // A failed write rolls the claim back, so the run can still be billed.
         let id3 = another_batch_run(&db, "me", Duration::seconds(120)).await;
         let c = begin_call(&db, &KEY, id3, 0, "h", "anthropic", "m").await.unwrap();
         finish_call(&db, &KEY, &c.call_id, BatchCallState::Succeeded, Some(&serde_json::json!({})), CallUsage { input_tokens: 3, output_tokens: 1, cost_usd: None }, None).await.unwrap();
         let broken = UsageBill { insert_sql: "INSERT INTO no_such_table VALUES ($1)", ..bill };
-        assert!(bill_run_once(&db, id3, "me", Utc::now(), &broken, amounts).await.is_err());
-        assert!(bill_run_once(&db, id3, "me", Utc::now(), &bill, amounts).await.unwrap(), "the failed attempt left no claim behind");
+        assert!(bill_run_once(&db, id3, BillingFence::LeaseOwner("me"), Utc::now(), &broken, amounts).await.is_err());
+        assert!(bill_run_once(&db, id3, BillingFence::LeaseOwner("me"), Utc::now(), &bill, amounts).await.unwrap(), "the failed attempt left no claim behind");
+    }
+
+    #[tokio::test]
+    async fn a_reaped_run_is_billed_for_what_it_paid_before_the_stop_and_only_once() {
+        let db = test_pool().await;
+        let id = batch_run(&db, "wedged", Duration::seconds(120)).await;
+        let c = begin_call(&db, &KEY, id, 0, "h", "anthropic", "m").await.unwrap();
+        finish_call(&db, &KEY, &c.call_id, BatchCallState::Succeeded, Some(&serde_json::json!({})), CallUsage { input_tokens: 11, output_tokens: 4, cost_usd: None }, None).await.unwrap();
+        const INSERT: &str = "INSERT INTO api_usage_log \
+             (user_id, workspace_id, session_id, timestamp, provider, model, input_tokens, output_tokens, total_tokens, \
+              cache_creation_input_tokens, cache_read_input_tokens, cost_estimate, component, provider_cost_usd) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 0, 0, $10, $11, $12)";
+        let bill = UsageBill { insert_sql: INSERT, user_id: "u1", workspace_id: "ws1", session_id: "s", provider: "anthropic", model: "m", component: "kyomi_watch" };
+        let amounts = |u: CallUsage| (u.cost_usd.unwrap_or(0.0), None);
+
+        // A live (not yet stopped) run cannot be billed by the StoppedRun fence.
+        assert!(!bill_run_once(&db, id, BillingFence::StoppedRun, Utc::now(), &bill, amounts).await.unwrap());
+
+        set_deadline(&db, id, Duration::minutes(90)).await;
+        assert_eq!(reap_overdue_runs(&db, Utc::now(), Duration::minutes(40)).await.unwrap().len(), 1);
+        assert!(bill_run_once(&db, id, BillingFence::StoppedRun, Utc::now(), &bill, amounts).await.unwrap(), "the reaper bills what the run paid");
+        assert!(!bill_run_once(&db, id, BillingFence::StoppedRun, Utc::now(), &bill, amounts).await.unwrap(), "only once");
+        let rows: Vec<(i64, i64)> = sqlx::query_as("SELECT input_tokens, output_tokens FROM api_usage_log").fetch_all(sqlite_pool(&db)).await.unwrap();
+        assert_eq!(rows, vec![(11, 4)]);
     }
 }
+
+#[cfg(test)]
+#[path = "watch_batch_service_pg_tests.rs"]
+mod pg_tests;

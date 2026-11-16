@@ -475,6 +475,7 @@ mod tests {
                 deadline: None,
                 fallback_reason: None,
                 lease: Some(("me", Utc::now() + chrono::Duration::seconds(LEASE_TTL_SECONDS))),
+                workspace_billed: false,
             },
         )
         .await

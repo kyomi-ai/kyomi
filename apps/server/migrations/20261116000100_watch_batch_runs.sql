@@ -17,6 +17,7 @@ ALTER TABLE watch_executions ADD COLUMN batch_deadline_at timestamp with time zo
 ALTER TABLE watch_executions ADD COLUMN lease_owner varchar(200);
 ALTER TABLE watch_executions ADD COLUMN lease_expires_at timestamp with time zone;
 ALTER TABLE watch_executions ADD COLUMN usage_billed_at timestamp with time zone;
+ALTER TABLE watch_executions ADD COLUMN llm_workspace_billed boolean NOT NULL DEFAULT false;
 
 -- Resume scan: unfinished batch-mode runs by lease expiry.
 CREATE INDEX IF NOT EXISTS idx_watch_executions_batch_lease

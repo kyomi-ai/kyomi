@@ -8,6 +8,7 @@ ALTER TABLE watch_executions ADD COLUMN batch_deadline_at TEXT;
 ALTER TABLE watch_executions ADD COLUMN lease_owner TEXT;
 ALTER TABLE watch_executions ADD COLUMN lease_expires_at TEXT;
 ALTER TABLE watch_executions ADD COLUMN usage_billed_at TEXT;
+ALTER TABLE watch_executions ADD COLUMN llm_workspace_billed INTEGER NOT NULL DEFAULT 0;
 
 CREATE INDEX IF NOT EXISTS idx_watch_executions_batch_lease
     ON watch_executions (lease_expires_at)
