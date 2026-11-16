@@ -1573,6 +1573,10 @@ mod tests {
         let body = AnthropicClient::build_request_body("claude-sonnet-4-6", None, msgs(), &[], &warm);
         assert!(body.get("thinking").is_none(), "{body}");
         assert_eq!(body["temperature"], json!(0.25));
+        // Integer 1 (not just 1.0) also allows thinking.
+        let int_one = RequestOptions::new(1024).with_temperature(Some(json!(1)));
+        let body = AnthropicClient::build_request_body("claude-sonnet-4-6", None, msgs(), &[], &int_one);
+        assert!(body.get("thinking").is_some(), "{body}");
         let one = RequestOptions::new(1024).with_temperature(Some(json!(1.0)));
         let body = AnthropicClient::build_request_body("claude-sonnet-4-6", None, msgs(), &[], &one);
         assert!(body.get("thinking").is_some(), "{body}");

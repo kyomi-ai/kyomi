@@ -13,7 +13,7 @@
 //!   as a number is sent as a JSON number, anything else is sent verbatim for
 //!   the provider to accept or reject. Kyomi does no range validation.
 //!
-//! **Unset means nothing is sent.** There are no built-in defaults and no
+//! **Unset means nothing is sent.** There are no built-in temperature defaults and no
 //! `omit` keyword: a value that is not configured at any layer leaves the field
 //! out of the request, so the provider's own default applies.
 //!
@@ -198,6 +198,11 @@ pub fn temperature_text(s: Option<&Value>) -> String {
     match s {
         None => String::new(),
         Some(Value::String(v)) => v.clone(),
+        // A whole number the user typed as `1` is shown as `1`, not `1.0`.
+        Some(Value::Number(n)) => match n.as_f64() {
+            Some(f) if f.fract() == 0.0 && f.abs() < 1e15 => format!("{f:.0}"),
+            _ => n.to_string(),
+        },
         Some(v) => v.to_string(),
     }
 }
@@ -210,6 +215,18 @@ pub fn stored_effort(raw: &str) -> Result<Value, InvalidSetting> {
 /// The JSON stored under a temperature key (see [`temperature_value`]).
 pub fn stored_temperature(raw: &str) -> Value {
     temperature_value(raw)
+}
+
+/// The retired `omit` keyword is now an ordinary value that would be sent
+/// literally (and rejected by the provider). Say so in the log, once per read, so a
+/// leftover `omit` is found by whoever sees the 400s.
+pub fn warn_if_legacy_omit(source: &str, value: Option<&str>) {
+    if value.is_some_and(|v| v.trim().eq_ignore_ascii_case("omit")) {
+        tracing::warn!(
+            source,
+            "the `omit` keyword was removed (KYO-974): this value is now sent to the provider literally and will be rejected; clear it to send nothing"
+        );
+    }
 }
 
 /// Read the six settings from `settings.custom_settings`.
@@ -243,11 +260,15 @@ pub fn read_workspace_sampling(
             .map_err(|e| warnings.push(format!("{key}: {e} (stored: {v})")))
             .ok()
     };
+    for key in WORKSPACE_EFFORT_KEYS {
+        warn_if_legacy_omit(&format!("workspace setting {key}"), get(key).and_then(Value::as_str));
+    }
     let reasoning_effort = effort("reasoning_effort");
     let title_reasoning_effort = effort("title_reasoning_effort");
     let watch_reasoning_effort = effort("watch_reasoning_effort");
     let mut temp = |key: &str| -> Option<Value> {
         let v = get(key)?;
+        warn_if_legacy_omit(&format!("workspace setting {key}"), v.as_str());
         match v {
             Value::Number(_) => Some(v.clone()),
             Value::String(s) if !s.trim().is_empty() => Some(temperature_value(s)),
@@ -447,5 +468,13 @@ mod tests {
         assert_eq!(temperature_text(r.temperature.as_ref()), "0.3");
         assert_eq!(temperature_text(r.title_temperature.as_ref()), "warm");
         assert!(stored_effort("a b").is_err());
+    }
+
+    #[test]
+    fn whole_numbers_display_without_a_trailing_point_zero() {
+        assert_eq!(temperature_text(Some(&json!(1.0))), "1");
+        assert_eq!(temperature_text(Some(&json!(0.0))), "0");
+        assert_eq!(temperature_text(Some(&json!(0.3))), "0.3");
+        assert_eq!(temperature_text(Some(&json!("hot"))), "hot");
     }
 }

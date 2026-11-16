@@ -59,7 +59,6 @@ async fn bill(
     component: &str,
     session_id: Option<&str>,
 ) {
-    use crate::provider::LLMProvider;
     client
         .ledger()
         .bill(&BillingContext {
@@ -177,4 +176,220 @@ async fn every_call_type_writes_exactly_one_metered_row_counted_by_credits() {
     let credits = BillingService::new().calculate_credits_info(&db, "w1").await.unwrap();
     assert!((credits.used_usd - expected).abs() < 1e-9, "credits used {} != {expected}", credits.used_usd);
     assert_eq!(credits.total_calls, 4);
+}
+
+// -- Real call sites against a mock Anthropic API --------------------------------
+
+/// An HTTP server answering every request with `body` as an Anthropic Messages API
+/// response (so the real client, parser, price table, metering and billing run);
+/// returns its base URL.
+async fn mock_anthropic(body: serde_json::Value) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let payload = body.to_string();
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut stream, _)) = listener.accept().await else { return };
+            let payload = payload.clone();
+            tokio::spawn(async move {
+                let mut buf = Vec::new();
+                let mut chunk = [0u8; 4096];
+                // Read the headers, then the declared body, so the client is not cut off mid-write.
+                loop {
+                    let n = stream.read(&mut chunk).await.unwrap_or(0);
+                    if n == 0 {
+                        break;
+                    }
+                    buf.extend_from_slice(&chunk[..n]);
+                    let text = String::from_utf8_lossy(&buf).to_string();
+                    if let Some(end) = text.find("\r\n\r\n") {
+                        let len = text[..end]
+                            .to_ascii_lowercase()
+                            .split("content-length:")
+                            .nth(1)
+                            .and_then(|r| r.split("\r\n").next())
+                            .and_then(|v| v.trim().parse::<usize>().ok())
+                            .unwrap_or(0);
+                        if buf.len() >= end + 4 + len {
+                            break;
+                        }
+                    }
+                }
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\nrequest-id: req_mock\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{payload}",
+                    payload.len()
+                );
+                let _ = stream.write_all(response.as_bytes()).await;
+            });
+        }
+    });
+    format!("http://{addr}")
+}
+
+fn haiku_text_response(text: &str) -> serde_json::Value {
+    json!({
+        "id": "msg_mock",
+        "content": [{"type": "text", "text": text}],
+        "stop_reason": "end_turn",
+        "usage": {"input_tokens": 1000, "output_tokens": 20}
+    })
+}
+
+/// A workspace/user/session fixture and an app config pointing the real provider
+/// factory at `base_url` (Haiku 5.5).
+async fn fixture(base_url: String) -> (DbPool, kyomi_core::Config) {
+    let db = kyomi_test_db::test_pool().await;
+    let DbPool::Sqlite(sq) = &db else { panic!("sqlite fixture") };
+    kyomi_test_db::seed_user(sq, "u1", "u1@example.com").await;
+    kyomi_test_db::seed_workspace(sq, "w1", "u1").await;
+    kyomi_core::db_execute!(&db, "INSERT INTO chat_sessions (session_id,user_id,workspace_id) VALUES ('s1','u1','w1')").unwrap();
+    let mut app_config = kyomi_core::Config::test_config();
+    app_config.llm_provider = Some("anthropic".into());
+    app_config.llm_api_key = Some("test-key".into());
+    app_config.llm_base_url = Some(base_url);
+    app_config.llm_model = Some("claude-haiku-5-5".into());
+    (db, app_config)
+}
+
+async fn usage_rows(db: &DbPool) -> Vec<(String, String, Option<String>, i32, f64)> {
+    let DbPool::Sqlite(sq) = db else { panic!("sqlite fixture") };
+    sqlx::query_as("SELECT component, model, session_id, input_tokens, cost_estimate FROM api_usage_log ORDER BY id")
+        .fetch_all(sq)
+        .await
+        .unwrap()
+}
+
+/// The real `generate_title_inner`, against a mock Anthropic API, writes exactly
+/// one priced `title` row that credits/caps count.
+#[tokio::test]
+async fn title_generation_writes_one_metered_usage_row() {
+    let (db, app_config) = fixture(mock_anthropic(haiku_text_response("Revenue by Region")).await).await;
+    let manager = kyomi_auth::websocket::WebSocketManager::new(None, db.clone());
+
+    crate::execution::generate_title_inner(&db, &manager, "s1", "u1", "w1", "revenue by region?", &app_config)
+        .await
+        .unwrap();
+
+    let rows = usage_rows(&db).await;
+    assert_eq!(rows.len(), 1, "exactly one usage row: {rows:?}");
+    let (component, model, session, input, cost) = &rows[0];
+    assert_eq!((component.as_str(), model.as_str()), ("title", "claude-haiku-5-5"));
+    assert_eq!(session.as_deref(), Some("s1"));
+    assert_eq!(*input, 1000);
+    // Haiku 5.5: 1000*$0.10 + 20*$0.50 = $0.00011, x1.1 markup.
+    assert!((cost - 0.00011 * 1.1).abs() < 1e-9, "priced and marked up: {cost}");
+}
+
+/// The real `generate_dashboard_summary_inner`: the summary call and the collection
+/// tagging call on the same client each write exactly one priced row (`dashboard_summary`,
+/// `collection_tag`, no chat session), and the credit logic counts both.
+#[tokio::test]
+async fn dashboard_summary_and_tagging_each_write_one_metered_usage_row() {
+    // The mock answers `[]` to both calls: a valid (empty) tag list and a non-empty summary.
+    let (db, app_config) = fixture(mock_anthropic(haiku_text_response("[]")).await).await;
+    kyomi_core::db_execute!(&db, "INSERT INTO dashboards (dashboard_id,user_id,workspace_id,title,content,doc_type) VALUES ('d1','u1','w1','Revenue','Monthly revenue by region.','knowledge')").unwrap();
+    kyomi_core::db_execute!(&db, "INSERT INTO collections (id,workspace_id,name,description,created_by) VALUES ('c1','w1','Finance','Finance dashboards','u1')").unwrap();
+    let params = crate::execution::DashboardSummaryParams {
+        validation_context: crate::tools::QueryContext {
+            db: db.clone(),
+            user_id: "u1".into(),
+            workspace_id: "w1".into(),
+            encryption_key: std::sync::Arc::new([0u8; 32]),
+            config: std::sync::Arc::new(app_config.clone()),
+            connect_registry: None,
+        },
+        db: db.clone(),
+        ws_manager: kyomi_auth::websocket::WebSocketManager::new(None, db.clone()),
+        dashboard_id: "d1".into(),
+        user_id: "u1".into(),
+        workspace_id: "w1".into(),
+        title: "Revenue".into(),
+        content: "Monthly revenue by region.".into(),
+        app_config: std::sync::Arc::new(app_config),
+        doc_type: "knowledge".into(),
+        copilot_receipt_id: None,
+    };
+
+    crate::execution::generate_dashboard_summary_inner(params).await.unwrap();
+
+    let rows = usage_rows(&db).await;
+    let components: Vec<_> = rows.iter().map(|r| r.0.as_str()).collect();
+    assert_eq!(components, ["dashboard_summary", "collection_tag"], "one row per call: {rows:?}");
+    assert!(rows.iter().all(|r| r.2.is_none() && r.4 > 0.0), "no chat session, priced: {rows:?}");
+    let credits = BillingService::new().calculate_credits_info(&db, "w1").await.unwrap();
+    assert!((credits.used_usd - 2.0 * 0.00011 * 1.1).abs() < 1e-9, "credits count both: {}", credits.used_usd);
+}
+
+/// A durable run dropped mid-flight (DB-heartbeat cancel, lease loss) discards the
+/// future holding the client and its ledger. The calls it already paid for must still
+/// be billed: this drops a real running task after a paid call and waits for the row.
+#[tokio::test]
+async fn a_run_dropped_mid_flight_still_bills_its_paid_calls() {
+    let db = kyomi_test_db::test_pool().await;
+    let DbPool::Sqlite(sq) = &db else { panic!("sqlite fixture") };
+    kyomi_test_db::seed_user(sq, "u1", "u1@example.com").await;
+    kyomi_test_db::seed_workspace(sq, "w1", "u1").await;
+    let client = metered("claude-sonnet-5-5", response(100));
+    let billing = crate::usage_ledger::OwnedBilling {
+        db: db.clone(),
+        encryption_key: [0u8; 32],
+        user_id: "u1".into(),
+        workspace_id: "w1".into(),
+        session_id: None,
+        component: "custom_agent".into(),
+        provider: "anthropic".into(),
+        model: "claude-sonnet-5-5".into(),
+        is_byok: false,
+        durable: None,
+    };
+    let ledger = client.ledger();
+    let run = tokio::spawn(async move {
+        let _bill_if_dropped = crate::usage_ledger::BillOnDrop::new(client.ledger(), billing);
+        call(&client).await; // a paid model call, then the run blocks (e.g. in a tool call)...
+        std::future::pending::<()>().await;
+    });
+    while ledger.is_empty() {
+        tokio::task::yield_now().await;
+    }
+
+    run.abort(); // ...and is dropped without ever reaching its normal bill
+    assert!(run.await.unwrap_err().is_cancelled());
+
+    let mut rows = Vec::new();
+    for _ in 0..200 {
+        rows = usage_rows(&db).await;
+        if !rows.is_empty() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert_eq!(rows.len(), 1, "the dropped run's paid call is billed exactly once: {rows:?}");
+    assert!((rows[0].4 - 0.013 * AI_COST_MULTIPLIER).abs() < 1e-9, "priced: {}", rows[0].4);
+    assert!(ledger.is_empty(), "nothing left to bill twice");
+}
+
+/// A Kyomi-billed call whose provider reports no cost (OpenAI-direct, Gemini) is
+/// flagged in the row's per-call metadata instead of looking priced.
+#[tokio::test]
+async fn a_call_with_no_reported_cost_is_flagged_in_the_row_metadata() {
+    use crate::types::{AgentTokenUsage, LLMResponse};
+    let ledger = crate::usage_ledger::UsageLedger::default();
+    ledger.record(
+        "gpt-direct",
+        &LLMResponse {
+            raw_response: serde_json::Value::Null,
+            content: String::new(),
+            finish_reason: "stop".into(),
+            usage: AgentTokenUsage { input_tokens: 10, output_tokens: 5, ..Default::default() },
+            tool_calls: None,
+            cost: None,
+            thinking_content: None,
+            call_detail: None,
+        },
+    );
+    let row = ledger.billing_row(false, "openai", "gpt-direct", "custom_agent").unwrap();
+    let meta: serde_json::Value = serde_json::from_str(row.extra_metadata.as_deref().unwrap()).unwrap();
+    assert_eq!(meta["calls"][0]["cost_reported"], false);
+    assert_eq!(row.cost_estimate, 0.0);
 }

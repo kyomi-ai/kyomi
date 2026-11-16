@@ -697,8 +697,12 @@ fn llm_sampling_from(get: impl Fn(&str) -> Option<String>) -> crate::llm_samplin
     let temp = |key: &str| {
         get(key)
             .filter(|raw| !raw.trim().is_empty())
+            .inspect(|raw| crate::llm_sampling::warn_if_legacy_omit(key, Some(raw)))
             .map(|raw| crate::llm_sampling::temperature_value(&raw))
     };
+    for key in ["LLM_REASONING_EFFORT", "LLM_TITLE_REASONING_EFFORT", "LLM_WATCH_REASONING_EFFORT"] {
+        crate::llm_sampling::warn_if_legacy_omit(key, get(key).as_deref());
+    }
     crate::llm_sampling::LlmSamplingSettings {
         reasoning_effort: optional_parsed(&get, "LLM_REASONING_EFFORT", effort),
         title_reasoning_effort: optional_parsed(&get, "LLM_TITLE_REASONING_EFFORT", effort),

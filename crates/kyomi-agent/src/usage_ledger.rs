@@ -19,7 +19,7 @@ use serde_json::json;
 use async_trait::async_trait;
 use kyomi_core::models::ApiUsageInsert;
 use kyomi_core::DbPool;
-use tracing::error;
+use tracing::{error, warn};
 
 use crate::provider::{LLMProvider, RequestOptions};
 use crate::types::{AgentTokenUsage, LLMResponse, Message, ProviderCallDetail, Tool};
@@ -75,6 +75,11 @@ impl UsageLedger {
         });
     }
 
+    /// Whether no call is waiting to be billed.
+    pub fn is_empty(&self) -> bool {
+        self.lock().is_empty()
+    }
+
     fn lock(&self) -> std::sync::MutexGuard<'_, Vec<CallRecord>> {
         // A poisoned ledger still holds valid records; keep reading it.
         self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -107,6 +112,14 @@ impl UsageLedger {
         let (input, output) = (t.prompt_tokens(), t.output_tokens);
         if input == 0 && output == 0 {
             return None;
+        }
+        if !is_byok && self.lock().iter().any(|c| c.cost.is_none()) {
+            warn!(
+                provider,
+                model,
+                component,
+                "Kyomi-billed LLM call reports no cost: billed at $0 (only Anthropic, which is priced here, and OpenRouter report cost)"
+            );
         }
         // BYOK: the workspace pays the provider, so Kyomi credits are untouched
         // (`cost_estimate` 0) and the real cost is kept for observability.
@@ -157,6 +170,9 @@ impl UsageLedger {
                     "cache_read_input_tokens": c.usage.cache_read_input_tokens,
                     "cost_usd": d.map(|d| d.cost_usd),
                     "price_known": d.map(|d| d.price_known),
+                    // `false`: the provider reported no cost for this call (OpenAI-direct and
+                    // Gemini report none), so it was billed at $0.
+                    "cost_reported": c.cost.is_some(),
                 })
             })
             .collect();
@@ -189,6 +205,84 @@ pub struct BillingContext<'a> {
     /// A durable chat run (and the key its store needs): the write is fenced by
     /// the run's lease and keyed by run id.
     pub durable: Option<(&'a crate::adapter::DurableRun, &'a [u8; 32])>,
+}
+
+/// A [`BillingContext`] that owns its data, so it can outlive the run that made it.
+#[derive(Clone)]
+pub struct OwnedBilling {
+    pub db: DbPool,
+    pub encryption_key: [u8; 32],
+    pub user_id: String,
+    pub workspace_id: String,
+    pub session_id: Option<String>,
+    pub component: String,
+    pub provider: String,
+    pub model: String,
+    pub is_byok: bool,
+    pub durable: Option<crate::adapter::DurableRun>,
+}
+
+impl OwnedBilling {
+    pub fn context(&self) -> BillingContext<'_> {
+        BillingContext {
+            db: &self.db,
+            user_id: &self.user_id,
+            workspace_id: &self.workspace_id,
+            session_id: self.session_id.as_deref(),
+            component: &self.component,
+            provider: &self.provider,
+            model: &self.model,
+            is_byok: self.is_byok,
+            durable: self.durable.as_ref().map(|run| (run, &self.encryption_key)),
+        }
+    }
+}
+
+/// Bills whatever the ledger still holds when it is dropped. A durable run can be
+/// dropped mid-flight (user cancel observed through the DB heartbeat, lease loss):
+/// the future holding the client and its ledger is discarded and the normal bill
+/// at the end of the run never executes, so the calls already paid for would be
+/// lost. After a normal `bill` the ledger is empty and this does nothing.
+pub struct BillOnDrop {
+    ledger: UsageLedger,
+    billing: OwnedBilling,
+}
+
+impl BillOnDrop {
+    pub fn new(ledger: UsageLedger, billing: OwnedBilling) -> Self {
+        Self { ledger, billing }
+    }
+}
+
+impl Drop for BillOnDrop {
+    fn drop(&mut self) {
+        if self.ledger.is_empty() {
+            return;
+        }
+        let ledger = self.ledger.clone();
+        let billing = self.billing.clone();
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            error!(
+                user_id = %billing.user_id,
+                workspace_id = %billing.workspace_id,
+                component = %billing.component,
+                totals = ?ledger.totals(),
+                "BILLING ROW LOST: usage ledger dropped with unbilled calls and no runtime to bill them"
+            );
+            return;
+        };
+        runtime.spawn(async move {
+            if let Err(e) = ledger.bill(&billing.context()).await {
+                error!(
+                    error = %e,
+                    user_id = %billing.user_id,
+                    workspace_id = %billing.workspace_id,
+                    component = %billing.component,
+                    "BILLING ROW LOST: failed to bill a dropped run's usage"
+                );
+            }
+        });
+    }
 }
 
 impl UsageLedger {

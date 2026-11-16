@@ -363,6 +363,14 @@ fn effective_provider_kind(
     }
 }
 
+/// BYOK workspaces (their own key, self-hosted only) cost Kyomi credits nothing.
+fn is_byok(
+    ws_config: &kyomi_auth::workspace_ai_config::WorkspaceAiConfig,
+    app_config: &kyomi_core::Config,
+) -> bool {
+    ws_config.is_byok() && app_config.self_hosted
+}
+
 /// Who a short background LLM task (title, summary, tagging) runs for.
 struct BackgroundTask<'a> {
     db: &'a DbPool,
@@ -380,7 +388,8 @@ async fn bill_background_call(
     task: &BackgroundTask<'_>,
     component: &str,
 ) {
-    let billed = client
+    // A non-durable bill logs its own failure ("BILLING ROW LOST") and returns Ok.
+    client
         .ledger()
         .bill(&crate::usage_ledger::BillingContext {
             db: task.db,
@@ -390,13 +399,11 @@ async fn bill_background_call(
             component,
             provider: &effective_provider_kind(task.ws_config, task.app_config).to_string(),
             model: client.model(),
-            is_byok: task.ws_config.is_byok() && task.app_config.self_hosted,
+            is_byok: is_byok(task.ws_config, task.app_config),
             durable: None,
         })
-        .await;
-    if let Err(e) = billed {
-        warn!(error = %e, component, "Failed to bill background LLM call");
-    }
+        .await
+        .ok();
 }
 
 /// Execute the agent chat loop for a single user message.
@@ -444,7 +451,7 @@ pub async fn execute_agent_chat(
         if let Some(ref model) = config.model_name {
             ws_config.model = Some(model.clone());
         }
-        let is_byok = ws_config.is_byok() && app_config.self_hosted;
+        let is_byok = is_byok(&ws_config, app_config);
         let client = create_provider_from_workspace(&ws_config, app_config)?;
         // Resolved once per execution so the value is stable for the whole
         // conversation turn (effort changes invalidate Anthropic's prompt
@@ -463,6 +470,21 @@ pub async fn execute_agent_chat(
     let provider_context_window = client.context_window();
     // Every provider call of this run is recorded here by the metered client (KYO-974).
     let usage_ledger = client.ledger();
+    let billing = crate::usage_ledger::OwnedBilling {
+        db: db.clone(),
+        encryption_key: **encryption_key,
+        user_id: config.user_id.clone(),
+        workspace_id: config.workspace_id.clone(),
+        session_id: Some(config.session_id.clone()),
+        component: config.component.clone(),
+        provider: provider_kind.to_string(),
+        model: model_name.clone(),
+        is_byok,
+        durable: config.assistant_message_persistence.durable_run().cloned(),
+    };
+    // A durable run dropped mid-flight (DB-heartbeat cancel, lease loss) never reaches the
+    // bill below; this still bills the calls already paid for.
+    let _bill_if_dropped = crate::usage_ledger::BillOnDrop::new(usage_ledger.clone(), billing.clone());
 
 
     // 3. Create agent config with context-appropriate tool filter.
@@ -681,19 +703,7 @@ pub async fn execute_agent_chat(
     // 14b. Bill the run: the metered client recorded every provider call (incl. the
     // max-iterations wrap-up) and `UsageLedger::bill` is the one writer of
     // `api_usage_log` rows for every call type (KYO-974).
-    usage_ledger
-        .bill(&crate::usage_ledger::BillingContext {
-            db,
-            user_id: &config.user_id,
-            workspace_id: &config.workspace_id,
-            session_id: Some(&config.session_id),
-            component: &config.component,
-            provider: &provider_kind.to_string(),
-            model: &model_name,
-            is_byok,
-            durable: config.assistant_message_persistence.durable_run().map(|run| (run, &**encryption_key)),
-        })
-        .await?;
+    usage_ledger.bill(&billing.context()).await?;
 
     // 14. Finalize the assistant message: attach metadata (model, thinking
     //     events, token usage) and, via `MessageStatus`, the turn's
@@ -1184,7 +1194,7 @@ pub(crate) async fn write_dashboard_summary_with_cas(
     Ok(())
 }
 
-async fn generate_dashboard_summary_inner(
+pub(crate) async fn generate_dashboard_summary_inner(
     params: DashboardSummaryParams,
 ) -> kyomi_core::Result<()> {
     let DashboardSummaryParams {
@@ -2252,85 +2262,5 @@ mod tests {
         );
         assert_eq!(agent_config.temperature, Some(serde_json::json!(0.42)));
         assert_eq!(agent_config.reasoning_effort.as_deref(), Some("max"));
-    }
-
-    /// A one-connection-at-a-time HTTP server answering every request with `body`
-    /// as an Anthropic Messages API response; returns its base URL.
-    async fn mock_anthropic(body: serde_json::Value) -> String {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let payload = body.to_string();
-        tokio::spawn(async move {
-            loop {
-                let Ok((mut stream, _)) = listener.accept().await else { return };
-                let payload = payload.clone();
-                tokio::spawn(async move {
-                    let mut buf = Vec::new();
-                    let mut chunk = [0u8; 4096];
-                    // Read headers, then the declared body, so the client is not cut off mid-write.
-                    loop {
-                        let n = stream.read(&mut chunk).await.unwrap_or(0);
-                        if n == 0 { break; }
-                        buf.extend_from_slice(&chunk[..n]);
-                        let text = String::from_utf8_lossy(&buf).to_string();
-                        if let Some(end) = text.find("\r\n\r\n") {
-                            let len = text[..end].to_ascii_lowercase().split("content-length:").nth(1)
-                                .and_then(|r| r.split("\r\n").next()).and_then(|v| v.trim().parse::<usize>().ok()).unwrap_or(0);
-                            if buf.len() >= end + 4 + len { break; }
-                        }
-                    }
-                    let response = format!(
-                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\nrequest-id: req_mock\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{payload}",
-                        payload.len()
-                    );
-                    let _ = stream.write_all(response.as_bytes()).await;
-                });
-            }
-        });
-        format!("http://{addr}")
-    }
-
-    /// The real `generate_title_inner` call site, against a mock Anthropic API,
-    /// writes exactly one priced `title` usage row that credits/caps count
-    /// (KYO-974: background calls are metered through the same path as chat).
-    #[tokio::test]
-    async fn title_generation_writes_one_metered_usage_row() {
-        let base_url = mock_anthropic(serde_json::json!({
-            "id": "msg_title",
-            "content": [{"type": "text", "text": "Revenue by Region"}],
-            "stop_reason": "end_turn",
-            "usage": {"input_tokens": 1000, "output_tokens": 20}
-        }))
-        .await;
-        let db = kyomi_test_db::test_pool().await;
-        let DbPool::Sqlite(sq) = &db else { panic!("sqlite fixture") };
-        kyomi_test_db::seed_user(sq, "u1", "u1@example.com").await;
-        kyomi_test_db::seed_workspace(sq, "w1", "u1").await;
-        kyomi_core::db_execute!(&db, "INSERT INTO chat_sessions (session_id,user_id,workspace_id) VALUES ('s1','u1','w1')").unwrap();
-        let mut app_config = kyomi_core::Config::test_config();
-        app_config.llm_provider = Some("anthropic".into());
-        app_config.llm_api_key = Some("test-key".into());
-        app_config.llm_base_url = Some(base_url);
-        app_config.llm_model = Some("claude-haiku-5-5".into());
-        let manager = kyomi_auth::websocket::WebSocketManager::new(None, db.clone());
-
-        generate_title_inner(&db, &manager, "s1", "u1", "w1", "revenue by region?", &app_config)
-            .await
-            .unwrap();
-
-        let rows: Vec<(String, String, Option<String>, i32, f64)> = sqlx::query_as(
-            "SELECT component, model, session_id, input_tokens, cost_estimate FROM api_usage_log",
-        )
-        .fetch_all(sq)
-        .await
-        .unwrap();
-        assert_eq!(rows.len(), 1, "exactly one usage row: {rows:?}");
-        let (component, model, session, input, cost) = &rows[0];
-        assert_eq!((component.as_str(), model.as_str()), ("title", "claude-haiku-5-5"));
-        assert_eq!(session.as_deref(), Some("s1"));
-        assert_eq!(*input, 1000);
-        // Haiku 5.5: 1000*$0.10 + 20*$0.50 = $0.00011, x1.1 markup.
-        assert!((cost - 0.00011 * 1.1).abs() < 1e-9, "priced and marked up: {cost}");
     }
 }
