@@ -790,6 +790,10 @@ impl CustomAgent {
             if response.tool_calls.is_none()
                 && response.finish_reason == "pause_turn"
                 && pause_continuations < MAX_PAUSE_CONTINUATIONS
+                // The continuation must carry the same server tools. If they are now
+                // withheld (allowance or budget spent, restricted session) there is
+                // nothing to continue with: answer with what we have, flagged.
+                && !self.admitted_server_tools().await.is_empty()
             {
                 pause_continuations += 1;
                 self.state.messages.push(
@@ -3833,5 +3837,23 @@ Second chart:\n{CHARTML_STRIPPED_NOTE}\nDone."
         assert_eq!(response.raw_response, raw, "the loop reads server blocks, usage and sources from this");
         assert_eq!(record.raw, raw, "the restricted store keeps the complete provider payload");
         assert_eq!(record.continuation, raw);
+    }
+
+    #[tokio::test]
+    async fn a_pause_with_the_tool_now_withheld_ends_flagged_instead_of_sending_a_prefill() {
+        let (mut agent, calls) = scripted_agent_with_config(
+            server_tool_agent_config(),
+            vec![Reply::Response(server_response("pause_turn", None))],
+            Reply::Text("never reached".into()),
+        )
+        .await;
+        // The paused response reports one search; with a per-turn allowance of 1 the
+        // continuation could not carry the tool.
+        let mut config = (*agent.tool_context.config).clone();
+        config.web_tools.caps.per_turn_search = 1;
+        agent.tool_context.config = Arc::new(config);
+        let answer = agent.chat("hi", CancellationToken::new(), None, None, None).await.unwrap();
+        assert_eq!(calls.lock().unwrap().len(), 1, "no continuation request is sent");
+        assert!(answer.contains("Web research was cut short"), "{answer}");
     }
 }
