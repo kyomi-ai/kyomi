@@ -1,0 +1,76 @@
+{
+ "model": "claude-haiku-4-5-20251001",
+ "id": "msg_REDACTED",
+ "type": "message",
+ "role": "assistant",
+ "content": [
+  {
+   "type": "server_tool_use",
+   "id": "srvtoolu_01Pth7Z9BxMgohcpsC842vik",
+   "name": "web_fetch",
+   "input": {
+    "url": "https://www.rust-lang.org/"
+   }
+  },
+  {
+   "type": "web_fetch_tool_result",
+   "tool_use_id": "srvtoolu_01Pth7Z9BxMgohcpsC842vik",
+   "content": {
+    "type": "web_fetch_result",
+    "url": "https://www.rust-lang.org/",
+    "retrieved_at": "2026-11-15T13:50:04+00:00",
+    "content": {
+     "type": "document",
+     "source": {
+      "type": "text",
+      "media_type": "text/plain",
+      "data": "---\nmeta-description: A language empowering everyone to build reliable and efficient software.\nmeta-msapplication-TileColor: #ffffff\nmeta-msapplication-config: /static/images/browserconfig.xml?v=ngJW8"
+     },
+     "title": "Rust Programming Language",
+     "citations": {
+      "enabled": true
+     }
+    }
+   },
+   "caller": {
+    "type": "direct"
+   }
+  },
+  {
+   "citations": [
+    {
+     "type": "char_location",
+     "cited_text": "[Rust Logo](https://rust-lang.org/static/images/rust-logo-blk.svg)](https://rust",
+     "document_index": 0,
+     "document_title": "Rust Programming Language",
+     "start_char_index": 836,
+     "end_char_index": 1508
+    }
+   ],
+   "type": "text",
+   "text": "The main headline says \"A language empowering everyone to build reliable and efficient software.\""
+  }
+ ],
+ "container": null,
+ "stop_reason": "end_turn",
+ "stop_sequence": null,
+ "stop_details": null,
+ "usage": {
+  "input_tokens": 5926,
+  "cache_creation_input_tokens": 0,
+  "cache_read_input_tokens": 0,
+  "cache_creation": {
+   "ephemeral_5m_input_tokens": 0,
+   "ephemeral_1h_input_tokens": 0
+  },
+  "output_tokens": 101,
+  "service_tier": "standard",
+  "inference_geo": "not_available",
+  "speed": "standard",
+  "server_tool_use": {
+   "web_search_requests": 0,
+   "web_fetch_requests": 1
+  }
+ },
+ "diagnostics": null
+}

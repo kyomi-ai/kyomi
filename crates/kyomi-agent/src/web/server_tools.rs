@@ -367,6 +367,36 @@ mod tests {
         serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
     }
 
+    /// LIVE capture (claude-haiku-4-5, web_search_20250305, 2026-11-16), id-redacted.
+    /// Note the extra `caller` field on the result block: verbatim replay must
+    /// not depend on knowing every field.
+    #[test]
+    fn anthropic_live_search_response_parses_and_replays_verbatim() {
+        let raw = fixture("anthropic_search_message.json");
+        let a = parse_anthropic(&raw);
+        assert_eq!(a.provider_content.as_ref().unwrap(), raw["content"].as_array().unwrap());
+        assert_eq!((a.searches, a.fetches), (1, 0));
+        assert!(!a.sources.is_empty() && a.sources.iter().all(|s| s.url.starts_with("http")));
+        assert!(raw["content"][1].get("caller").is_some(), "fixture must keep the live `caller` field");
+        let enc = raw["content"][1]["content"][0]["encrypted_content"].as_str().unwrap();
+        assert!(enc.len() > 100, "real opaque payload");
+        // Replayed through the real adapter conversion, byte-for-byte.
+        let msg = crate::types::Message::assistant("x").with_provider_content(a.provider_content);
+        let (_, replayed) = crate::anthropic::AnthropicClient::convert_messages_to_anthropic(&[msg], &Default::default());
+        assert_eq!(replayed[0]["content"], raw["content"]);
+    }
+
+    /// LIVE capture (web_fetch_20250910): fetch usage, source and document title.
+    #[test]
+    fn anthropic_live_fetch_response_parses() {
+        let raw = fixture("anthropic_fetch_message.json");
+        let a = parse_anthropic(&raw);
+        assert_eq!((a.searches, a.fetches), (0, 1));
+        assert!(a.provider_content.is_some());
+        assert_eq!(a.sources[0].url, "https://www.rust-lang.org/");
+        assert_eq!(a.sources[0].title, "Rust Programming Language");
+    }
+
     #[test]
     fn openrouter_entries_use_the_chat_completions_server_tool_types() {
         use kyomi_core::web_tools::WebBackendKind::OpenRouter;
