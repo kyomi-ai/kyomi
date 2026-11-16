@@ -263,6 +263,12 @@ pub struct Config {
     /// [`crate::llm_sampling`].
     pub llm_sampling: crate::llm_sampling::LlmSamplingSettings,
 
+    /// Instance-default watch LLM connection and mode (KYO-973):
+    /// `LLM_WATCH_PROVIDER`, `LLM_WATCH_API_KEY`, `LLM_WATCH_BASE_URL`,
+    /// `LLM_WATCH_MODEL`, `LLM_WATCH_MODE`, `LLM_WATCH_BATCH_WINDOW_MINUTES`,
+    /// `LLM_WATCH_BATCH_ON_FAILURE`. See [`crate::watch_llm`].
+    pub llm_watch: crate::watch_llm::WatchLlmSettings,
+
     // ── Stripe ──────────────────────────────────────────────────────────
     /// Stripe secret key (sk_test_ or sk_live_).
     /// Optional — server starts without it (no billing features).
@@ -506,6 +512,8 @@ impl Config {
             llm_context_window: 0,
             llm_title_model: env::var("LLM_TITLE_MODEL").ok(),
             llm_sampling: llm_sampling_from_env(),
+            llm_watch: crate::watch_llm::watch_llm_from_env(|k| env::var(k).ok())
+                .unwrap_or_else(|e| panic!("{e}")),
             stripe_secret_key: env::var("STRIPE_SECRET_KEY").ok(),
             stripe_publishable_key: env::var("STRIPE_PUBLISHABLE_KEY").ok(),
             stripe_webhook_secret: env::var("STRIPE_WEBHOOK_SECRET").ok(),
@@ -590,6 +598,7 @@ impl Config {
             llm_context_window: 0,
             llm_title_model: None,
             llm_sampling: crate::llm_sampling::LlmSamplingSettings::default(),
+            llm_watch: crate::watch_llm::WatchLlmSettings::default(),
             stripe_secret_key: None,
             stripe_publishable_key: None,
             stripe_webhook_secret: None,

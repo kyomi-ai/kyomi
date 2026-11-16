@@ -23,6 +23,7 @@ pub mod kv_store;
 pub mod kv_store_memory;
 pub mod kv_store_redis;
 pub mod llm_sampling;
+pub mod watch_llm;
 pub mod models;
 pub mod platform;
 pub mod redis;
