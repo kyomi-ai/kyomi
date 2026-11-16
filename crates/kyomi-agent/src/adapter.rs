@@ -3706,9 +3706,20 @@ mod tests {
         inner: crate::test_support::ScriptedProvider,
         requested: Vec<(&'static str, serde_json::Value)>,
         index: std::sync::atomic::AtomicUsize,
-        truncated: bool,
+        truncation: Truncation,
         /// Tool calls returned per model response (1 for every pre-existing test).
         batch: usize,
+    }
+
+    /// Which returned tool calls carry an unparsable-arguments error.
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Truncation {
+        /// None of them.
+        Never,
+        /// Only the first call of the first response (the pre-existing `truncated` flag).
+        FirstCall,
+        /// Every call of every response.
+        EveryCall,
     }
     #[async_trait::async_trait]
     impl crate::provider::LLMProvider for ActualToolsProvider {
@@ -3719,24 +3730,26 @@ mod tests {
             let start = index * self.batch;
             let end = (start + self.batch).min(self.requested.len());
             if start < end {
-                let arguments_error = (self.truncated && index == 0)
-                    .then(|| "arguments could not be parsed as JSON (finish_reason=max_tokens): EOF".to_string());
-                if arguments_error.is_some() {
+                let truncate = |offset: usize| match self.truncation {
+                    Truncation::Never => false,
+                    Truncation::FirstCall => index == 0 && offset == 0,
+                    Truncation::EveryCall => true,
+                };
+                let calls: Vec<crate::types::ToolCall> = self.requested[start..end]
+                    .iter()
+                    .enumerate()
+                    .map(|(offset, (name, arguments))| crate::types::ToolCall {
+                        id: format!("provider-call-{}", start + offset),
+                        name: (*name).into(),
+                        arguments: arguments.clone(),
+                        arguments_error: truncate(offset)
+                            .then(|| "arguments could not be parsed as JSON (finish_reason=max_tokens): EOF".to_string()),
+                    })
+                    .collect();
+                if calls.iter().any(|call| call.arguments_error.is_some()) {
                     response.finish_reason = "max_tokens".into();
                 }
-                response.tool_calls = Some(
-                    self.requested[start..end]
-                        .iter()
-                        .enumerate()
-                        .map(|(offset, (name, arguments))| crate::types::ToolCall {
-                            // Distinct ids only when a response carries several calls.
-                            id: if self.batch == 1 { "repeated-provider-call".into() } else { format!("batched-provider-call-{}", start + offset) },
-                            name: (*name).into(),
-                            arguments: arguments.clone(),
-                            arguments_error: if offset == 0 { arguments_error.clone() } else { None },
-                        })
-                        .collect(),
-                );
+                response.tool_calls = Some(calls);
             }
             Ok(response)
         }
@@ -3750,7 +3763,7 @@ mod tests {
         let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
         let mut script: Vec<_> = (0..requested.len()).map(|_| crate::test_support::Reply::ToolCall).collect();
         script.push(crate::test_support::Reply::Text("Tool corrections complete".into()));
-        let provider = ActualToolsProvider { inner: crate::test_support::ScriptedProvider {script:std::sync::Mutex::new(script.into()),after_script:crate::test_support::Reply::Text("unexpected".into()),calls:calls.clone()}, requested, index:std::sync::atomic::AtomicUsize::new(0), truncated: false, batch: 1 };
+        let provider = ActualToolsProvider { inner: crate::test_support::ScriptedProvider {script:std::sync::Mutex::new(script.into()),after_script:crate::test_support::Reply::Text("unexpected".into()),calls:calls.clone()}, requested, index:std::sync::atomic::AtomicUsize::new(0), truncation: Truncation::Never, batch: 1 };
         let mut registry = crate::tools::ToolRegistry::new();
         registry.register(Arc::new(crate::tools::validate_chartml::ValidateChartmlTool));
         registry.register(Arc::new(crate::tools::datasource::QueryDatasourceTool));
@@ -3847,6 +3860,12 @@ mod tests {
         }
     }
 
+    /// A tool that rejects every call with a definite pre-effect rejection
+    /// (`BadRequest`), like a SQL analysis error the model can repair.
+    fn rejecting_tool(calls: &Arc<std::sync::atomic::AtomicUsize>) -> Arc<FailingTool> {
+        Arc::new(FailingTool { kind: FailureKind::BadRequest, name: "rejecting_tool", calls: calls.clone() })
+    }
+
     struct SucceedingTool {
         calls: Arc<std::sync::atomic::AtomicUsize>,
     }
@@ -3862,19 +3881,46 @@ mod tests {
         }
     }
 
+    /// Every `ToolIntent` id must have a matching `ToolOutcome` id. A plain function,
+    /// not inline in the async harness, to keep that future's frame small.
+    fn assert_every_requested_call_answered<'a>(payloads: impl Iterator<Item = &'a agent_runtime::PublicPayload>) {
+        let (mut intents, mut answered) = (std::collections::BTreeSet::new(), std::collections::BTreeSet::new());
+        for payload in payloads {
+            match payload {
+                agent_runtime::PublicPayload::ToolIntent { tool_call_id, .. } => { intents.insert(tool_call_id.as_str().to_string()); }
+                agent_runtime::PublicPayload::ToolOutcome { tool_call_id, .. } => { answered.insert(tool_call_id.as_str().to_string()); }
+                _ => {}
+            }
+        }
+        assert!(intents.is_subset(&answered), "every requested tool call needs an outcome: requested={intents:?} answered={answered:?}");
+    }
+
     async fn run_tool_script(
         requested: Vec<(&'static str, serde_json::Value)>,
         register: impl FnOnce(&mut crate::tools::ToolRegistry),
         truncated: bool,
     ) -> (Result<String, kyomi_core::Error>, Vec<agent_runtime::ToolOutcome>, Vec<crate::test_support::RecordedCall>, kyomi_core::DbPool) {
-        run_tool_script_batched(requested, register, truncated, 1).await
+        let truncation = if truncated { Truncation::FirstCall } else { Truncation::Never };
+        Box::pin(run_tool_script_with(requested, register, truncation, 1)).await
     }
 
-    /// Like `run_tool_script`, but the model returns `batch` tool calls in each response.
-    async fn run_tool_script_batched(
+    /// Like `run_tool_script`, but the model returns `batch` tool calls in each
+    /// response and `truncation` selects which calls carry unparsable arguments.
+    async fn run_tool_script_with(
         requested: Vec<(&'static str, serde_json::Value)>,
         register: impl FnOnce(&mut crate::tools::ToolRegistry),
-        truncated: bool,
+        truncation: Truncation,
+        batch: usize,
+    ) -> (Result<String, kyomi_core::Error>, Vec<agent_runtime::ToolOutcome>, Vec<crate::test_support::RecordedCall>, kyomi_core::DbPool) {
+        // The body below is a large future; box it so callers' frames stay small
+        // on the default 2 MB test thread stack.
+        Box::pin(run_tool_script_inner(requested, register, truncation, batch)).await
+    }
+
+    async fn run_tool_script_inner(
+        requested: Vec<(&'static str, serde_json::Value)>,
+        register: impl FnOnce(&mut crate::tools::ToolRegistry),
+        truncation: Truncation,
         batch: usize,
     ) -> (Result<String, kyomi_core::Error>, Vec<agent_runtime::ToolOutcome>, Vec<crate::test_support::RecordedCall>, kyomi_core::DbPool) {
         let db = crate::test_support::test_pool().await;
@@ -3884,7 +3930,7 @@ mod tests {
         let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
         let mut script: Vec<_> = (0..requested.len().div_ceil(batch)).map(|_| crate::test_support::Reply::ToolCall).collect();
         script.push(crate::test_support::Reply::Text("Handled the tool error".into()));
-        let provider = ActualToolsProvider { inner: crate::test_support::ScriptedProvider {script:std::sync::Mutex::new(script.into()),after_script:crate::test_support::Reply::Text("unexpected".into()),calls:calls.clone()}, requested, index:std::sync::atomic::AtomicUsize::new(0), truncated, batch };
+        let provider = ActualToolsProvider { inner: crate::test_support::ScriptedProvider {script:std::sync::Mutex::new(script.into()),after_script:crate::test_support::Reply::Text("unexpected".into()),calls:calls.clone()}, requested, index:std::sync::atomic::AtomicUsize::new(0), truncation, batch };
         let mut registry = crate::tools::ToolRegistry::new();
         register(&mut registry);
         let agent = CustomAgent::new(Box::new(provider),crate::agent::AgentConfig::default(),Arc::new(registry),crate::test_support::build_ctx(db.clone()),std::collections::HashMap::new());
@@ -3903,6 +3949,12 @@ mod tests {
             agent_runtime::PublicPayload::ToolOutcome {transport,domain,text,..} => Some(agent_runtime::ToolOutcome { transport: transport.clone(), domain: domain.clone(), text: text.preview.clone() }),
             _ => None,
         }).collect();
+        // Every tool call the model requested must have an outcome, even when a failure
+        // guard ends the turn mid-batch. (The replay window is capped; skip the check
+        // if it was truncated rather than assert on a partial view.)
+        if replay.events.len() < 100 {
+            assert_every_requested_call_answered(replay.events.iter().map(|event| &event.payload));
+        }
         let recorded = std::mem::take(&mut *calls.lock().unwrap());
         (answer, outcomes, recorded, db)
     }
@@ -3993,7 +4045,7 @@ mod tests {
     async fn distinct_repairable_rejections_do_not_exhaust_the_strict_budget() {
         let rejecting_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let failing_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let rejecting = Arc::new(FailingTool { kind: FailureKind::BadRequest, name: "rejecting_tool", calls: rejecting_calls.clone() });
+        let rejecting = rejecting_tool(&rejecting_calls);
         let failing = Arc::new(FailingTool { kind: FailureKind::ServerError, name: "failing_tool", calls: failing_calls.clone() });
         let mut requested: Vec<(&'static str, serde_json::Value)> =
             (0..4).map(|n| ("rejecting_tool", serde_json::json!({"n": n}))).collect();
@@ -4017,7 +4069,7 @@ mod tests {
     async fn strict_and_repairable_budgets_are_counted_separately() {
         let rejecting_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let failing_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let rejecting = Arc::new(FailingTool { kind: FailureKind::BadRequest, name: "rejecting_tool", calls: rejecting_calls.clone() });
+        let rejecting = rejecting_tool(&rejecting_calls);
         let failing = Arc::new(FailingTool { kind: FailureKind::ServerError, name: "failing_tool", calls: failing_calls.clone() });
         let mut requested: Vec<(&'static str, serde_json::Value)> = Vec::new();
         for n in 0..4 { requested.push(("failing_tool", serde_json::json!({"n": n}))); }
@@ -4040,7 +4092,7 @@ mod tests {
     #[tokio::test]
     async fn ten_consecutive_repairable_rejections_stop_with_human_message() {
         let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let rejecting = Arc::new(FailingTool { kind: FailureKind::BadRequest, name: "rejecting_tool", calls: calls.clone() });
+        let rejecting = rejecting_tool(&calls);
         let requested = (0..12).map(|n| ("rejecting_tool", serde_json::json!({"n": n}))).collect();
         let (result, outcomes, _, _) = run_tool_script(requested, |registry| { registry.register(rejecting); }, false).await;
         let answer = result.unwrap();
@@ -4056,7 +4108,7 @@ mod tests {
     async fn a_success_resets_the_repairable_failure_budget() {
         let rejecting_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let succeeding_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let rejecting = Arc::new(FailingTool { kind: FailureKind::BadRequest, name: "rejecting_tool", calls: rejecting_calls.clone() });
+        let rejecting = rejecting_tool(&rejecting_calls);
         let succeeding = Arc::new(SucceedingTool { calls: succeeding_calls.clone() });
         let mut requested: Vec<(&'static str, serde_json::Value)> = Vec::new();
         for n in 0..9 { requested.push(("rejecting_tool", serde_json::json!({"n": n}))); }
@@ -4079,13 +4131,55 @@ mod tests {
     #[tokio::test]
     async fn a_batch_of_rejections_runs_fully_and_stops_with_every_call_answered() {
         let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let rejecting = Arc::new(FailingTool { kind: FailureKind::BadRequest, name: "rejecting_tool", calls: calls.clone() });
+        let rejecting = rejecting_tool(&calls);
         let requested = (0..11).map(|n| ("rejecting_tool", serde_json::json!({"n": n}))).collect();
-        let (result, outcomes, _, _) = run_tool_script_batched(requested, |registry| { registry.register(rejecting); }, false, 11).await;
+        let (result, outcomes, _, _) = run_tool_script_with(requested, |registry| { registry.register(rejecting); }, Truncation::Never, 11).await;
         let answer = result.unwrap();
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 11, "every call in the batch must run");
         assert_eq!(outcomes.len(), 11, "every call in the batch must have a result");
         assert!(answer.contains("11 consecutive tool calls failed"), "{answer}");
+    }
+
+    /// Unparsable (truncated) arguments are also rejected before any tool runs, so
+    /// they keep the strict budget of five as well. Every call carries the error.
+    #[tokio::test]
+    async fn truncated_argument_rejections_keep_the_strict_budget() {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let tool = rejecting_tool(&calls);
+        let requested = (0..7).map(|n| ("rejecting_tool", serde_json::json!({"n": n}))).collect();
+        let (result, outcomes, _, _) = run_tool_script_with(requested, |registry| { registry.register(tool); }, Truncation::EveryCall, 1).await;
+        let answer = result.unwrap();
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0, "the tool must not run for unparsable arguments");
+        assert_eq!(outcomes.len(), 5, "truncated-argument rejections stop after five");
+        assert!(answer.contains("5 consecutive tool calls failed"), "{answer}");
+    }
+
+    /// Strict budget, one response: six unknown-outcome failures in a single batch
+    /// all run and are answered (the guard is checked after the whole batch).
+    #[tokio::test]
+    async fn a_batch_of_unknown_outcome_failures_runs_fully_and_stops_with_every_call_answered() {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let failing = Arc::new(FailingTool { kind: FailureKind::ServerError, name: "failing_tool", calls: calls.clone() });
+        let requested = (0..6).map(|n| ("failing_tool", serde_json::json!({"n": n}))).collect();
+        let (result, outcomes, _, _) = run_tool_script_with(requested, |registry| { registry.register(failing); }, Truncation::Never, 6).await;
+        let answer = result.unwrap();
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 6, "every call in the batch must run");
+        assert_eq!(outcomes.len(), 6, "every call in the batch must have a result");
+        assert!(answer.contains("6 consecutive tool calls failed"), "{answer}");
+    }
+
+    /// Same-call guard, one response: three identical failing calls in a single
+    /// batch all run and are answered, then the same-call stop message is used.
+    #[tokio::test]
+    async fn a_batch_of_identical_failing_calls_runs_fully_and_stops_with_every_call_answered() {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let rejecting = rejecting_tool(&calls);
+        let requested = (0..3).map(|_| ("rejecting_tool", serde_json::json!({"same": true}))).collect();
+        let (result, outcomes, _, _) = run_tool_script_with(requested, |registry| { registry.register(rejecting); }, Truncation::Never, 3).await;
+        let answer = result.unwrap();
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 3, "every call in the batch must run");
+        assert_eq!(outcomes.len(), 3, "every call in the batch must have a result");
+        assert!(answer.contains("the same tool call failed 3 times"), "{answer}");
     }
 
     /// Rejections that happen before any tool runs (here an unknown tool name)
@@ -4093,12 +4187,11 @@ mod tests {
     /// budget of five rather than the repairable budget of ten.
     #[tokio::test]
     async fn unknown_tool_rejections_keep_the_strict_budget() {
-        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let tool = Arc::new(FailingTool { kind: FailureKind::Succeeded, name: "failing_tool", calls: calls.clone() });
         let requested = (0..7).map(|n| ("no_such_tool", serde_json::json!({"n": n}))).collect();
-        let (result, outcomes, _, _) = run_tool_script(requested, |registry| { registry.register(tool); }, false).await;
+        let (result, outcomes, _, _) = run_tool_script(requested, |_registry| {}, false).await;
         let answer = result.unwrap();
         assert_eq!(outcomes.len(), 5, "unknown-tool rejections stop after five");
+        assert!(outcomes.iter().all(|o| o.text.contains("Unknown tool 'no_such_tool'")), "persisted results must name the unknown tool: {outcomes:?}");
         assert!(answer.contains("5 consecutive tool calls failed"), "{answer}");
     }
 
@@ -4132,7 +4225,7 @@ mod tests {
     async fn stop_message_reports_the_combined_failure_count() {
         let rejecting_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let failing_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let rejecting = Arc::new(FailingTool { kind: FailureKind::BadRequest, name: "rejecting_tool", calls: rejecting_calls.clone() });
+        let rejecting = rejecting_tool(&rejecting_calls);
         let failing = Arc::new(FailingTool { kind: FailureKind::ServerError, name: "failing_tool", calls: failing_calls.clone() });
         let mut requested: Vec<(&'static str, serde_json::Value)> = Vec::new();
         for n in 0..2 { requested.push(("failing_tool", serde_json::json!({"n": n}))); }
