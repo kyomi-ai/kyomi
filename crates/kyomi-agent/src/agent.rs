@@ -143,8 +143,9 @@ pub(crate) const WRAP_UP_FAILED_MESSAGE: &str =
 const BUDGET_NOTICE_TENTHS: [u32; 2] = [7, 9];
 
 /// Stop a turn after this many failed tool calls, counted since the last
-/// success, whose domain outcome is not `Rejected` (an `Unknown` outcome: the
-/// call may have had an effect, so it is not safely repairable). Tool failures
+/// success, whose outcome is anything other than a definite `Rejected` (an
+/// `Unknown` or `Failed` outcome: the call may have had an effect, so it is not
+/// safely repairable). Tool failures
 /// are returned to the model so it can repair; this bound prevents an unbounded
 /// error loop. Counted separately from
 /// [`MAX_CONSECUTIVE_REJECTED_TOOL_FAILURES`]: neither counter resets the other,
