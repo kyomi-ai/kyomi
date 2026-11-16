@@ -3699,30 +3699,7 @@ mod tests {
         assert_eq!(replay.events.iter().filter(|event| matches!(&event.payload,agent_runtime::PublicPayload::ToolOutcome {text,transport:agent_runtime::TransportOutcome::Failed,domain:agent_runtime::DomainOutcome::Rejected,..} if text.preview.contains("Unknown tool"))).count(),1);
     }
 
-    struct ActualToolsProvider {
-        inner: crate::test_support::ScriptedProvider,
-        requested: Vec<(&'static str, serde_json::Value)>,
-        index: std::sync::atomic::AtomicUsize,
-        truncated: bool,
-    }
-    #[async_trait::async_trait]
-    impl crate::provider::LLMProvider for ActualToolsProvider {
-        async fn complete(&self, messages: &[Message], tools: &[crate::types::Tool], options: &crate::provider::RequestOptions,
-            names: &std::collections::HashMap<String,String>) -> kyomi_core::Result<crate::types::LLMResponse> {
-            let mut response = self.inner.complete(messages, tools, options, names).await?;
-            let index = self.index.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            if let Some((name, arguments)) = self.requested.get(index) {
-                let arguments_error = (self.truncated && index == 0)
-                    .then(|| "arguments could not be parsed as JSON (finish_reason=max_tokens): EOF".to_string());
-                if arguments_error.is_some() {
-                    response.finish_reason = "max_tokens".into();
-                }
-                response.tool_calls = Some(vec![crate::types::ToolCall { id: "repeated-provider-call".into(), name: (*name).into(), arguments: arguments.clone(), arguments_error }]);
-            }
-            Ok(response)
-        }
-        fn model(&self) -> &str { "actual-tool-outcome-fixture" }
-    }
+    use crate::test_support::{ActualToolsProvider, FailingTool, FailureKind, SucceedingTool, Truncation, rejecting_tool};
     async fn actual_tool_outcomes(requested: Vec<(&'static str, serde_json::Value)>) -> (Vec<agent_runtime::DomainOutcome>, Vec<crate::test_support::RecordedCall>) {
         let db = crate::test_support::test_pool().await;
         crate::test_support::seed_user_and_workspace(&db).await;
@@ -3731,7 +3708,7 @@ mod tests {
         let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
         let mut script: Vec<_> = (0..requested.len()).map(|_| crate::test_support::Reply::ToolCall).collect();
         script.push(crate::test_support::Reply::Text("Tool corrections complete".into()));
-        let provider = ActualToolsProvider { inner: crate::test_support::ScriptedProvider {script:std::sync::Mutex::new(script.into()),after_script:crate::test_support::Reply::Text("unexpected".into()),calls:calls.clone()}, requested, index:std::sync::atomic::AtomicUsize::new(0), truncated: false };
+        let provider = ActualToolsProvider { inner: crate::test_support::ScriptedProvider {script:std::sync::Mutex::new(script.into()),after_script:crate::test_support::Reply::Text("unexpected".into()),calls:calls.clone()}, requested, index:std::sync::atomic::AtomicUsize::new(0), truncation: Truncation::Never, batch: 1 };
         let mut registry = crate::tools::ToolRegistry::new();
         registry.register(Arc::new(crate::tools::validate_chartml::ValidateChartmlTool));
         registry.register(Arc::new(crate::tools::datasource::QueryDatasourceTool));
@@ -3759,87 +3736,19 @@ mod tests {
         (outcomes, recorded)
     }
 
-    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-    enum FailureKind {
-        BadRequest,
-        ServerError,
-        Timeout,
-        UnknownResult,
-        Panic,
-        ResultPanic,
-        TransportError,
-        NotFound,
-        Forbidden,
-        BadRequestAfterEffect,
-        MutatingUnknown,
-        RejectedResult,
-        Succeeded,
-    }
-
-    struct FailingTool {
-        kind: FailureKind,
-        calls: Arc<std::sync::atomic::AtomicUsize>,
-    }
-
-    #[async_trait::async_trait]
-    impl crate::tools::AgentTool for FailingTool {
-        fn name(&self) -> &str { "failing_tool" }
-        fn description(&self) -> &str { "Failure-class fixture" }
-        fn parameters_schema(&self) -> serde_json::Value { serde_json::json!({"type":"object","properties":{}}) }
-        fn bad_request_is_pre_effect(&self) -> bool {
-            self.kind != FailureKind::BadRequestAfterEffect
-        }
-        fn result_domain_outcome(&self, text: &str) -> agent_runtime::DomainOutcome {
-            if self.kind == FailureKind::ResultPanic {
-                panic!("result classification exploded");
-            }
-            if self.kind == FailureKind::UnknownResult {
-                agent_runtime::DomainOutcome::Unknown
-            } else if text.contains("\"error\"") || text.contains("\"valid\":false") {
-                agent_runtime::DomainOutcome::Rejected
-            } else {
-                agent_runtime::DomainOutcome::Succeeded
+    /// Every `ToolIntent` id must have a matching `ToolOutcome` id. A plain function,
+    /// not inline in the async harness, to keep that future's frame small.
+    fn assert_every_requested_call_answered<'a>(payloads: impl Iterator<Item = &'a agent_runtime::PublicPayload>) {
+        let (mut intents, mut answered) = (std::collections::BTreeSet::new(), std::collections::BTreeSet::new());
+        for payload in payloads {
+            match payload {
+                agent_runtime::PublicPayload::ToolIntent { tool_call_id, .. } => { intents.insert(tool_call_id.as_str().to_string()); }
+                agent_runtime::PublicPayload::ToolOutcome { tool_call_id, .. } => { answered.insert(tool_call_id.as_str().to_string()); }
+                _ => {}
             }
         }
-        async fn execute(&self, _: serde_json::Value, ctx: &crate::tools::ToolContext) -> kyomi_core::Result<String> {
-            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            match self.kind {
-                FailureKind::BadRequest => Err(kyomi_core::Error::BadRequest("Missing required parameter 'x'".into())),
-                FailureKind::ServerError => Err(kyomi_core::Error::ServiceUnavailable("provider server exploded".into())),
-                FailureKind::Timeout => Err(kyomi_core::Error::ServiceUnavailable("timed out waiting for provider".into())),
-                FailureKind::UnknownResult => Ok("{\"error\":\"timeout after commit; unknown_after_commit\"}".into()),
-                FailureKind::Panic => panic!("tool exploded"),
-                FailureKind::ResultPanic => Ok("{\"ok\":true}".into()),
-                FailureKind::TransportError => Err(kyomi_core::Error::DatasourceConnection("connection reset by peer".into())),
-                FailureKind::NotFound => Err(kyomi_core::Error::NotFound("datasource 'missing' not found".into())),
-                FailureKind::Forbidden => Err(kyomi_core::Error::Forbidden("document scope denied".into())),
-                FailureKind::BadRequestAfterEffect => {
-                    kyomi_core::db_execute!(&ctx.db, "UPDATE workspaces SET name='mutated once' WHERE workspace_id = $1", &ctx.workspace_id).unwrap();
-                    Err(kyomi_core::Error::BadRequest("partial effect then validation failed".into()))
-                }
-                FailureKind::MutatingUnknown => {
-                    kyomi_core::db_execute!(&ctx.db, "UPDATE workspaces SET name='mutated once' WHERE workspace_id = $1", &ctx.workspace_id).unwrap();
-                    Err(kyomi_core::Error::ServiceUnavailable("mutated then lost acknowledgement".into()))
-                }
-                FailureKind::RejectedResult => Ok("{\"valid\":false}".into()),
-                FailureKind::Succeeded => Ok("{\"ok\":true}".into()),
-            }
-        }
-    }
-
-    struct SucceedingTool {
-        calls: Arc<std::sync::atomic::AtomicUsize>,
-    }
-
-    #[async_trait::async_trait]
-    impl crate::tools::AgentTool for SucceedingTool {
-        fn name(&self) -> &str { "succeeding_tool" }
-        fn description(&self) -> &str { "Succeeding fixture" }
-        fn parameters_schema(&self) -> serde_json::Value { serde_json::json!({"type":"object","properties":{}}) }
-        async fn execute(&self, _: serde_json::Value, _: &crate::tools::ToolContext) -> kyomi_core::Result<String> {
-            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            Ok("{\"ok\":true}".into())
-        }
+        assert!(intents.is_subset(&answered), "every requested tool call needs an outcome: requested={intents:?} answered={answered:?}");
+        // The batch tests assert the outcome count too, so this cannot pass vacuously there.
     }
 
     async fn run_tool_script(
@@ -3847,14 +3756,26 @@ mod tests {
         register: impl FnOnce(&mut crate::tools::ToolRegistry),
         truncated: bool,
     ) -> (Result<String, kyomi_core::Error>, Vec<agent_runtime::ToolOutcome>, Vec<crate::test_support::RecordedCall>, kyomi_core::DbPool) {
+        let truncation = if truncated { Truncation::FirstCall } else { Truncation::Never };
+        run_tool_script_with(requested, register, truncation, 1).await
+    }
+
+    /// Like `run_tool_script`, but the model returns `batch` tool calls in each
+    /// response and `truncation` selects which calls carry unparsable arguments.
+    async fn run_tool_script_with(
+        requested: Vec<(&'static str, serde_json::Value)>,
+        register: impl FnOnce(&mut crate::tools::ToolRegistry),
+        truncation: Truncation,
+        batch: usize,
+    ) -> (Result<String, kyomi_core::Error>, Vec<agent_runtime::ToolOutcome>, Vec<crate::test_support::RecordedCall>, kyomi_core::DbPool) {
         let db = crate::test_support::test_pool().await;
         crate::test_support::seed_user_and_workspace(&db).await;
         let key = Arc::new([7u8;32]); let session = uuid::Uuid::new_v4().to_string();
         let (user, assistant) = claim_durable_message(&db,&key,&session,"investigate revenue",chrono::Utc::now().timestamp_millis(),30_000).await;
         let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let mut script: Vec<_> = (0..requested.len()).map(|_| crate::test_support::Reply::ToolCall).collect();
+        let mut script: Vec<_> = (0..requested.len().div_ceil(batch)).map(|_| crate::test_support::Reply::ToolCall).collect();
         script.push(crate::test_support::Reply::Text("Handled the tool error".into()));
-        let provider = ActualToolsProvider { inner: crate::test_support::ScriptedProvider {script:std::sync::Mutex::new(script.into()),after_script:crate::test_support::Reply::Text("unexpected".into()),calls:calls.clone()}, requested, index:std::sync::atomic::AtomicUsize::new(0), truncated };
+        let provider = ActualToolsProvider { inner: crate::test_support::ScriptedProvider {script:std::sync::Mutex::new(script.into()),after_script:crate::test_support::Reply::Text("unexpected".into()),calls:calls.clone()}, requested, index:std::sync::atomic::AtomicUsize::new(0), truncation, batch };
         let mut registry = crate::tools::ToolRegistry::new();
         register(&mut registry);
         let agent = CustomAgent::new(Box::new(provider),crate::agent::AgentConfig::default(),Arc::new(registry),crate::test_support::build_ctx(db.clone()),std::collections::HashMap::new());
@@ -3868,11 +3789,22 @@ mod tests {
         let answer = adapter.chat(ChatParams {message:"correct tool errors",cancel_token:CancellationToken::new(),current_time_user_tz:None,message_source:Some("web"),user_id:Some("user-a"),user_message_persistence:&user,assistant_message_persistence:&assistant}).await;
         let run = assistant.durable_run().unwrap();
         let store = kyomi_auth::conversation_events::ConversationStore::new(&db,&key,"user-a","ws-1");
-        let replay = store.replay(&run.conversation_id,0,100).await.unwrap();
-        let outcomes: Vec<_> = replay.events.iter().filter_map(|event| match &event.payload {
+        let mut replay_events = Vec::new();
+        let mut after = 0;
+        loop {
+            let batch = store.replay(&run.conversation_id, after, 100).await.unwrap();
+            replay_events.extend(batch.events);
+            after = batch.scanned_through;
+            if !batch.has_more { break; }
+        }
+        let outcomes: Vec<_> = replay_events.iter().filter_map(|event| match &event.payload {
             agent_runtime::PublicPayload::ToolOutcome {transport,domain,text,..} => Some(agent_runtime::ToolOutcome { transport: transport.clone(), domain: domain.clone(), text: text.preview.clone() }),
             _ => None,
         }).collect();
+        // Every tool call the model requested must have an outcome, even when a failure
+        // guard ends the turn mid-batch. The whole run was replayed above, so this
+        // always checks the complete history.
+        assert_every_requested_call_answered(replay_events.iter().map(|event| &event.payload));
         let recorded = std::mem::take(&mut *calls.lock().unwrap());
         (answer, outcomes, recorded, db)
     }
@@ -3898,7 +3830,7 @@ mod tests {
         ];
         for case in cases {
             let tool_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-            let tool = Arc::new(FailingTool { kind: case.kind, calls: tool_calls.clone() });
+            let tool = Arc::new(FailingTool { kind: case.kind, name: "failing_tool", calls: tool_calls.clone() });
             let (result, outcomes, recorded, db) = run_tool_script(
                 vec![(case.name, case.args.clone())],
                 |registry| { registry.register(tool); },
@@ -3928,7 +3860,7 @@ mod tests {
     #[tokio::test]
     async fn repeated_identical_failing_tool_call_stops_with_human_message() {
         let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let tool = Arc::new(FailingTool { kind: FailureKind::BadRequest, calls: calls.clone() });
+        let tool = Arc::new(FailingTool { kind: FailureKind::BadRequest, name: "failing_tool", calls: calls.clone() });
         let requested = (0..5).map(|_| ("failing_tool", serde_json::json!({}))).collect();
         let (result, outcomes, _, _) = run_tool_script(requested, |registry| { registry.register(tool); }, false).await;
         let answer = result.unwrap();
@@ -3942,7 +3874,9 @@ mod tests {
     #[tokio::test]
     async fn consecutive_failing_tool_calls_stop_with_human_message() {
         let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let tool = Arc::new(FailingTool { kind: FailureKind::BadRequest, calls: calls.clone() });
+        // ServerError is an unknown-outcome failure (not a definite rejection),
+        // so it keeps the strict five-failure budget.
+        let tool = Arc::new(FailingTool { kind: FailureKind::ServerError, name: "failing_tool", calls: calls.clone() });
         let requested = (0..6).map(|n| ("failing_tool", serde_json::json!({"n": n}))).collect();
         let (result, outcomes, _, _) = run_tool_script(requested, |registry| { registry.register(tool); }, false).await;
         let answer = result.unwrap();
@@ -3953,11 +3887,212 @@ mod tests {
         assert!(!answer.contains("tool outcome is unknown after execution"), "{answer}");
     }
 
+    /// KYO-970: a model repairing a hard query makes several *different*
+    /// repairable mistakes in a row. Four distinct rejections followed by one
+    /// unknown-outcome failure is real progress, not a loop, and must not end
+    /// the turn (the 2026-11-15 production sequence).
+    #[tokio::test]
+    async fn distinct_repairable_rejections_do_not_exhaust_the_strict_budget() {
+        let rejecting_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let failing_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let rejecting = rejecting_tool(&rejecting_calls);
+        let failing = Arc::new(FailingTool { kind: FailureKind::ServerError, name: "failing_tool", calls: failing_calls.clone() });
+        let mut requested: Vec<(&'static str, serde_json::Value)> =
+            (0..4).map(|n| ("rejecting_tool", serde_json::json!({"n": n}))).collect();
+        requested.push(("failing_tool", serde_json::json!({"n": 99})));
+        let (result, outcomes, _, _) = run_tool_script(
+            requested,
+            |registry| { registry.register(rejecting); registry.register(failing); },
+            false,
+        ).await;
+        let answer = result.unwrap();
+        assert_eq!(rejecting_calls.load(std::sync::atomic::Ordering::SeqCst), 4);
+        assert_eq!(failing_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(outcomes.len(), 5, "all five calls must run");
+        assert_eq!(answer, "Handled the tool error");
+    }
+
+    /// The two budgets are independent: four unknown-outcome failures (below
+    /// the strict five) plus nine rejections (below ten) must not stop the turn.
+    #[tokio::test]
+    async fn strict_and_repairable_budgets_are_counted_separately() {
+        let rejecting_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let failing_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let rejecting = rejecting_tool(&rejecting_calls);
+        let failing = Arc::new(FailingTool { kind: FailureKind::ServerError, name: "failing_tool", calls: failing_calls.clone() });
+        let mut requested: Vec<(&'static str, serde_json::Value)> = Vec::new();
+        for n in 0..4 { requested.push(("failing_tool", serde_json::json!({"n": n}))); }
+        for n in 0..9 { requested.push(("rejecting_tool", serde_json::json!({"n": n}))); }
+        let (result, _, _, _) = run_tool_script(
+            requested,
+            |registry| { registry.register(rejecting); registry.register(failing); },
+            false,
+        ).await;
+        let answer = result.unwrap();
+        assert_eq!(failing_calls.load(std::sync::atomic::Ordering::SeqCst), 4);
+        assert_eq!(rejecting_calls.load(std::sync::atomic::Ordering::SeqCst), 9);
+        assert_eq!(answer, "Handled the tool error");
+    }
+
+    /// The larger rejection budget is still finite: ten consecutive distinct
+    /// repairable rejections end the turn with the human message.
+    #[tokio::test]
+    async fn ten_consecutive_repairable_rejections_stop_with_human_message() {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let rejecting = rejecting_tool(&calls);
+        let requested = (0..12).map(|n| ("rejecting_tool", serde_json::json!({"n": n}))).collect();
+        let (result, outcomes, _, _) = run_tool_script(requested, |registry| { registry.register(rejecting); }, false).await;
+        let answer = result.unwrap();
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 10, "stop after ten repairable rejections");
+        assert_eq!(outcomes.len(), 10);
+        assert!(answer.contains("10 consecutive tool calls failed"), "{answer}");
+        assert!(answer.contains("I did not retry automatically"), "{answer}");
+    }
+
+    /// A success clears the repairable-rejection counter: nine rejections, a
+    /// success, then nine more must not reach the budget of ten.
+    #[tokio::test]
+    async fn a_success_resets_the_repairable_failure_budget() {
+        let rejecting_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let succeeding_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let rejecting = rejecting_tool(&rejecting_calls);
+        let succeeding = Arc::new(SucceedingTool { calls: succeeding_calls.clone() });
+        let mut requested: Vec<(&'static str, serde_json::Value)> = Vec::new();
+        for n in 0..9 { requested.push(("rejecting_tool", serde_json::json!({"n": n}))); }
+        requested.push(("succeeding_tool", serde_json::json!({})));
+        for n in 100..109 { requested.push(("rejecting_tool", serde_json::json!({"n": n}))); }
+        let (result, _, _, _) = run_tool_script(
+            requested,
+            |registry| { registry.register(rejecting); registry.register(succeeding); },
+            false,
+        ).await;
+        let answer = result.unwrap();
+        assert_eq!(rejecting_calls.load(std::sync::atomic::Ordering::SeqCst), 18);
+        assert_eq!(succeeding_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(answer, "Handled the tool error");
+    }
+
+    /// One model response carrying more calls than the repairable budget: the
+    /// guard is checked after the whole batch, so every call still runs and gets
+    /// a result, and the stop message reports the batch count (11 here).
+    #[tokio::test]
+    async fn a_batch_of_rejections_runs_fully_and_stops_with_every_call_answered() {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let rejecting = rejecting_tool(&calls);
+        let requested = (0..11).map(|n| ("rejecting_tool", serde_json::json!({"n": n}))).collect();
+        let (result, outcomes, _, _) = run_tool_script_with(requested, |registry| { registry.register(rejecting); }, Truncation::Never, 11).await;
+        let answer = result.unwrap();
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 11, "every call in the batch must run");
+        assert_eq!(outcomes.len(), 11, "every call in the batch must have a result");
+        assert!(answer.contains("11 consecutive tool calls failed"), "{answer}");
+    }
+
+    /// Unparsable (truncated) arguments are also rejected before any tool runs, so
+    /// they keep the strict budget of five as well. Every call carries the error.
+    #[tokio::test]
+    async fn truncated_argument_rejections_keep_the_strict_budget() {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let tool = rejecting_tool(&calls);
+        let requested = (0..7).map(|n| ("rejecting_tool", serde_json::json!({"n": n}))).collect();
+        let (result, outcomes, _, _) = run_tool_script_with(requested, |registry| { registry.register(tool); }, Truncation::EveryCall, 1).await;
+        let answer = result.unwrap();
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0, "the tool must not run for unparsable arguments");
+        assert_eq!(outcomes.len(), 5, "truncated-argument rejections stop after five");
+        assert!(answer.contains("5 consecutive tool calls failed"), "{answer}");
+    }
+
+    /// Strict budget, one response: six unknown-outcome failures in a single batch
+    /// all run and are answered (the guard is checked after the whole batch).
+    #[tokio::test]
+    async fn a_batch_of_unknown_outcome_failures_runs_fully_and_stops_with_every_call_answered() {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let failing = Arc::new(FailingTool { kind: FailureKind::ServerError, name: "failing_tool", calls: calls.clone() });
+        let requested = (0..6).map(|n| ("failing_tool", serde_json::json!({"n": n}))).collect();
+        let (result, outcomes, _, _) = run_tool_script_with(requested, |registry| { registry.register(failing); }, Truncation::Never, 6).await;
+        let answer = result.unwrap();
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 6, "every call in the batch must run");
+        assert_eq!(outcomes.len(), 6, "every call in the batch must have a result");
+        assert!(answer.contains("6 consecutive tool calls failed"), "{answer}");
+    }
+
+    /// Same-call guard, one response: three identical failing calls in a single
+    /// batch all run and are answered, then the same-call stop message is used.
+    #[tokio::test]
+    async fn a_batch_of_identical_failing_calls_runs_fully_and_stops_with_every_call_answered() {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let rejecting = rejecting_tool(&calls);
+        let requested = (0..3).map(|_| ("rejecting_tool", serde_json::json!({"same": true}))).collect();
+        let (result, outcomes, _, _) = run_tool_script_with(requested, |registry| { registry.register(rejecting); }, Truncation::Never, 3).await;
+        let answer = result.unwrap();
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 3, "every call in the batch must run");
+        assert_eq!(outcomes.len(), 3, "every call in the batch must have a result");
+        assert!(answer.contains("the same tool call failed 3 times"), "{answer}");
+    }
+
+    /// Rejections that happen before any tool runs (here an unknown tool name)
+    /// give the model nothing to repair incrementally, so they keep the strict
+    /// budget of five rather than the repairable budget of ten.
+    #[tokio::test]
+    async fn unknown_tool_rejections_keep_the_strict_budget() {
+        let requested = (0..7).map(|n| ("no_such_tool", serde_json::json!({"n": n}))).collect();
+        let (result, outcomes, _, _) = run_tool_script(requested, |_registry| {}, false).await;
+        let answer = result.unwrap();
+        assert_eq!(outcomes.len(), 5, "unknown-tool rejections stop after five");
+        assert!(outcomes.iter().all(|o| o.text.contains("Unknown tool 'no_such_tool'")), "persisted results must name the unknown tool: {outcomes:?}");
+        assert!(answer.contains("5 consecutive tool calls failed"), "{answer}");
+    }
+
+    /// A success also clears the strict counter: four unknown-outcome failures,
+    /// a success, then four more must not reach the strict budget of five.
+    #[tokio::test]
+    async fn a_success_resets_the_strict_failure_budget() {
+        let failing_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let succeeding_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let failing = Arc::new(FailingTool { kind: FailureKind::ServerError, name: "failing_tool", calls: failing_calls.clone() });
+        let succeeding = Arc::new(SucceedingTool { calls: succeeding_calls.clone() });
+        let mut requested: Vec<(&'static str, serde_json::Value)> = Vec::new();
+        for n in 0..4 { requested.push(("failing_tool", serde_json::json!({"n": n}))); }
+        requested.push(("succeeding_tool", serde_json::json!({})));
+        for n in 100..104 { requested.push(("failing_tool", serde_json::json!({"n": n}))); }
+        let (result, _, _, _) = run_tool_script(
+            requested,
+            |registry| { registry.register(failing); registry.register(succeeding); },
+            false,
+        ).await;
+        let answer = result.unwrap();
+        assert_eq!(failing_calls.load(std::sync::atomic::Ordering::SeqCst), 8);
+        assert_eq!(succeeding_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(answer, "Handled the tool error");
+    }
+
+    /// The stop message reports the combined count when both counters are
+    /// non-zero: two unknown-outcome failures then ten rejections stop on the
+    /// tenth rejection, with twelve consecutive failures since the last success.
+    #[tokio::test]
+    async fn stop_message_reports_the_combined_failure_count() {
+        let rejecting_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let failing_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let rejecting = rejecting_tool(&rejecting_calls);
+        let failing = Arc::new(FailingTool { kind: FailureKind::ServerError, name: "failing_tool", calls: failing_calls.clone() });
+        let mut requested: Vec<(&'static str, serde_json::Value)> = Vec::new();
+        for n in 0..2 { requested.push(("failing_tool", serde_json::json!({"n": n}))); }
+        for n in 0..11 { requested.push(("rejecting_tool", serde_json::json!({"n": n}))); }
+        let (result, _, _, _) = run_tool_script(
+            requested,
+            |registry| { registry.register(rejecting); registry.register(failing); },
+            false,
+        ).await;
+        let answer = result.unwrap();
+        assert_eq!(failing_calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert_eq!(rejecting_calls.load(std::sync::atomic::Ordering::SeqCst), 10, "stop on the tenth rejection");
+        assert!(answer.contains("12 consecutive tool calls failed"), "{answer}");
+    }
+
     #[tokio::test]
     async fn same_failing_call_interleaved_with_successes_stops_with_human_message() {
         let failing_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let succeeding_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let failing = Arc::new(FailingTool { kind: FailureKind::BadRequest, calls: failing_calls.clone() });
+        let failing = Arc::new(FailingTool { kind: FailureKind::BadRequest, name: "failing_tool", calls: failing_calls.clone() });
         let succeeding = Arc::new(SucceedingTool { calls: succeeding_calls.clone() });
         let requested = vec![
             ("failing_tool", serde_json::json!({})),
@@ -3983,7 +4118,7 @@ mod tests {
     async fn alternating_failing_calls_with_successes_stop_at_the_same_call_limit() {
         let failing_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let succeeding_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let failing = Arc::new(FailingTool { kind: FailureKind::BadRequest, calls: failing_calls.clone() });
+        let failing = Arc::new(FailingTool { kind: FailureKind::BadRequest, name: "failing_tool", calls: failing_calls.clone() });
         let succeeding = Arc::new(SucceedingTool { calls: succeeding_calls.clone() });
         let requested = vec![
             ("failing_tool", serde_json::json!({"fail": "a"})),
@@ -4012,7 +4147,7 @@ mod tests {
     #[tokio::test]
     async fn durable_truncated_tool_arguments_are_rejected_and_continue_without_execution() {
         let tool_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let tool = Arc::new(FailingTool { kind: FailureKind::Succeeded, calls: tool_calls.clone() });
+        let tool = Arc::new(FailingTool { kind: FailureKind::Succeeded, name: "failing_tool", calls: tool_calls.clone() });
         let (result, outcomes, recorded, _) = run_tool_script(
             vec![("failing_tool", serde_json::json!({}))],
             |registry| { registry.register(tool); },

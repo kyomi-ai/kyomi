@@ -142,10 +142,29 @@ pub(crate) const WRAP_UP_FAILED_MESSAGE: &str =
 /// entry as the most urgent one.
 const BUDGET_NOTICE_TENTHS: [u32; 2] = [7, 9];
 
-/// Stop a turn after this many consecutive failed tool calls. Tool failures
-/// (including rejected arguments and unknown outcomes) are returned to the
-/// model so it can repair; this bound prevents an unbounded error loop.
+/// Strict budget: stop a turn after this many failed tool calls, counted since
+/// the last success, that are NOT repairable rejections (see
+/// [`is_repairable_rejection`]). That is every unknown-outcome failure (the call
+/// may have had an effect) and every rejection that happens before a tool runs
+/// (an unknown tool name, unparsable or truncated arguments), which gives the
+/// model nothing to repair incrementally. Tool failures are returned to the
+/// model so it can repair; this bound prevents an unbounded error loop. Counted
+/// separately from [`MAX_CONSECUTIVE_REJECTED_TOOL_FAILURES`]: neither counter
+/// resets the other, only a success resets both.
 const MAX_CONSECUTIVE_TOOL_FAILURES: usize = 5;
+
+/// Repairable budget: stop a turn after this many repairable rejections, counted
+/// since the last success. A repairable rejection (see
+/// [`is_repairable_rejection`]) is a definite, effect-free rejection returned by
+/// a real tool that ran with parsed arguments (for example a SQL analysis
+/// error). Fixing a hard query legitimately takes several such repairs, each
+/// with a different call, so this budget is larger than
+/// [`MAX_CONSECUTIVE_TOOL_FAILURES`]. Counted independently of it: a failure of
+/// the other class does not reset this count, so a turn can run up to 4 strict
+/// plus 9 repairable failures before either cap trips. A genuinely stuck model
+/// repeating the same call is still caught by [`MAX_SAME_FAILING_TOOL_CALLS`],
+/// and the turn's iteration and duration budgets still apply.
+const MAX_CONSECUTIVE_REJECTED_TOOL_FAILURES: usize = 10;
 
 /// Stop a turn when the same tool call (name + arguments) fails this many times,
 /// even when other successful calls reset the general failure count. A success
@@ -613,6 +632,7 @@ impl CustomAgent {
         // Bounded error-loop guard: tool failures are returned to the model,
         // but repeated failures must not run forever.
         let mut consecutive_tool_failures = 0usize;
+        let mut consecutive_rejected_failures = 0usize;
         let mut same_call_failures: HashMap<String, (usize, String)> = HashMap::new();
         let mut last_tool_error = String::new();
 
@@ -854,6 +874,7 @@ impl CustomAgent {
                     self.execute_tool(tool_call).await
                 };
                 let succeeded = outcome.succeeded();
+                let rejected = is_repairable_rejection(tool_call, &outcome);
                 let result = outcome.text;
                 self.state.messages.push(Message::tool_result(
                     &tool_call.id,
@@ -865,12 +886,17 @@ impl CustomAgent {
                 }
                 if succeeded {
                     consecutive_tool_failures = 0;
+                    consecutive_rejected_failures = 0;
                     // A success clears this call's repeat count; other calls'
                     // counts survive so alternating failures cannot evade the
                     // same-call guard.
                     same_call_failures.remove(&tool_call_fingerprint(tool_call));
                 } else {
-                    consecutive_tool_failures += 1;
+                    if rejected {
+                        consecutive_rejected_failures += 1;
+                    } else {
+                        consecutive_tool_failures += 1;
+                    }
                     last_tool_error = result.clone();
                     let entry = same_call_failures
                         .entry(tool_call_fingerprint(tool_call))
@@ -905,6 +931,7 @@ impl CustomAgent {
                 .map(|(count, error)| (*count, error.as_str()))
                 .unwrap_or((0, ""));
             if consecutive_tool_failures >= MAX_CONSECUTIVE_TOOL_FAILURES
+                || consecutive_rejected_failures >= MAX_CONSECUTIVE_REJECTED_TOOL_FAILURES
                 || repeated_call_failures >= MAX_SAME_FAILING_TOOL_CALLS
             {
                 let guard_error = if repeated_call_failures >= MAX_SAME_FAILING_TOOL_CALLS {
@@ -913,7 +940,7 @@ impl CustomAgent {
                     last_tool_error.as_str()
                 };
                 let message = tool_failure_guard_message(
-                    consecutive_tool_failures,
+                    consecutive_tool_failures + consecutive_rejected_failures,
                     repeated_call_failures,
                     guard_error,
                 );
@@ -1507,6 +1534,39 @@ impl agent_runtime::ToolExecution for RuntimeTool<'_> {
     }
 }
 
+/// Model-facing text prefix for a call to a tool name that is not registered.
+/// This is persisted wire text: [`unknown_tool_text`] formats it and
+/// [`is_repairable_rejection`] reads it back from the stored outcome, so it must
+/// not change without migrating how stored outcomes are classified.
+const UNKNOWN_TOOL_PREFIX: &str = "Error: Unknown tool '";
+
+/// The model-facing text for a call to an unregistered tool. The single producer
+/// of [`UNKNOWN_TOOL_PREFIX`] text.
+fn unknown_tool_text(name: &str, available: &str) -> String {
+    format!("{UNKNOWN_TOOL_PREFIX}{name}'. Available tools: {available}")
+}
+
+/// Whether a failed tool call is a *repairable rejection*: a definite
+/// (`DomainOutcome::Rejected`), effect-free rejection returned by a real tool
+/// that ran with parsed arguments. This includes a real tool's own
+/// `BadRequest` (for example a missing required parameter). A rejection that
+/// happens before any tool runs (unparsable or truncated arguments, an unknown
+/// tool name) is not repairable in this sense and keeps the strict failure
+/// budget.
+///
+/// Derived only from the call and outcome values (`arguments_error` travels with
+/// the serialized `ToolCall`; domain, transport and text come from the stored
+/// outcome), never from live registry state. The unknown-tool case requires
+/// `TransportOutcome::Failed`, the only transport [`tool_outcome`] produces for
+/// it, so a real tool that merely returns similar text cannot be misread.
+fn is_repairable_rejection(call: &ToolCall, outcome: &agent_runtime::ToolOutcome) -> bool {
+    let unknown_tool = outcome.transport == agent_runtime::TransportOutcome::Failed
+        && outcome.text.starts_with(UNKNOWN_TOOL_PREFIX);
+    outcome.domain == agent_runtime::DomainOutcome::Rejected
+        && call.arguments_error.is_none()
+        && !unknown_tool
+}
+
 /// Execute one tool call and classify every failure into a model-facing
 /// `ToolOutcome`. A panic inside the tool is caught and becomes an Unknown
 /// outcome with verify-before-retry guidance; it never escapes the turn.
@@ -1522,7 +1582,7 @@ async fn tool_outcome(
     }
     let Some(tool) = agent.registry.get_tool(&call.name) else {
         return ToolOutcome { transport: TransportOutcome::Failed, domain: DomainOutcome::Rejected,
-            text: format!("Error: Unknown tool '{}'. Available tools: {}", call.name, agent.registry.tool_names().join(", ")) };
+            text: unknown_tool_text(&call.name, &agent.registry.tool_names().join(", ")) };
     };
     // The panic boundary covers the whole tool call, including the tool's own
     // result classification: a buggy tool must never escape the turn.
@@ -1613,6 +1673,106 @@ mod tests {
             block("release").contains("panic = \"unwind\""),
             "the release profile must set panic = \"unwind\" explicitly"
         );
+    }
+
+    fn call_with(arguments_error: Option<&str>) -> ToolCall {
+        ToolCall {
+            id: "tc".into(),
+            name: "some_tool".into(),
+            arguments: serde_json::json!({}),
+            arguments_error: arguments_error.map(str::to_string),
+        }
+    }
+
+    fn outcome_with(
+        transport: agent_runtime::TransportOutcome,
+        domain: agent_runtime::DomainOutcome,
+        text: &str,
+    ) -> agent_runtime::ToolOutcome {
+        agent_runtime::ToolOutcome { transport, domain, text: text.into() }
+    }
+
+    /// KYO-970: the single definition of a repairable rejection. Only a Rejected
+    /// outcome from a real tool with parsed arguments qualifies; every other
+    /// failure keeps the strict budget. Pure function of the call and outcome.
+    #[test]
+    fn repairable_rejection_classification_matrix() {
+        use agent_runtime::{DomainOutcome as D, TransportOutcome as T};
+        let ok_call = call_with(None);
+        // Real tool, definite rejection (Err(BadRequest) pre-effect, or Ok(error JSON)).
+        assert!(is_repairable_rejection(&ok_call, &outcome_with(T::Failed, D::Rejected, "Tool 'x' failed: bad")));
+        assert!(is_repairable_rejection(&ok_call, &outcome_with(T::Completed, D::Rejected, "{\"error\":\"bad sql\"}")));
+        // Rejected before any tool ran: truncated/unparsable arguments.
+        assert!(!is_repairable_rejection(&call_with(Some("EOF")), &outcome_with(T::Failed, D::Rejected, "Tool call 'x' was not executed")));
+        // Rejected before any tool ran: unknown tool name (text produced by tool_outcome).
+        let unknown = unknown_tool_text("nope", "a, b");
+        assert!(!is_repairable_rejection(&ok_call, &outcome_with(T::Failed, D::Rejected, &unknown)));
+        // A real tool that merely RETURNS similar text (transport Completed) is still repairable.
+        assert!(is_repairable_rejection(&ok_call, &outcome_with(T::Completed, D::Rejected, &unknown)));
+        // Unknown outcome (may have had an effect) and success are never repairable rejections.
+        assert!(!is_repairable_rejection(&ok_call, &outcome_with(T::Failed, D::Unknown, "boom")));
+        assert!(!is_repairable_rejection(&ok_call, &outcome_with(T::Unknown, D::Unknown, "lost")));
+        assert!(!is_repairable_rejection(&ok_call, &outcome_with(T::Completed, D::Succeeded, "{}")));
+    }
+
+    /// Agent on the legacy (non-runtime) path whose model issues one tool call per
+    /// response, `names[i]` on response `i` with distinct arguments, then answers "done".
+    async fn legacy_agent(names: Vec<&'static str>) -> CustomAgent {
+        let requested: Vec<(&'static str, serde_json::Value)> = names
+            .iter()
+            .enumerate()
+            .map(|(i, name)| (*name, serde_json::json!({ "n": i })))
+            .collect();
+        let mut script: Vec<Reply> = vec![Reply::ToolCall; requested.len()];
+        script.push(Reply::Text("done".to_string()));
+        let provider = ActualToolsProvider {
+            inner: ScriptedProvider {
+                script: Mutex::new(script.into()),
+                after_script: Reply::Text("unexpected".to_string()),
+                calls: Arc::new(Mutex::new(Vec::new())),
+            },
+            requested,
+            index: std::sync::atomic::AtomicUsize::new(0),
+            truncation: Truncation::Never,
+            batch: 1,
+        };
+        let mut registry = ToolRegistry::new();
+        registry.register(Arc::new(FailingTool {
+            kind: FailureKind::BadRequest,
+            name: "legacy_reject",
+            calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        }));
+        CustomAgent::new(
+            Box::new(provider),
+            AgentConfig { max_iterations: 25, ..Default::default() },
+            Arc::new(registry),
+            test_tool_context().await,
+            HashMap::new(),
+        )
+    }
+
+    /// Non-runtime path: nine distinct repairable rejections do not stop the turn.
+    #[tokio::test]
+    async fn legacy_path_nine_repairable_rejections_do_not_stop_the_turn() {
+        let mut agent = legacy_agent(vec!["legacy_reject"; 9]).await;
+        let answer = agent.chat("hello", CancellationToken::new(), None, None, None).await.unwrap();
+        assert_eq!(answer, "done");
+    }
+
+    /// Non-runtime path: the tenth consecutive repairable rejection stops the turn.
+    #[tokio::test]
+    async fn legacy_path_ten_repairable_rejections_stop_the_turn() {
+        let mut agent = legacy_agent(vec!["legacy_reject"; 12]).await;
+        let answer = agent.chat("hello", CancellationToken::new(), None, None, None).await.unwrap();
+        assert!(answer.contains("10 consecutive tool calls failed"), "{answer}");
+    }
+
+    /// Non-runtime path: unknown-tool rejections keep the strict budget of five.
+    #[tokio::test]
+    async fn legacy_path_unknown_tool_rejections_keep_the_strict_budget() {
+        let mut agent = legacy_agent(vec!["no_such_tool"; 7]).await;
+        let answer = agent.chat("hello", CancellationToken::new(), None, None, None).await.unwrap();
+        assert!(answer.contains("5 consecutive tool calls failed"), "{answer}");
     }
 
     #[test]
@@ -2214,7 +2374,7 @@ Chart 2:\n```chartml\ntype: chart\nversion: 1\ndata:\n  datasource: test\n  quer
     // drive the same ToolCall-then-Text scripting through a full
     // `ChatAgentAdapter::chat()` turn without a second copy. See that
     // module's doc comment on the extraction.
-    use crate::test_support::{NoopTool, RecordedCall, Reply, ScriptedProvider};
+    use crate::test_support::{ActualToolsProvider, FailingTool, FailureKind, NoopTool, RecordedCall, Reply, ScriptedProvider, Truncation};
 
     /// Build a `ToolContext` over an in-memory sqlite pool and in-memory KV
     /// store. `session_id: None` keeps the agent off the ChartML validation
