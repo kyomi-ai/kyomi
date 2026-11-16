@@ -688,7 +688,21 @@ pub async fn execute_agent_chat(
             &usage.extra_metadata,
             None::<&str>
         ) {
-            warn!(error = %e, "Failed to log API usage to database");
+            // The only legacy billing write: a failure means this run is not billed.
+            // Log everything needed to reconstruct the row by hand.
+            error!(
+                error = %e,
+                user_id = %config.user_id,
+                workspace_id = %config.workspace_id,
+                session_id = %config.session_id,
+                model = %usage.model,
+                input_tokens = usage.input_tokens,
+                output_tokens = usage.output_tokens,
+                cache_creation_input_tokens = usage.cache_creation_input_tokens,
+                cache_read_input_tokens = usage.cache_read_input_tokens,
+                cost_estimate = usage.cost_estimate,
+                "BILLING ROW LOST: failed to log API usage to database"
+            );
         }
     }
 

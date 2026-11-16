@@ -966,6 +966,12 @@ impl ConversationStore<'_> {
             // At most one usage row per run: a re-executed run (new owner after a
             // crash, retry) must not bill the same run twice. The run id is the key.
             let run_key = run.as_str();
+            // Serialize concurrent writers of the same run: SQLite's BEGIN IMMEDIATE
+            // already does; on Postgres lock the run row for this transaction.
+            if matches!(self.db, DbPool::Postgres(_)) {
+                sqlx::query("SELECT run_id FROM conversation_runs WHERE session_id=$1 AND run_id=$2 FOR UPDATE")
+                    .bind(conversation.as_str()).bind(run_key).fetch_optional(&mut *tx).await?;
+            }
             let (existing,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM api_usage_log WHERE session_id=$1 AND request_id=$2")
                 .bind(conversation.as_str()).bind(run_key).fetch_one(&mut *tx).await?;
             if existing > 0 {

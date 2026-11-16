@@ -221,3 +221,15 @@ async fn haiku_5_5_background_call_with_small_budget_and_thinking() {
     eprintln!("  title text: {}", r.content);
     assert!(!r.content.trim().is_empty(), "thinking must not consume the whole 512-token budget");
 }
+
+/// Live finding (recorded, not a defect of this change): a model that thinks by
+/// default rejects a temperature other than 1 even when `thinking` is not sent,
+/// so the title/summary defaults (0.3 / 0.0) need `LLM_TITLE_TEMPERATURE=omit` there.
+#[tokio::test]
+#[ignore = "live: spends money"]
+async fn haiku_5_5_rejects_temperature_without_a_thinking_parameter() {
+    let client = AnthropicClient::new(key(), Some("claude-haiku-5-5".into())).unwrap();
+    let opts = RequestOptions::new(512).with_temperature(Some(0.25));
+    let result = client.complete(&[Message::user("Say hi.")], &[], &opts, &HashMap::new()).await;
+    eprintln!("haiku-5-5 with temperature 0.25 and no thinking parameter: {:?}", result.as_ref().map(|_| "accepted").map_err(ToString::to_string));
+}
