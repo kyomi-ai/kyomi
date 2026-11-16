@@ -180,7 +180,7 @@ macro_rules! write_terminal {
                     .bind(encrypted).bind(projection.status).bind(projection_time!($tx,$submission.submitted.conversation_id.as_str())).bind(projection.message_id.as_str()).bind($submission.submitted.conversation_id.as_str()).execute(&mut *$tx).await?;
                 if updated.rows_affected()!=1 { return Err(EventStoreError::MissingProjection); }
                 // The placeholder's text is now the failure/interruption text: blocks stored for it earlier would override it on replay.
-                sqlx::query("DELETE FROM chat_message_provider_content WHERE message_id=$1").bind(projection.message_id.as_str()).execute(&mut *$tx).await?;
+                sqlx::query(crate::chat_service::PROVIDER_CONTENT_DELETE_SQL).bind(projection.message_id.as_str()).execute(&mut *$tx).await?;
             }
             write_snapshot!($tx,$submission.submitted.run_id.as_str(),&plan.snapshot);
             write_session_sync!($store,$tx,$submission.submitted.conversation_id.as_str(),kyomi_types::sync::SyncActionType::Update);

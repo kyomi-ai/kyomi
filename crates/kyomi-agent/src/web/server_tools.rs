@@ -88,17 +88,12 @@ pub fn assistant_runs(messages: &[crate::types::Message]) -> Vec<std::ops::Range
 /// blocks go. A message left with neither text nor tool calls (a bare
 /// `pause_turn` shell) is dropped.
 pub fn replayable_provider_content(messages: &[crate::types::Message], offered: &[Value]) -> Vec<crate::types::Message> {
-    let offered: Vec<&str> = offered.iter().filter_map(|entry| entry.get("name").and_then(Value::as_str)).collect();
     let mut keep = vec![true; messages.len()];
     for run in assistant_runs(messages) {
-        let calls_unavailable_tool = messages[run.clone()]
-            .iter()
-            .filter_map(|m| m.provider_content.as_ref())
-            .flatten()
-            .filter(|block| block.get("type").and_then(Value::as_str) == Some("server_tool_use"))
-            .any(|block| block.get("name").and_then(Value::as_str).is_none_or(|name| !offered.contains(&name)));
+        let blocks: Vec<&Value> = messages[run.clone()].iter().filter_map(|m| m.provider_content.as_ref()).flatten().collect();
+        let all_offered = calls_only_offered(blocks, offered);
         for index in run {
-            keep[index] = !calls_unavailable_tool;
+            keep[index] = all_offered;
         }
     }
     messages
@@ -113,6 +108,16 @@ pub fn replayable_provider_content(messages: &[crate::types::Message], offered: 
             (!m.content.is_empty() || m.tool_calls.as_ref().is_some_and(|t| !t.is_empty())).then_some(m)
         })
         .collect()
+}
+
+/// Whether every server tool the blocks called is among the `offered` tool
+/// entries (matched by `name`). A call with no name counts as not offered.
+pub fn calls_only_offered<'a>(blocks: impl IntoIterator<Item = &'a Value>, offered: &[Value]) -> bool {
+    let offered: Vec<&str> = offered.iter().filter_map(|entry| entry.get("name").and_then(Value::as_str)).collect();
+    blocks
+        .into_iter()
+        .filter(|block| block.get("type").and_then(Value::as_str) == Some("server_tool_use"))
+        .all(|block| block.get("name").and_then(Value::as_str).is_some_and(|name| offered.contains(&name)))
 }
 
 pub const ANTHROPIC_SEARCH_VERSION: &str = "web_search_20250305";

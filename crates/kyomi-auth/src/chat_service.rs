@@ -1291,6 +1291,12 @@ pub async fn update_message(
         })
     }
     .map_err(|e| kyomi_core::Error::Internal(format!("failed to update message: {e}")))?;
+    // Text rewritten outside a successful completion (a user edit, or an error /
+    // cancel notice on the placeholder) invalidates the provider blocks stored for
+    // the old text: they would override the new text on replay (KYO-969).
+    if rows_affected > 0 && content.is_some() && status != Some(MessageStatus::Complete) {
+        clear_provider_content(db, message_id).await?;
+    }
     Ok(rows_affected > 0)
 }
 
@@ -2199,6 +2205,9 @@ pub struct ProviderContent {
 pub const PROVIDER_CONTENT_UPSERT_SQL: &str = "INSERT INTO chat_message_provider_content (message_id, backend, blocks) VALUES ($1, $2, $3) \
      ON CONFLICT (message_id) DO UPDATE SET backend = EXCLUDED.backend, blocks = EXCLUDED.blocks";
 
+/// Removes one message's stored provider blocks; `$1` is the message id.
+pub const PROVIDER_CONTENT_DELETE_SQL: &str = "DELETE FROM chat_message_provider_content WHERE message_id = $1";
+
 /// The two columns every agent-history query selects so no loader can forget the
 /// stored provider blocks. Expands to a string literal for `concat!`.
 macro_rules! provider_content_columns {
@@ -2277,7 +2286,7 @@ pub async fn store_provider_content(
 pub async fn clear_provider_content(db: &DbPool, message_id: &str) -> kyomi_core::Result<()> {
     kyomi_core::db_execute!(
         db,
-        "DELETE FROM chat_message_provider_content WHERE message_id = $1",
+        PROVIDER_CONTENT_DELETE_SQL,
         message_id
     )
     .map_err(|e| kyomi_core::Error::Internal(format!("failed to clear provider content: {e}")))?;
@@ -2944,10 +2953,6 @@ pub async fn update_message_content_owned(
     if msg_exists.is_none() {
         return Err(kyomi_core::Error::Internal("Message not found".to_string()));
     }
-
-    // The stored provider blocks describe the old text; drop them first so a
-    // failure after this point leaves the edit visible, not overridden.
-    clear_provider_content(db, message_id).await?;
 
     // Update and re-encrypt.
     let updated =

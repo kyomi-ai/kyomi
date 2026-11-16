@@ -795,9 +795,14 @@ impl CustomAgent {
                 && response.finish_reason == "pause_turn"
                 && pause_continuations < MAX_PAUSE_CONTINUATIONS
                 // The continuation must carry the same server tools. If they are now
-                // withheld (allowance or budget spent, restricted session) there is
-                // nothing to continue with: answer with what we have, flagged.
-                && !self.admitted_server_tools(false).await.is_empty()
+                // withheld (allowance or budget spent, restricted session), or the
+                // tool a paused call used is no longer among them, there is nothing
+                // to continue with: answer with what we have, flagged.
+                && {
+                    let offered = self.admitted_server_tools(false).await;
+                    !offered.is_empty()
+                        && crate::web::server_tools::calls_only_offered(server_activity.provider_content.iter().flatten(), &offered)
+                }
             {
                 pause_continuations += 1;
                 self.state.messages.push(
@@ -3911,6 +3916,28 @@ Second chart:\n{CHARTML_STRIPPED_NOTE}\nDone."
                 "{reason}: the paused server blocks are not stored in any persisted message"
             );
         }
+    }
+
+    /// A paused call to a tool that is no longer offered cannot be continued: the
+    /// provider rejects its result blocks without the tool in the request.
+    #[tokio::test]
+    async fn a_pause_whose_tool_is_no_longer_offered_ends_flagged() {
+        let mut config = server_tool_agent_config();
+        config.server_tools = vec![crate::web::server_tools::ServerTool {
+            kind: kyomi_core::web_tools::WebToolKind::Fetch,
+            backend: kyomi_core::web_tools::WebBackendKind::Anthropic,
+            entry: serde_json::json!({"type": "web_fetch_20250910", "name": "web_fetch", "max_uses": 5}),
+        }];
+        // The paused reply called web_search; only web_fetch is offered now.
+        let (mut agent, calls) = scripted_agent_with_config(
+            config,
+            vec![Reply::Response(server_response("pause_turn", None))],
+            Reply::Text("never reached".into()),
+        )
+        .await;
+        let answer = agent.chat("hi", CancellationToken::new(), None, None, None).await.unwrap();
+        assert_eq!(calls.lock().unwrap().len(), 1, "no continuation request is sent");
+        assert!(answer.contains("Web research was cut short"), "{answer}");
     }
 
     /// The guard that stops a pause continuation is `admitted_server_tools(false)`;

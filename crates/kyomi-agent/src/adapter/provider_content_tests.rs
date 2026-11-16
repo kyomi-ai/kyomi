@@ -352,3 +352,24 @@ async fn blocks_are_not_stored_when_the_placeholder_text_was_not_written() {
         .await.expect("a missing placeholder is not an error here");
     assert_eq!(stored_rows(&db, &id).await, 0);
 }
+
+/// Legacy (non-durable) failure path: the error text written to the placeholder
+/// replaces the answer the blocks belonged to; a successful completion keeps them.
+#[tokio::test]
+async fn the_legacy_error_text_write_drops_blocks_but_completion_keeps_them() {
+    let db = crate::test_support::test_pool().await;
+    crate::test_support::seed_user_and_workspace(&db).await;
+    let key = Arc::new([7u8; 32]);
+    let session_id = uuid::Uuid::new_v4().to_string();
+    let (user, assistant) = dispatch_chat_turn(&db, &key, &session_id, "q").await;
+    let mut msg = Message::assistant("answer").with_provider_content(Some(captured_search_message()["content"].as_array().unwrap().clone()));
+    msg.message_id = assistant.tag_id().map(str::to_string);
+    persist_one_new_message(&db, &key, &session_id, &msg, user.caller_persisted_id(), assistant.tag_id(),
+        MessagePersistenceScope { durable_run: None, user_id: "user-a", workspace_id: "ws-1", message_index: 1 })
+        .await.expect("persist");
+    let id = assistant.tag_id().unwrap().to_string();
+    chat_service::update_message(&db, &key, &id, Some("answer"), None, Some(chat_service::MessageStatus::Complete)).await.unwrap();
+    assert_eq!(stored_rows(&db, &id).await, 1, "completion with the same text keeps the blocks");
+    chat_service::update_message(&db, &key, &id, Some("it failed"), None, Some(chat_service::MessageStatus::Error)).await.unwrap();
+    assert_eq!(stored_rows(&db, &id).await, 0, "an error notice replaces the text, so the blocks go");
+}
