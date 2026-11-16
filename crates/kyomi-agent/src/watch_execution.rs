@@ -878,6 +878,7 @@ pub async fn execute_watch_with(
         stored_deadline,
         lease_lost: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         is_batch: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        billing: Arc::new(std::sync::Mutex::new(None)),
     };
 
     // Run the execution, capturing errors to ensure we always clean up
@@ -936,6 +937,11 @@ pub async fn execute_watch_with(
         }
         Err(e) => {
             error!(watch_id = %watch_id, error = %e, "Watch execution failed");
+
+            // A failed batch run still paid for its calls.
+            if run.is_batch.load(std::sync::atomic::Ordering::SeqCst) {
+                bill_batch_run(db, &watch, execution_id, &run).await;
+            }
 
             // Mark execution as failed
             let error_msg = watch_execution_error_message(&e);
@@ -1029,6 +1035,63 @@ fn ensure_batch_attempt_succeeded(
     Ok(())
 }
 
+/// Who a batch run's usage is billed to; known once the run's session exists.
+struct BillingTarget {
+    provider: String,
+    model: String,
+    is_byok: bool,
+    session_id: String,
+}
+
+/// Bill a batch-mode run once, with one `api_usage_log` row summing every call
+/// of the run across all attempts, restarts and retries. Only the instance
+/// that holds the run's lease can claim the billing, so a displaced driver
+/// never bills a partial run. The claim is handed back when the usage cannot be
+/// written, so the run is not lost to a transient error; a crash between the
+/// claim and the write can still lose one run's usage (never double-bill it).
+async fn bill_batch_run(db: &DbPool, watch: &Watch, execution_id: i32, run: &RunSetup) {
+    let Some((provider, model, is_byok, session_id)) = run
+        .billing
+        .lock()
+        .ok()
+        .and_then(|t| t.as_ref().map(|t| (t.provider.clone(), t.model.clone(), t.is_byok, t.session_id.clone())))
+    else {
+        return;
+    };
+    match watch_batch_service::claim_usage_billing(db, execution_id, crate::batch_run::instance_id(), Utc::now()).await {
+        Ok(true) => {}
+        Ok(false) => return,
+        Err(e) => {
+            warn!(execution_id, error = %e, "Failed to claim billing for a batch run");
+            return;
+        }
+    }
+    let written = async {
+        let usage = watch_batch_service::run_usage(db, execution_id).await?;
+        crate::execution::log_batch_run_usage(
+            db,
+            &crate::execution::BatchRunBilling {
+                user_id: &watch.created_by,
+                workspace_id: &watch.workspace_id,
+                session_id: &session_id,
+                provider: &provider,
+                model: &model,
+                component: "kyomi_watch",
+                is_byok,
+            },
+            usage,
+        )
+        .await
+    }
+    .await;
+    if let Err(e) = written {
+        warn!(execution_id, error = %e, "Failed to bill a batch run; releasing the claim");
+        if let Err(e) = watch_batch_service::release_usage_billing(db, execution_id).await {
+            warn!(execution_id, error = %e, "Failed to release the billing claim");
+        }
+    }
+}
+
 /// Per-run facts [`execute_watch_inner`] needs besides the watch itself.
 struct RunSetup {
     kind: RunKind,
@@ -1042,6 +1105,8 @@ struct RunSetup {
     /// Set once the run is known to be a batch-mode run (its terminal writes
     /// are then fenced by the lease).
     is_batch: Arc<std::sync::atomic::AtomicBool>,
+    /// Set once the run's session exists; read when the run is billed.
+    billing: Arc<std::sync::Mutex<Option<BillingTarget>>>,
 }
 
 /// Data produced by [`prepare_watch_dispatch`] for the caller to attach to
@@ -1447,6 +1512,14 @@ async fn execute_watch_inner(
     // Record the session now, not only at completion, so an interrupted
     // attempt's session can be found and removed when the run resumes.
     watch_batch_service::set_execution_session(db, execution_id, &session_id).await?;
+    if let Ok(mut target) = run.billing.lock() {
+        *target = Some(BillingTarget {
+            provider: provider_name.clone(),
+            model: configured_model.clone(),
+            is_byok: selection.workspace_billed,
+            session_id: session_id.clone(),
+        });
+    }
     if let Some(old) = previous_session.filter(|old| *old != session_id)
         && let Err(e) = chat_service::delete_session(db, &watch.created_by, &old, Some(&watch.workspace_id)).await
     {
@@ -1736,29 +1809,17 @@ async fn execute_watch_inner(
         }
     }
 
-    // A batch-mode run is billed exactly once, here, from the usage recorded on
-    // its call rows: across restarts, retries and a displaced driver's partial
-    // work every call is counted once, and a call is never billed again when a
-    // resumed run replays it.
-    if extras.watch_batch.is_some()
-        && watch_batch_service::claim_usage_billing(db, execution_id, Utc::now()).await?
-    {
-        let usage = watch_batch_service::run_usage(db, execution_id).await?;
-        let model = agent_result.model.clone().unwrap_or_else(|| configured_model.clone());
-        crate::execution::log_batch_run_usage(
-            db,
-            &crate::execution::BatchRunBilling {
-                user_id: &watch.created_by,
-                workspace_id: &watch.workspace_id,
-                session_id: &session_id,
-                provider: &provider_name,
-                model: &model,
-                component: "kyomi_watch",
-                is_byok: selection.workspace_billed,
-            },
-            usage,
-        )
-        .await;
+    // A batch-mode run is billed exactly once, from the usage recorded on its
+    // call rows (see `bill_batch_run`). Done on the failure path too, so the
+    // calls of a run that is then failed are not silently free.
+    if extras.watch_batch.is_some() {
+        if let Ok(mut target) = run.billing.lock()
+            && let Some(t) = target.as_mut()
+            && let Some(model) = agent_result.model.clone()
+        {
+            t.model = model;
+        }
+        bill_batch_run(db, watch, execution_id, run).await;
     }
 
     // 11. Determine the stored/delivered terminal state. A guard stop is an

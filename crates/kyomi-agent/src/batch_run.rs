@@ -186,19 +186,6 @@ impl BatchingProvider {
         }
     }
 
-    /// Remember what a call used, on its row, so the run is billed once from
-    /// durable per-call usage (see `watch_batch_service::claim_usage_billing`).
-    async fn record_usage(&self, call: &BatchCall, response: &LLMResponse) {
-        let usage = store::CallUsage {
-            input_tokens: i32::try_from(response.usage.input_tokens).unwrap_or(i32::MAX),
-            output_tokens: i32::try_from(response.usage.output_tokens).unwrap_or(i32::MAX),
-            cost_usd: response.cost,
-        };
-        if let Err(e) = store::record_call_usage(&self.ctx.db, &call.call_id, usage).await {
-            warn!(execution_id = self.ctx.execution_id, error = %e, "failed to record a batch call's usage");
-        }
-    }
-
     fn lease_lost_error() -> kyomi_core::Error {
         kyomi_core::Error::Internal("watch run lease was taken by another instance".into())
     }
@@ -213,13 +200,13 @@ impl BatchingProvider {
         user_names: &HashMap<String, String>,
     ) -> kyomi_core::Result<LLMResponse> {
         let response = self.inner.complete(messages, tools, options, user_names).await?;
+        // The answer and what it cost are kept in one write, so a crash cannot
+        // keep one without the other and a second driver's answer to the same
+        // position is neither kept nor billed.
         if let Some(call) = call
-            && let Err(e) = store::attach_fallback_response(&self.ctx.db, &self.ctx.encryption_key, &call.call_id, &response.raw_response).await
+            && let Err(e) = store::attach_fallback_response(&self.ctx.db, &self.ctx.encryption_key, &call.call_id, &response.raw_response, usage_of(&response)).await
         {
             warn!(execution_id = self.ctx.execution_id, error = %e, "failed to keep the realtime fallback response");
-        }
-        if let Some(call) = call {
-            self.record_usage(call, &response).await;
         }
         Ok(response)
     }
@@ -262,7 +249,7 @@ impl BatchingProvider {
         let reason = "batch not finished before the next scheduled run was due; \
                       cancelled and re-run in realtime"
             .to_string();
-        store::finish_call(&self.ctx.db, &self.ctx.encryption_key, &call.call_id, BatchCallState::Abandoned, None, Some(&reason)).await?;
+        store::finish_call(&self.ctx.db, &self.ctx.encryption_key, &call.call_id, BatchCallState::Abandoned, None, store::CallUsage::default(), Some(&reason)).await?;
         if let Some(vendor_id) = &call.vendor_batch_id
             && let Err(e) = batch.cancel(vendor_id).await
         {
@@ -270,6 +257,19 @@ impl BatchingProvider {
         }
         store::note_fallback(&self.ctx.db, self.ctx.execution_id, &reason).await?;
         self.realtime_and_keep(Some(call), messages, tools, options, user_names).await
+    }
+}
+
+/// What a call used, as the turn tracker counts it: input includes the cache
+/// tokens, so the billed usage agrees with the execution's own totals.
+fn usage_of(response: &LLMResponse) -> store::CallUsage {
+    let input = u64::from(response.usage.input_tokens)
+        + u64::from(response.usage.cache_creation_input_tokens)
+        + u64::from(response.usage.cache_read_input_tokens);
+    store::CallUsage {
+        input_tokens: i32::try_from(input).unwrap_or(i32::MAX),
+        output_tokens: i32::try_from(response.usage.output_tokens).unwrap_or(i32::MAX),
+        cost_usd: response.cost,
     }
 }
 
@@ -340,7 +340,7 @@ impl LLMProvider for BatchingProvider {
                     let reason = "run reached its batch deadline; remaining calls ran in realtime";
                     store::note_fallback(&self.ctx.db, self.ctx.execution_id, reason).await?;
                     let row = store::begin_call(&self.ctx.db, key, self.ctx.execution_id, index, &hash, &self.provider_name, self.inner.model()).await?;
-                    store::finish_call(&self.ctx.db, key, &row.call_id, BatchCallState::Abandoned, None, Some(reason)).await?;
+                    store::finish_call(&self.ctx.db, key, &row.call_id, BatchCallState::Abandoned, None, store::CallUsage::default(), Some(reason)).await?;
                     return self.realtime_and_keep(Some(&row), messages, tools, options, user_names).await;
                 }
                 store::begin_call(&self.ctx.db, key, self.ctx.execution_id, index, &hash, &self.provider_name, self.inner.model()).await?
@@ -361,7 +361,7 @@ impl LLMProvider for BatchingProvider {
                 }
                 Err(e) => {
                     // Never submitted: no vendor batch to wait for.
-                    store::finish_call(&self.ctx.db, key, &call.call_id, BatchCallState::Failed, None, Some(&e.to_string())).await?;
+                    store::finish_call(&self.ctx.db, key, &call.call_id, BatchCallState::Failed, None, store::CallUsage::default(), Some(&e.to_string())).await?;
                     return self
                         .on_batch_failure(&call, format!("batch submit failed: {e}"), messages, tools, options, user_names)
                         .await;
@@ -396,19 +396,26 @@ impl LLMProvider for BatchingProvider {
         self.set_waiting(false).await;
 
         match outcome {
-            Some(BatchPoll::Succeeded(response)) => {
-                store::finish_call(&self.ctx.db, key, &call.call_id, BatchCallState::Succeeded, Some(&response), None).await?;
-                let parsed = batch.parse_response(&response)?;
-                self.record_usage(&call, &parsed).await;
-                Ok(parsed)
-            }
+            Some(BatchPoll::Succeeded(response)) => match batch.parse_response(&response) {
+                Ok(parsed) => {
+                    store::finish_call(&self.ctx.db, key, &call.call_id, BatchCallState::Succeeded, Some(&response), usage_of(&parsed), None).await?;
+                    Ok(parsed)
+                }
+                Err(e) => {
+                    // A result that cannot be read is a failed batch, with the
+                    // run's failure policy applied; it is not stored as a success.
+                    let reason = format!("unreadable batch result: {e}");
+                    store::finish_call(&self.ctx.db, key, &call.call_id, BatchCallState::Failed, None, store::CallUsage::default(), Some(&reason)).await?;
+                    self.on_batch_failure(&call, reason, messages, tools, options, user_names).await
+                }
+            },
             Some(BatchPoll::Failed(reason)) => {
-                store::finish_call(&self.ctx.db, key, &call.call_id, BatchCallState::Failed, None, Some(&reason)).await?;
+                store::finish_call(&self.ctx.db, key, &call.call_id, BatchCallState::Failed, None, store::CallUsage::default(), Some(&reason)).await?;
                 self.on_batch_failure(&call, reason, messages, tools, options, user_names).await
             }
             Some(BatchPoll::Expired) => {
                 let reason = "the provider batch expired before completing".to_string();
-                store::finish_call(&self.ctx.db, key, &call.call_id, BatchCallState::Expired, None, Some(&reason)).await?;
+                store::finish_call(&self.ctx.db, key, &call.call_id, BatchCallState::Expired, None, store::CallUsage::default(), Some(&reason)).await?;
                 self.on_batch_failure(&call, reason, messages, tools, options, user_names).await
             }
             Some(BatchPoll::Pending) => unreachable!("pending never breaks the poll loop"),
@@ -606,7 +613,7 @@ mod tests {
         let body = crate::batch::BatchLLMProvider::build_body(&b, &msgs(), &[], &RequestOptions::new(256), &HashMap::new());
         let c = store::begin_call(&f.db, &KEY, f.execution_id, 0, &request_hash(&body), "anthropic", "claude-x").await.unwrap();
         store::mark_submitted(&f.db, &c.call_id, "msgbatch_old").await.unwrap();
-        store::finish_call(&f.db, &KEY, &c.call_id, BatchCallState::Succeeded, Some(&serde_json::from_str(&anthropic_text_reply("from the first life")).unwrap()), None).await.unwrap();
+        store::finish_call(&f.db, &KEY, &c.call_id, BatchCallState::Succeeded, Some(&serde_json::from_str(&anthropic_text_reply("from the first life")).unwrap()), store::CallUsage::default(), None).await.unwrap();
 
         let server = FakeHttpServer::start(|_| (500, "{}".into())).await;
         let p = provider(&server, ctx(&f, chrono::Duration::hours(1), BatchFailurePolicy::RealtimeRetry));

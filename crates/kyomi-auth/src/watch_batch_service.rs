@@ -189,23 +189,6 @@ pub struct CallUsage {
     pub cost_usd: Option<f64>,
 }
 
-/// Record what a call used. Usage lives on the call row, not in the turn's
-/// in-memory tracker, so it survives a restart and is counted exactly once
-/// when the run is billed (see [`claim_usage_billing`]).
-pub async fn record_call_usage(db: &DbPool, call_id: &str, usage: CallUsage) -> kyomi_core::Result<()> {
-    kyomi_core::db_execute!(
-        db,
-        "UPDATE watch_batch_calls SET input_tokens = $1, output_tokens = $2, cost_usd = $3 \
-         WHERE call_id = $4",
-        usage.input_tokens,
-        usage.output_tokens,
-        usage.cost_usd,
-        call_id
-    )
-    .map_err(|e| db_err("record call usage", e))?;
-    Ok(())
-}
-
 #[derive(sqlx::FromRow)]
 struct UsageRow {
     input_tokens: i64,
@@ -232,17 +215,37 @@ pub async fn run_usage(db: &DbPool, execution_id: i32) -> kyomi_core::Result<Cal
     })
 }
 
-/// Take the right to bill this run's usage. True exactly once per run, so the
-/// run is billed once however many attempts, restarts or retries it took.
-pub async fn claim_usage_billing(db: &DbPool, execution_id: i32, now: DateTime<Utc>) -> kyomi_core::Result<bool> {
+/// Take the right to bill this run's usage. True at most once per run, and
+/// only for the instance that holds the run's lease, so a displaced driver can
+/// never bill a partial set of calls.
+pub async fn claim_usage_billing(
+    db: &DbPool,
+    execution_id: i32,
+    owner: &str,
+    now: DateTime<Utc>,
+) -> kyomi_core::Result<bool> {
     let res = kyomi_core::db_execute!(
         db,
-        "UPDATE watch_executions SET usage_billed_at = $1 WHERE id = $2 AND usage_billed_at IS NULL",
+        "UPDATE watch_executions SET usage_billed_at = $1 \
+         WHERE id = $2 AND usage_billed_at IS NULL AND lease_owner = $3 AND llm_mode = 'batch'",
         now,
-        execution_id
+        execution_id,
+        owner
     )
     .map_err(|e| db_err("claim usage billing", e))?;
     Ok(res.rows_affected() == 1)
+}
+
+/// Give the billing claim back when the usage could not be written, so a later
+/// attempt can bill instead of the run being lost.
+pub async fn release_usage_billing(db: &DbPool, execution_id: i32) -> kyomi_core::Result<()> {
+    kyomi_core::db_execute!(
+        db,
+        "UPDATE watch_executions SET usage_billed_at = NULL WHERE id = $1",
+        execution_id
+    )
+    .map_err(|e| db_err("release usage billing", e))?;
+    Ok(())
 }
 
 /// Keep the realtime response that replaced a failed or abandoned batch, so a
@@ -252,18 +255,23 @@ pub async fn attach_fallback_response(
     key: &[u8; 32],
     call_id: &str,
     response: &serde_json::Value,
-) -> kyomi_core::Result<()> {
+    usage: CallUsage,
+) -> kyomi_core::Result<bool> {
     let encrypted = encryption::encrypt_json(response, key)?;
-    kyomi_core::db_execute!(
+    let res = kyomi_core::db_execute!(
         db,
-        "UPDATE watch_batch_calls SET response_encrypted = $1 \
-         WHERE call_id = $2 AND state IN ('failed', 'expired', 'abandoned') \
+        "UPDATE watch_batch_calls \
+         SET response_encrypted = $1, input_tokens = $2, output_tokens = $3, cost_usd = $4 \
+         WHERE call_id = $5 AND state IN ('failed', 'expired', 'abandoned') \
            AND response_encrypted IS NULL",
         encrypted,
+        usage.input_tokens,
+        usage.output_tokens,
+        usage.cost_usd,
         call_id
     )
     .map_err(|e| db_err("attach fallback response", e))?;
-    Ok(())
+    Ok(res.rows_affected() == 1)
 }
 
 /// Attach the vendor batch id once the submit succeeded.
@@ -283,7 +291,8 @@ pub async fn mark_submitted(
     Ok(())
 }
 
-/// Finish a call. Only a non-final call is changed, so a late result can never
+/// Finish a call, recording its response and usage in the same write so a
+/// crash cannot keep the result and lose what it cost. Only a non-final call is changed, so a late result can never
 /// overwrite a run's earlier decision (`Abandoned`) or a recorded response.
 pub async fn finish_call(
     db: &DbPool,
@@ -291,6 +300,7 @@ pub async fn finish_call(
     call_id: &str,
     state: BatchCallState,
     response: Option<&serde_json::Value>,
+    usage: CallUsage,
     error_message: Option<&str>,
 ) -> kyomi_core::Result<bool> {
     debug_assert!(state.is_final());
@@ -300,12 +310,16 @@ pub async fn finish_call(
     let res = kyomi_core::db_execute!(
         db,
         "UPDATE watch_batch_calls \
-         SET state = $1, response_encrypted = $2, error_message = $3, completed_at = $4 \
-         WHERE call_id = $5 AND state IN ('submitting', 'pending')",
+         SET state = $1, response_encrypted = $2, error_message = $3, completed_at = $4, \
+             input_tokens = $5, output_tokens = $6, cost_usd = $7 \
+         WHERE call_id = $8 AND state IN ('submitting', 'pending')",
         state.as_str(),
         encrypted,
         error_message,
         Utc::now(),
+        usage.input_tokens,
+        usage.output_tokens,
+        usage.cost_usd,
         call_id
     )
     .map_err(|e| db_err("finish call", e))?;
@@ -745,7 +759,7 @@ mod tests {
         let c = begin_call(&db, &KEY, id, 0, "h1", "anthropic", "m").await.unwrap();
         mark_submitted(&db, &c.call_id, "msgbatch_1").await.unwrap();
         let body = serde_json::json!({"content": [{"type": "text", "text": "secret-finding"}]});
-        assert!(finish_call(&db, &KEY, &c.call_id, BatchCallState::Succeeded, Some(&body), None).await.unwrap());
+        assert!(finish_call(&db, &KEY, &c.call_id, BatchCallState::Succeeded, Some(&body), CallUsage::default(), None).await.unwrap());
 
         let got = find_call(&db, &KEY, id, 0).await.unwrap().unwrap();
         assert_eq!(got.state, BatchCallState::Succeeded);
@@ -760,7 +774,7 @@ mod tests {
         assert!(!raw.0.unwrap().contains("secret-finding"), "responses must be encrypted at rest");
 
         // A late failure / abandon cannot overwrite the recorded response.
-        assert!(!finish_call(&db, &KEY, &c.call_id, BatchCallState::Abandoned, None, Some("late")).await.unwrap());
+        assert!(!finish_call(&db, &KEY, &c.call_id, BatchCallState::Abandoned, None, CallUsage::default(), Some("late")).await.unwrap());
         assert_eq!(find_call(&db, &KEY, id, 0).await.unwrap().unwrap().state, BatchCallState::Succeeded);
     }
 
@@ -769,16 +783,16 @@ mod tests {
         let db = test_pool().await;
         let id = execution(&db).await;
         let abandoned = begin_call(&db, &KEY, id, 0, "h1", "anthropic", "m").await.unwrap();
-        finish_call(&db, &KEY, &abandoned.call_id, BatchCallState::Abandoned, None, Some("deadline")).await.unwrap();
+        finish_call(&db, &KEY, &abandoned.call_id, BatchCallState::Abandoned, None, CallUsage::default(), Some("deadline")).await.unwrap();
         let first = serde_json::json!({"content": "realtime one"});
-        attach_fallback_response(&db, &KEY, &abandoned.call_id, &first).await.unwrap();
-        attach_fallback_response(&db, &KEY, &abandoned.call_id, &serde_json::json!({"content": "second"})).await.unwrap();
+        attach_fallback_response(&db, &KEY, &abandoned.call_id, &first, CallUsage::default()).await.unwrap();
+        assert!(!attach_fallback_response(&db, &KEY, &abandoned.call_id, &serde_json::json!({"content": "second"}), CallUsage::default()).await.unwrap(), "a second answer for the same call is not attached");
         let got = find_call(&db, &KEY, id, 0).await.unwrap().unwrap();
         assert_eq!((got.state, got.response), (BatchCallState::Abandoned, Some(first)), "the first fallback response wins");
 
         let ok = begin_call(&db, &KEY, id, 1, "h2", "anthropic", "m").await.unwrap();
-        finish_call(&db, &KEY, &ok.call_id, BatchCallState::Succeeded, Some(&serde_json::json!({"a": 1})), None).await.unwrap();
-        attach_fallback_response(&db, &KEY, &ok.call_id, &serde_json::json!({"a": 2})).await.unwrap();
+        finish_call(&db, &KEY, &ok.call_id, BatchCallState::Succeeded, Some(&serde_json::json!({"a": 1})), CallUsage::default(), None).await.unwrap();
+        attach_fallback_response(&db, &KEY, &ok.call_id, &serde_json::json!({"a": 2}), CallUsage::default()).await.unwrap();
         assert_eq!(find_call(&db, &KEY, id, 1).await.unwrap().unwrap().response, Some(serde_json::json!({"a": 1})));
     }
 
@@ -994,18 +1008,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn usage_is_summed_over_every_call_of_the_run_and_billed_exactly_once() {
+    async fn usage_is_written_with_the_result_summed_over_the_run_and_billed_at_most_once_by_the_lease_owner() {
         let db = test_pool().await;
-        let id = execution(&db).await;
+        let id = batch_run(&db, "me", Duration::seconds(120)).await;
         let a = begin_call(&db, &KEY, id, 0, "h0", "anthropic", "m").await.unwrap();
         let b = begin_call(&db, &KEY, id, 1, "h1", "anthropic", "m").await.unwrap();
-        record_call_usage(&db, &a.call_id, CallUsage { input_tokens: 20, output_tokens: 9, cost_usd: None }).await.unwrap();
-        record_call_usage(&db, &b.call_id, CallUsage { input_tokens: 15, output_tokens: 5, cost_usd: Some(0.001) }).await.unwrap();
+        finish_call(&db, &KEY, &a.call_id, BatchCallState::Succeeded, Some(&serde_json::json!({"x": 1})), CallUsage { input_tokens: 20, output_tokens: 9, cost_usd: None }, None).await.unwrap();
+        finish_call(&db, &KEY, &b.call_id, BatchCallState::Abandoned, None, CallUsage::default(), Some("deadline")).await.unwrap();
+        assert!(attach_fallback_response(&db, &KEY, &b.call_id, &serde_json::json!({"y": 1}), CallUsage { input_tokens: 15, output_tokens: 5, cost_usd: Some(0.001) }).await.unwrap());
         let total = run_usage(&db, id).await.unwrap();
         assert_eq!((total.input_tokens, total.output_tokens, total.cost_usd), (35, 14, Some(0.001)));
         assert_eq!(run_usage(&db, 999_999).await.unwrap(), CallUsage::default());
 
-        assert!(claim_usage_billing(&db, id, Utc::now()).await.unwrap());
-        assert!(!claim_usage_billing(&db, id, Utc::now()).await.unwrap(), "a run is billed once, however many attempts it took");
+        // Only the lease owner can claim, and only once; a failed write can hand the claim back.
+        assert!(!claim_usage_billing(&db, id, "someone-else", Utc::now()).await.unwrap(), "a displaced driver must not bill");
+        assert!(claim_usage_billing(&db, id, "me", Utc::now()).await.unwrap());
+        assert!(!claim_usage_billing(&db, id, "me", Utc::now()).await.unwrap(), "a run is billed once, however many attempts it took");
+        release_usage_billing(&db, id).await.unwrap();
+        assert!(claim_usage_billing(&db, id, "me", Utc::now()).await.unwrap(), "a released claim can be taken again");
     }
 }

@@ -46,8 +46,8 @@ struct FakeOpenRouter {
     server: FakeHttpServer,
     /// Batches numbered up to this value complete (usize::MAX = all).
     complete_upto: Arc<AtomicUsize>,
-    /// Report every batch as failed instead.
-    fail: Arc<std::sync::atomic::AtomicBool>,
+    /// Batches numbered from this value on are reported as failed.
+    fail_from: Arc<AtomicUsize>,
     realtime_calls: Arc<AtomicUsize>,
 }
 
@@ -55,10 +55,10 @@ impl FakeOpenRouter {
     /// `tools`: each run is two model calls (a tool call, then the verdict).
     async fn start(tools: bool) -> Self {
         let complete_upto = Arc::new(AtomicUsize::new(0));
-        let fail = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let fail_from = Arc::new(AtomicUsize::new(usize::MAX));
         let submitted: Arc<Mutex<Vec<(String, serde_json::Value)>>> = Arc::new(Mutex::new(Vec::new()));
         let realtime_calls = Arc::new(AtomicUsize::new(0));
-        let (u, f, sub, r) = (complete_upto.clone(), fail.clone(), submitted.clone(), realtime_calls.clone());
+        let (u, f, sub, r) = (complete_upto.clone(), fail_from.clone(), submitted.clone(), realtime_calls.clone());
         let server = FakeHttpServer::start(move |req: &RecordedRequest| {
             let path = req.path.trim_start_matches("/openrouter.ai/api/v1");
             match (req.method.as_str(), path) {
@@ -71,7 +71,7 @@ impl FakeOpenRouter {
                 }
                 ("GET", p) if p.starts_with("/batches/batch_") => {
                     let n: usize = p.trim_start_matches("/batches/batch_").parse().unwrap_or(0);
-                    if f.load(Ordering::SeqCst) {
+                    if n >= f.load(Ordering::SeqCst) {
                         return (200, json!({"status": "failed", "error": {"message": "no batch variant for this model"}}).to_string());
                     }
                     if n <= u.load(Ordering::SeqCst) {
@@ -89,7 +89,7 @@ impl FakeOpenRouter {
             }
         })
         .await;
-        Self { server, complete_upto, fail, realtime_calls }
+        Self { server, complete_upto, fail_from, realtime_calls }
     }
 
     fn finish_all(&self) {
@@ -480,7 +480,7 @@ async fn under_the_error_policy_a_failed_batch_ends_the_run_as_an_error_not_a_qu
     crate::test_support::seed_user_and_workspace(&db).await;
     insert_watch(&db, Utc::now() + chrono::Duration::hours(6)).await;
     let fake = FakeOpenRouter::start(false).await;
-    fake.fail.store(true, Ordering::SeqCst);
+    fake.fail_from.store(1, Ordering::SeqCst);
     let s = scheduler(&db, config_with(&fake, 60, kyomi_core::watch_llm::BatchFailurePolicy::Error)).await;
     s.spawn_watch_run("w1", RunKind::Scheduled).await;
     s.active_executions.lock().await.remove("w1").unwrap().await.unwrap();
@@ -499,7 +499,7 @@ async fn under_the_default_policy_a_failed_batch_is_retried_once_in_realtime_and
     crate::test_support::seed_user_and_workspace(&db).await;
     insert_watch(&db, Utc::now() + chrono::Duration::hours(6)).await;
     let fake = FakeOpenRouter::start(false).await;
-    fake.fail.store(true, Ordering::SeqCst);
+    fake.fail_from.store(1, Ordering::SeqCst);
     let s = scheduler(&db, config(&fake, 60)).await;
     s.spawn_watch_run("w1", RunKind::Scheduled).await;
     s.active_executions.lock().await.remove("w1").unwrap().await.unwrap();
@@ -603,4 +603,24 @@ async fn a_watch_disabled_during_the_wait_does_not_deliver_when_the_batch_finish
     let e = kyomi_auth::watch_service::get_execution_by_id_only(&db, id, "ws-1", "user-a").await.unwrap().unwrap();
     assert!(e.error_message.unwrap().contains("disabled"));
     assert!(!e.alert_triggered);
+}
+
+#[tokio::test]
+async fn a_batch_run_that_fails_after_paying_for_a_call_is_still_billed_for_it_once() {
+    let db = crate::test_support::test_pool().await;
+    crate::test_support::seed_user_and_workspace(&db).await;
+    insert_watch(&db, Utc::now() + chrono::Duration::hours(6)).await;
+    let fake = FakeOpenRouter::start(true).await;
+    fake.complete_upto.store(1, Ordering::SeqCst); // call 0 (the tool call) completes ...
+    fake.fail_from.store(2, Ordering::SeqCst); // ... call 1 fails.
+    let s = scheduler(&db, config_with(&fake, 60, kyomi_core::watch_llm::BatchFailurePolicy::Error)).await;
+    s.spawn_watch_run("w1", RunKind::Scheduled).await;
+    s.active_executions.lock().await.remove("w1").unwrap().await.unwrap();
+
+    assert_eq!(executions(&db).await[0].1, "error");
+    let billed: Vec<(i64, i64)> = sqlx::query_as("SELECT input_tokens, output_tokens FROM api_usage_log")
+        .fetch_all(kyomi_test_db::sqlite_pool(&db))
+        .await
+        .unwrap();
+    assert_eq!(billed, vec![(20, 9)], "the paid call of a failed run is billed, once");
 }

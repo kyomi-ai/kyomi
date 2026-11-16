@@ -385,9 +385,9 @@ pub(crate) async fn log_batch_run_usage(
     db: &DbPool,
     run: &BatchRunBilling<'_>,
     usage: kyomi_auth::watch_batch_service::CallUsage,
-) {
+) -> kyomi_core::Result<()> {
     if usage.input_tokens <= 0 && usage.output_tokens <= 0 {
-        return;
+        return Ok(());
     }
     let (billed_cost, provider_cost_usd) = billed_amounts(run.is_byok, usage.cost_usd.unwrap_or(0.0));
     if let Err(e) = kyomi_core::db_execute!(
@@ -401,13 +401,14 @@ pub(crate) async fn log_batch_run_usage(
         run.model,
         usage.input_tokens,
         usage.output_tokens,
-        usage.input_tokens + usage.output_tokens,
+        usage.input_tokens.saturating_add(usage.output_tokens),
         billed_cost,
         run.component,
         provider_cost_usd
     ) {
-        warn!(error = %e, "Failed to log batch run usage to database");
+        return Err(kyomi_core::Error::Internal(format!("failed to log batch run usage: {e}")));
     }
+    Ok(())
 }
 
 /// Who a batch-mode run's usage is billed to.
