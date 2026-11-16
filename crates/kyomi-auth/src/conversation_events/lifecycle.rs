@@ -953,6 +953,11 @@ pub struct ApiUsageWrite {
     pub cost_estimate: f64,
     pub component: String,
     pub provider_cost_usd: Option<f64>,
+    /// Real cache totals for the run (`input_tokens` already includes them).
+    pub cache_creation_input_tokens: i32,
+    pub cache_read_input_tokens: i32,
+    /// Per-call breakdown, serialized JSON.
+    pub extra_metadata: Option<String>,
 }
 impl ConversationStore<'_> {
     pub async fn fenced_api_usage(
@@ -972,8 +977,11 @@ impl ConversationStore<'_> {
             agent_runtime::validate_ownership(&row.snapshot()?, lease, now)?;
             let timestamp = chrono::DateTime::from_timestamp_millis(now)
                 .ok_or(agent_runtime::LifecycleError::InvalidLease)?;
-            sqlx::query("INSERT INTO api_usage_log (user_id,workspace_id,session_id,timestamp,provider,model,input_tokens,output_tokens,total_tokens,cache_creation_input_tokens,cache_read_input_tokens,cost_estimate,component,provider_cost_usd) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,0,0,$10,$11,$12)")
-                .bind(self.actor_id).bind(self.workspace_id).bind(conversation.as_str()).bind(timestamp).bind(&usage.provider).bind(&usage.model).bind(usage.input_tokens).bind(usage.output_tokens).bind(usage.total_tokens).bind(usage.cost_estimate).bind(&usage.component).bind(usage.provider_cost_usd).execute(&mut *tx).await?;
+            // `extra_metadata` is `json` on Postgres (text needs the cast) and TEXT on SQLite.
+            let metadata_param = if matches!(self.db, DbPool::Postgres(_)) { "$15::text::json" } else { "$15" };
+            let insert = format!("INSERT INTO api_usage_log (user_id,workspace_id,session_id,timestamp,provider,model,input_tokens,output_tokens,total_tokens,cache_creation_input_tokens,cache_read_input_tokens,cost_estimate,component,provider_cost_usd,extra_metadata) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$13,$14,$10,$11,$12,{metadata_param})");
+            sqlx::query(&insert)
+                .bind(self.actor_id).bind(self.workspace_id).bind(conversation.as_str()).bind(timestamp).bind(&usage.provider).bind(&usage.model).bind(usage.input_tokens).bind(usage.output_tokens).bind(usage.total_tokens).bind(usage.cost_estimate).bind(&usage.component).bind(usage.provider_cost_usd).bind(usage.cache_creation_input_tokens).bind(usage.cache_read_input_tokens).bind(&usage.extra_metadata).execute(&mut *tx).await?;
             Ok(())
         })
     }

@@ -480,6 +480,7 @@ impl GeminiProvider {
             },
             cost: None,
             thinking_content: None,
+            call_detail: None,
         })
     }
 

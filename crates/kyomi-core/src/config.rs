@@ -503,7 +503,7 @@ impl Config {
             llm_api_key: env::var("LLM_API_KEY").ok(),
             llm_model: env::var("LLM_MODEL").ok(),
             llm_base_url: env::var("LLM_BASE_URL").ok(),
-            llm_context_window: 0,
+            llm_context_window: context_window_from(|k| env::var(k).ok()),
             llm_title_model: env::var("LLM_TITLE_MODEL").ok(),
             llm_sampling: llm_sampling_from_env(),
             stripe_secret_key: env::var("STRIPE_SECRET_KEY").ok(),
@@ -658,6 +658,20 @@ fn optional_parsed<T>(
         Some(raw) if raw.trim().is_empty() => None,
         Some(raw) => Some(parse(&raw).unwrap_or_else(|e| panic!("{key}: {e}"))),
         None => None,
+    }
+}
+
+/// `LLM_CONTEXT_WINDOW` in tokens; unset or empty means 0 (use the provider's
+/// per-model window). An invalid value aborts startup naming the variable.
+fn context_window_from(get: impl Fn(&str) -> Option<String>) -> u32 {
+    match get("LLM_CONTEXT_WINDOW") {
+        Some(raw) if !raw.trim().is_empty() => raw
+            .trim()
+            .parse::<u32>()
+            .ok()
+            .filter(|n| *n > 0)
+            .unwrap_or_else(|| panic!("LLM_CONTEXT_WINDOW: expected a positive integer, got {raw:?}")),
+        _ => 0,
     }
 }
 

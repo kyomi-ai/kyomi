@@ -278,8 +278,7 @@ impl LLMProvider for AnthropicClient {
     }
 
     fn context_window(&self) -> u32 {
-        // All Claude models share a 200,000-token context window.
-        200_000
+        AnthropicClient::context_window(self)
     }
 }
 
@@ -334,11 +333,12 @@ pub fn create_provider(
 ) -> kyomi_core::Result<Box<dyn LLMProvider>> {
     match config.provider {
         ProviderKind::Anthropic => {
-            let client = if let Some(base_url) = config.base_url {
+            let mut client = if let Some(base_url) = config.base_url {
                 AnthropicClient::with_base_url(config.api_key, config.model, base_url)?
             } else {
                 AnthropicClient::new(config.api_key, config.model)?
             };
+            client.set_context_window(config.context_window);
             Ok(Box::new(client))
         }
         ProviderKind::OpenAI => {
@@ -952,6 +952,7 @@ mod reasoning_usage_tests {
             tool_calls,
             cost: None,
             thinking_content: None,
+            call_detail: None,
         }
     }
 

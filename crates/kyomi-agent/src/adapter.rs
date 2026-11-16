@@ -295,6 +295,11 @@ impl ChatAgentAdapter {
         }
     }
 
+    /// Record every model call's usage into `ledger` (KYO-974).
+    pub fn set_usage_ledger(&mut self, ledger: crate::usage_ledger::UsageLedger) {
+        self.agent.set_usage_ledger(ledger);
+    }
+
     /// Await tracker delivery in the shared loop. Durable planning/tool notifications are
     /// supplied by RuntimeSink only after their atomic commit.
     pub fn set_thinking_tracker(&mut self, tracker: Arc<tokio::sync::Mutex<AgentThinkingTracker>>) {
@@ -1774,6 +1779,7 @@ mod tests {
                 tool_calls: None,
                 cost: None,
                 thinking_content: None,
+                call_detail: None,
             })
         }
 

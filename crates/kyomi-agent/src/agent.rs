@@ -477,6 +477,8 @@ pub struct CustomAgent {
     tool_context: ToolContext,
     /// Map of user_id -> display name for message attribution.
     user_names: HashMap<String, String>,
+    /// Records every model call's usage for the run's `api_usage_log` row (KYO-974).
+    usage_ledger: Option<crate::usage_ledger::UsageLedger>,
 }
 
 impl CustomAgent {
@@ -497,7 +499,13 @@ impl CustomAgent {
             registry,
             tool_context,
             user_names,
+            usage_ledger: None,
         }
+    }
+
+    /// Record every model call's usage into `ledger`.
+    pub fn set_usage_ledger(&mut self, ledger: crate::usage_ledger::UsageLedger) {
+        self.usage_ledger = Some(ledger);
     }
 
     // -----------------------------------------------------------------------
@@ -715,6 +723,10 @@ impl CustomAgent {
             // regardless of which branch below the response takes next
             // (return, continue, or fall through to tool execution).
             iterations_used += 1;
+
+            if let Some(ledger) = &self.usage_ledger {
+                ledger.record(self.client.model(), &response);
+            }
 
             // Track token usage.
             // Total input tokens = regular + cache-creation + cache-read.
@@ -3194,6 +3206,48 @@ Second chart:\n{CHARTML_STRIPPED_NOTE}\nDone."
             "chat() must return the wrap-up's substantive content, not an error \
              or a canned apology"
         );
+    }
+
+    #[tokio::test]
+    async fn provider_thinking_reaches_the_thinking_callback() {
+        let seen = Arc::new(Mutex::new(Vec::<String>::new()));
+        let (mut agent, _calls) = scripted_agent_with_config(
+            AgentConfig::default(),
+            vec![Reply::TextWithThinking("Done.".into(), "I compared the two metrics.".into())],
+            Reply::Text("unused".into()),
+        )
+        .await;
+        let sink = seen.clone();
+        agent.callbacks_mut().on_thinking = Some(Box::new(move |t: &str| sink.lock().unwrap().push(t.to_string())));
+
+        agent.chat("hi", CancellationToken::new(), None, None, None).await.unwrap();
+
+        assert_eq!(*seen.lock().unwrap(), vec!["I compared the two metrics.".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn usage_ledger_records_every_model_call_of_the_run() {
+        let usage = |w, r| AgentTokenUsage {
+            input_tokens: 10,
+            output_tokens: 20,
+            cache_creation_input_tokens: w,
+            cache_read_input_tokens: r,
+            reasoning_tokens: 0,
+        };
+        let (mut agent, _calls) = scripted_agent_with_config(
+            AgentConfig::default(),
+            vec![Reply::ToolCallWithUsage(usage(5000, 0)), Reply::ToolCallWithUsage(usage(0, 5000))],
+            Reply::Text("done".into()),
+        )
+        .await;
+        let ledger = crate::usage_ledger::UsageLedger::default();
+        agent.set_usage_ledger(ledger.clone());
+
+        agent.chat("hi", CancellationToken::new(), None, None, None).await.unwrap();
+
+        let t = ledger.totals();
+        assert_eq!((t.cache_creation_input_tokens, t.cache_read_input_tokens), (5000, 5000));
+        assert_eq!(ledger.extra_metadata().unwrap()["calls"].as_array().unwrap().len(), 3);
     }
 
     #[tokio::test]

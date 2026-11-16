@@ -1945,6 +1945,9 @@ async fn lifecycle_review_regressions(db: &DbPool) {
         cost_estimate: 0.5,
         component: "chat".into(),
         provider_cost_usd: None,
+        cache_creation_input_tokens: 4,
+        cache_read_input_tokens: 3,
+        extra_metadata: Some(r#"{"calls":[{"cache_read_input_tokens":3}]}"#.into()),
     };
     store
         .fenced_api_usage(&conversation, &receipt.run_id, &lease, 1105, &usage)
@@ -1976,6 +1979,17 @@ async fn lifecycle_review_regressions(db: &DbPool) {
         1,
         "stale/expired owners must write zero usage rows"
     );
+    let (cache_write, cache_read, metadata): (i32, i32, String) = kyomi_core::db_fetch_one!(
+        db,
+        (i32, i32, String),
+        "SELECT cache_creation_input_tokens, cache_read_input_tokens, \
+         CAST(extra_metadata AS TEXT) FROM api_usage_log WHERE session_id=$1",
+        &sid
+    )
+    .unwrap();
+    assert_eq!((cache_write, cache_read), (4, 3), "cache totals must be persisted");
+    let metadata: serde_json::Value = serde_json::from_str(&metadata).unwrap();
+    assert_eq!(metadata["calls"][0]["cache_read_input_tokens"], 3, "per-call breakdown must be persisted");
     store
         .finish(
             &conversation,
@@ -2232,6 +2246,9 @@ async fn lease_wait_cannot_resurrect(db: &DbPool, other: &DbPool) {
                                         cost_estimate: 0.1,
                                         component: "chat".into(),
                                         provider_cost_usd: None,
+                                        cache_creation_input_tokens: 0,
+                                        cache_read_input_tokens: 0,
+                                        extra_metadata: None,
                                     },
                                 )
                                 .await

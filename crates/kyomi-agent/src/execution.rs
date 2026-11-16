@@ -31,6 +31,9 @@ use kyomi_embed::LazyEmbedding;
 
 use crate::adapter::{AssistantMessagePersistence, ChatAgentAdapter, UserMessagePersistence};
 
+/// Markup on provider cost to cover payment processing fees; Kyomi-billed rows only.
+pub(crate) const AI_COST_MULTIPLIER: f64 = 1.1;
+
 /// SQL used to persist a row to `api_usage_log` after an agent turn.
 ///
 /// Semantics of the two cost columns (see [`kyomi_core::models::ApiUsageLog`]):
@@ -42,12 +45,21 @@ use crate::adapter::{AssistantMessagePersistence, ChatAgentAdapter, UserMessageP
 ///   already the real cost.
 ///
 /// Extracted as a const so it can be unit-tested without a database.
+///
+/// `extra_metadata` is a `json` column on Postgres (the text parameter needs
+/// the cast) and plain `TEXT` on SQLite, so the statement is per backend.
 pub(crate) const API_USAGE_LOG_INSERT_SQL: &str = "INSERT INTO api_usage_log \
      (user_id, workspace_id, session_id, timestamp, provider, model, \
       input_tokens, output_tokens, total_tokens, \
       cache_creation_input_tokens, cache_read_input_tokens, \
-      cost_estimate, component, provider_cost_usd) \
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 0, 0, $10, $11, $12)";
+      cost_estimate, component, provider_cost_usd, extra_metadata) \
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $13, $14, $10, $11, $12, $15::text::json)";
+pub(crate) const API_USAGE_LOG_INSERT_SQL_SQLITE: &str = "INSERT INTO api_usage_log \
+     (user_id, workspace_id, session_id, timestamp, provider, model, \
+      input_tokens, output_tokens, total_tokens, \
+      cache_creation_input_tokens, cache_read_input_tokens, \
+      cost_estimate, component, provider_cost_usd, extra_metadata) \
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $13, $14, $10, $11, $12, $15)";
 use crate::agent::{AgentConfig, CustomAgent};
 use crate::prompt;
 use crate::provider::{
@@ -532,6 +544,10 @@ pub async fn execute_agent_chat(
         encryption_key.clone(),
     );
 
+    // Per-call usage for this run's `api_usage_log` row (KYO-974).
+    let usage_ledger = crate::usage_ledger::UsageLedger::default();
+    adapter.set_usage_ledger(usage_ledger.clone());
+
     // 8. Resolve the assistant message id.
     //    `AssistantMessagePersistence::tag_id()` covers both arms: for
     //    `CallerPreInserted` (chat — KYO-493) this is the id of the
@@ -672,7 +688,6 @@ pub async fn execute_agent_chat(
     // sums `cost_estimate` from this table and must not charge BYOK usage
     // against `ai_credits_used_usd`. Writing 0 keeps the single source of
     // truth for billing consistent without a parallel BYOK-only code path.
-    const AI_COST_MULTIPLIER: f64 = 1.1;
     if input_tokens > 0 || output_tokens > 0 {
         let total_tokens = (input_tokens + output_tokens) as i32;
         // BYOK: `cost_estimate = 0.0` (not billed against Kyomi credits) and
@@ -688,6 +703,10 @@ pub async fn execute_agent_chat(
             (total_cost * AI_COST_MULTIPLIER, None)
         };
         let provider_str = provider_kind.to_string();
+        let ledger_totals = usage_ledger.totals();
+        let cache_creation = i32::try_from(ledger_totals.cache_creation_input_tokens).unwrap_or(i32::MAX);
+        let cache_read = i32::try_from(ledger_totals.cache_read_input_tokens).unwrap_or(i32::MAX);
+        let extra_metadata = usage_ledger.extra_metadata().map(|m| m.to_string());
         if let Some(run) = config.assistant_message_persistence.durable_run() {
             let usage = kyomi_auth::conversation_events::ApiUsageWrite {
                 provider: provider_str,
@@ -698,6 +717,9 @@ pub async fn execute_agent_chat(
                 cost_estimate: billed_cost,
                 component: config.component.clone(),
                 provider_cost_usd,
+                cache_creation_input_tokens: cache_creation,
+                cache_read_input_tokens: cache_read,
+                extra_metadata: extra_metadata.clone(),
             };
             kyomi_auth::conversation_events::ConversationStore::new(
                 db, encryption_key, &config.user_id, &config.workspace_id,
@@ -707,7 +729,10 @@ pub async fn execute_agent_chat(
             ).await.map_err(|error| kyomi_core::Error::ServiceUnavailable(error.to_string()))?;
         } else if let Err(e) = kyomi_core::db_execute!(
             db,
-            API_USAGE_LOG_INSERT_SQL,
+            match &db {
+                DbPool::Postgres(_) => API_USAGE_LOG_INSERT_SQL,
+                DbPool::Sqlite(_) => API_USAGE_LOG_INSERT_SQL_SQLITE,
+            },
             &config.user_id,
             &config.workspace_id,
             &config.session_id as &str,
@@ -719,7 +744,10 @@ pub async fn execute_agent_chat(
             total_tokens,
             billed_cost,
             &config.component,
-            provider_cost_usd
+            provider_cost_usd,
+            cache_creation,
+            cache_read,
+            &extra_metadata
         ) {
             warn!(error = %e, "Failed to log API usage to database");
         }
@@ -1692,19 +1720,16 @@ mod tests {
             sql.contains("provider_cost_usd"),
             "INSERT must reference provider_cost_usd: {sql}"
         );
-        // Must be the 12th bind parameter (after the 11 existing ones).
-        assert!(
-            sql.contains("$12"),
-            "INSERT must bind $12 for provider_cost_usd: {sql}"
-        );
-        // Sanity: the 12 placeholders line up with 12 named columns (two of
-        // the columns — cache_creation_input_tokens / cache_read_input_tokens
-        // — are hard-coded to 0 in VALUES, so 14 columns total, 12 binds).
-        let placeholder_count = (1..=12).filter(|n| sql.contains(&format!("${n}"))).count();
-        assert_eq!(
-            placeholder_count, 12,
-            "INSERT should have exactly 12 bind placeholders: {sql}"
-        );
+        // 15 columns, 15 distinct binds: the cache totals ($13, $14) and the
+        // per-call breakdown ($15) are real values, never literals (KYO-974).
+        for sql in [API_USAGE_LOG_INSERT_SQL, API_USAGE_LOG_INSERT_SQL_SQLITE] {
+            let placeholder_count = (1..=15).filter(|n| sql.contains(&format!("${n}"))).count();
+            assert_eq!(
+                placeholder_count, 15,
+                "INSERT should have exactly 15 bind placeholders: {sql}"
+            );
+            assert!(!sql.contains(", 0, 0,"), "cache columns must not be literals: {sql}");
+        }
     }
 
     #[test]

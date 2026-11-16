@@ -16,7 +16,10 @@ use serde_json::json;
 use tracing::{debug, info, warn};
 
 use crate::provider::RequestOptions;
-use crate::types::{AgentTokenUsage, LLMResponse, Message, MessageRole, Tool, ToolCall};
+use crate::anthropic_pricing::{price_call, CallTokens};
+use crate::types::{
+    AgentTokenUsage, LLMResponse, Message, MessageRole, ProviderCallDetail, Tool, ToolCall,
+};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -48,6 +51,9 @@ pub const AUDIT_MODEL: &str = "claude-haiku-4-5-20251001";
 /// the Python backend's behavior).
 pub struct AnthropicClient {
     base: crate::provider::ProviderBase,
+    /// Operator-configured window (`LLM_CONTEXT_WINDOW`); `None` uses the
+    /// per-model table in [`crate::anthropic_pricing`].
+    context_window_override: Option<u32>,
 }
 
 impl AnthropicClient {
@@ -65,6 +71,7 @@ impl AnthropicClient {
                 None,
                 ANTHROPIC_API_URL,
             )?,
+            context_window_override: None,
         })
     }
 
@@ -81,7 +88,19 @@ impl AnthropicClient {
                 DEFAULT_MODEL,
                 base_url,
             )?,
+            context_window_override: None,
         })
+    }
+
+    /// Override the context window reported for this client (0 = no override).
+    pub fn set_context_window(&mut self, tokens: u32) {
+        self.context_window_override = (tokens > 0).then_some(tokens);
+    }
+
+    /// Context window in tokens: the override, else the model's own window.
+    pub fn context_window(&self) -> u32 {
+        self.context_window_override
+            .unwrap_or_else(|| crate::anthropic_pricing::context_window(&self.base.model))
     }
 
     /// Return the model name this client is configured with.
@@ -249,6 +268,16 @@ impl AnthropicClient {
             body["output_config"] = json!({"effort": effort});
         }
 
+        // Ask for readable thinking summaries. Thinking is adaptive by default
+        // on current models with `display: "omitted"` (empty `thinking`
+        // text); `summarized` changes visibility only, not billing. The
+        // thinking configuration is part of the cached prefix, so it is sent
+        // on every request of a supporting model (KYO-974). Models without
+        // adaptive thinking (Haiku 4.5, ...) would answer 400, so they get none.
+        if crate::anthropic_pricing::supports_adaptive_thinking(model) {
+            body["thinking"] = json!({"type": "adaptive", "display": "summarized"});
+        }
+
         // Request-level prompt caching — Anthropic automatically places the
         // breakpoint at the last cacheable block and extends the cache
         // incrementally as the conversation grows.
@@ -302,19 +331,30 @@ impl AnthropicClient {
         maybe_log_llm("request", &body);
 
         // Call with retry using shared exponential backoff utility.
-        let response_json = kyomi_core::retry::retry_with_backoff(|| self.call_api(&body)).await?;
+        let (response_json, request_id) =
+            kyomi_core::retry::retry_with_backoff(|| self.call_api(&body)).await?;
 
         // Log response if LOG_LLM_CONTEXT is enabled
         maybe_log_llm("response", &response_json);
 
         // Parse response.
-        let response = Self::parse_response(&self.base.model, &response_json)?;
+        let response = Self::parse_response(&self.base.model, &response_json, request_id)?;
         crate::provider::log_reasoning_usage("anthropic", &self.base.model, options, &response);
         Ok(response)
     }
 
+    /// Post a prepared body and parse the response (live tests only).
+    #[cfg(test)]
+    pub(crate) async fn post_for_live_test(&self, body: &serde_json::Value) -> LLMResponse {
+        let (json, request_id) = self.call_api(body).await.unwrap();
+        Self::parse_response(&self.base.model, &json, request_id).unwrap()
+    }
+
     /// Send a single HTTP request to the Anthropic Messages API.
-    async fn call_api(&self, body: &serde_json::Value) -> kyomi_core::Result<serde_json::Value> {
+    async fn call_api(
+        &self,
+        body: &serde_json::Value,
+    ) -> kyomi_core::Result<(serde_json::Value, Option<String>)> {
         let url = format!("{}/v1/messages", self.base.base_url.trim_end_matches('/'));
         let response = self
             .base
@@ -333,11 +373,17 @@ impl AnthropicClient {
 
         let status = response.status();
 
+        let request_id = response
+            .headers()
+            .get("request-id")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string);
+
         if status.is_success() {
             let json: serde_json::Value = response.json().await.map_err(|e| {
                 kyomi_core::Error::Internal(format!("Anthropic API: failed to parse response: {e}"))
             })?;
-            return Ok(json);
+            return Ok((json, request_id));
         }
 
         // Error response — try to extract the error message from the body.
@@ -374,9 +420,10 @@ impl AnthropicClient {
     // -----------------------------------------------------------------------
 
     /// Parse the Anthropic API JSON response into an [`LLMResponse`].
-    fn parse_response(
+    pub(crate) fn parse_response(
         model: &str,
         response: &serde_json::Value,
+        request_id: Option<String>,
     ) -> kyomi_core::Result<LLMResponse> {
         // Extract content blocks.
         let content_blocks = response
@@ -397,6 +444,7 @@ impl AnthropicClient {
             .to_string();
 
         let mut text_parts: Vec<&str> = Vec::new();
+        let mut thinking_parts: Vec<&str> = Vec::new();
         let mut tool_calls: Vec<ToolCall> = Vec::new();
 
         for block in content_blocks {
@@ -404,6 +452,15 @@ impl AnthropicClient {
                 Some("text") => {
                     if let Some(text) = block.get("text").and_then(|t| t.as_str()) {
                         text_parts.push(text);
+                    }
+                }
+                // Summarized thinking. With `display: "omitted"` the text is
+                // empty and is skipped; a `redacted_thinking` block has no text.
+                Some("thinking") => {
+                    if let Some(text) = block.get("thinking").and_then(|t| t.as_str())
+                        && !text.is_empty()
+                    {
+                        thinking_parts.push(text);
                     }
                 }
                 Some("tool_use") => {
@@ -463,8 +520,9 @@ impl AnthropicClient {
 
         let content = text_parts.join("");
 
-        // Extract usage.
+        // Extract usage and price it.
         let usage = Self::parse_usage(response);
+        let call_detail = Self::call_detail(model, response, &usage, &finish_reason, request_id);
 
         info!(
             model = model,
@@ -486,9 +544,52 @@ impl AnthropicClient {
             } else {
                 Some(tool_calls)
             },
-            cost: None,
-            thinking_content: None,
+            cost: Some(call_detail.cost_usd),
+            thinking_content: (!thinking_parts.is_empty()).then(|| thinking_parts.join("\n\n")),
+            call_detail: Some(call_detail),
         })
+    }
+
+    /// Build the per-call detail and price it from the token counts.
+    fn call_detail(
+        model: &str,
+        response: &serde_json::Value,
+        usage: &AgentTokenUsage,
+        finish_reason: &str,
+        request_id: Option<String>,
+    ) -> ProviderCallDetail {
+        let u = response.get("usage");
+        let ttl = |key: &str| {
+            u.and_then(|u| u.get("cache_creation"))
+                .and_then(|c| c.get(key))
+                .and_then(|v| v.as_u64())
+        };
+        // Without the TTL breakdown every cache write is a default 5-minute one.
+        let (w5m, w1h) = match (ttl("ephemeral_5m_input_tokens"), ttl("ephemeral_1h_input_tokens")) {
+            (None, None) => (u64::from(usage.cache_creation_input_tokens), 0),
+            (a, b) => (a.unwrap_or(0), b.unwrap_or(0)),
+        };
+        let priced = price_call(
+            model,
+            CallTokens {
+                input: u64::from(usage.input_tokens),
+                output: u64::from(usage.output_tokens),
+                cache_write_5m: w5m,
+                cache_write_1h: w1h,
+                cache_read: u64::from(usage.cache_read_input_tokens),
+            },
+        );
+        ProviderCallDetail {
+            message_id: response.get("id").and_then(|v| v.as_str()).map(str::to_string),
+            request_id,
+            service_tier: u.and_then(|u| u.get("service_tier")).and_then(|v| v.as_str()).map(str::to_string),
+            cache_creation_5m: w5m as u32,
+            cache_creation_1h: w1h as u32,
+            stop_reason: finish_reason.to_string(),
+            stop_details: response.get("stop_details").filter(|v| !v.is_null()).cloned(),
+            cost_usd: priced.cost_usd,
+            price_known: priced.known_model,
+        }
     }
 
     /// Parse the `usage` object from the Anthropic response.
@@ -654,6 +755,33 @@ mod tests {
         assert_eq!(content[0]["content"], r#"{"found": true}"#);
     }
 
+    /// KYO-974 thinking-replay decision: history is rebuilt statelessly and
+    /// carries no thinking blocks, deterministically, so the cached prefix is
+    /// byte-identical on every request of a tool loop. Live measurement
+    /// (Haiku 5.5, 4-round dependent chain) found replay within run-to-run
+    /// noise (about 3% cheaper) and the stateless cache reads grew every call,
+    /// so thinking is not replayed; see docs/LLM_PROVIDERS.md.
+    #[test]
+    fn stateless_history_has_no_thinking_blocks_and_is_deterministic() {
+        let tool_calls = vec![ToolCall {
+            id: "toolu_1".into(),
+            name: "lookup_metric".into(),
+            arguments: json!({"name": "x"}),
+            arguments_error: None,
+        }];
+        let messages = vec![
+            Message::system("prompt"),
+            Message::user("go"),
+            Message::assistant_with_tool_calls("working", tool_calls),
+            Message::tool_result("toolu_1", "lookup_metric", "{}"),
+        ];
+        let names = HashMap::new();
+        let first = AnthropicClient::convert_messages_to_anthropic(&messages, &names);
+        let second = AnthropicClient::convert_messages_to_anthropic(&messages, &names);
+        assert_eq!(first, second);
+        assert!(!serde_json::to_string(&first.1).unwrap().contains("thinking"));
+    }
+
     // -- Tool conversion tests ----------------------------------------------
 
     #[test]
@@ -765,14 +893,15 @@ mod tests {
             }
         });
         let result =
-            AnthropicClient::parse_response("claude-sonnet-4-5-20250929", &response).unwrap();
+            AnthropicClient::parse_response("claude-sonnet-4-5-20250929", &response, None).unwrap();
 
         assert_eq!(result.content, "Hello, how can I help?");
         assert_eq!(result.finish_reason, "end_turn");
         assert_eq!(result.usage.input_tokens, 100);
         assert_eq!(result.usage.output_tokens, 20);
         assert!(result.tool_calls.is_none());
-        assert!(result.cost.is_none());
+        // Sonnet 4.5: 100*$3 + 20*$15 = $600 / 1e6.
+        assert!((result.cost.unwrap() - 0.0006).abs() < 1e-12);
     }
 
     #[test]
@@ -796,7 +925,7 @@ mod tests {
             }
         });
         let result =
-            AnthropicClient::parse_response("claude-sonnet-4-5-20250929", &response).unwrap();
+            AnthropicClient::parse_response("claude-sonnet-4-5-20250929", &response, None).unwrap();
 
         assert_eq!(result.content, "Let me search.");
         assert_eq!(result.finish_reason, "tool_use");
@@ -821,7 +950,7 @@ mod tests {
             "usage": {"input_tokens": 10, "output_tokens": 5}
         });
         let result =
-            AnthropicClient::parse_response("claude-sonnet-4-5-20250929", &response).unwrap();
+            AnthropicClient::parse_response("claude-sonnet-4-5-20250929", &response, None).unwrap();
 
         assert_eq!(result.content, "Part 1. Part 2.");
     }
@@ -833,7 +962,7 @@ mod tests {
             "stop_reason": "end_turn"
         });
         let result =
-            AnthropicClient::parse_response("claude-sonnet-4-5-20250929", &response).unwrap();
+            AnthropicClient::parse_response("claude-sonnet-4-5-20250929", &response, None).unwrap();
 
         assert_eq!(result.usage.input_tokens, 0);
         assert_eq!(result.usage.output_tokens, 0);
@@ -1024,7 +1153,7 @@ mod tests {
             "usage": {"input_tokens": 100, "output_tokens": 30}
         });
         let result =
-            AnthropicClient::parse_response("claude-sonnet-4-5-20250929", &response).unwrap();
+            AnthropicClient::parse_response("claude-sonnet-4-5-20250929", &response, None).unwrap();
         assert_eq!(result.finish_reason, "tool_use");
         assert!(result.tool_calls.is_some());
         assert_eq!(result.tool_calls.as_ref().unwrap().len(), 1);
@@ -1038,7 +1167,7 @@ mod tests {
             "usage": {"input_tokens": 50000, "output_tokens": 4096}
         });
         let result =
-            AnthropicClient::parse_response("claude-sonnet-4-5-20250929", &response).unwrap();
+            AnthropicClient::parse_response("claude-sonnet-4-5-20250929", &response, None).unwrap();
         assert_eq!(result.finish_reason, "max_tokens");
         assert!(result.tool_calls.is_none());
     }
@@ -1060,7 +1189,7 @@ mod tests {
             "usage": {"input_tokens": 50000, "output_tokens": 4096}
         });
         let result =
-            AnthropicClient::parse_response("claude-sonnet-4-5-20250929", &response).unwrap();
+            AnthropicClient::parse_response("claude-sonnet-4-5-20250929", &response, None).unwrap();
         assert_eq!(result.finish_reason, "max_tokens");
         let tool_calls = result.tool_calls.expect("tool_use block should still surface");
         let tc = &tool_calls[0];
@@ -1088,7 +1217,7 @@ mod tests {
             "usage": {"input_tokens": 100, "output_tokens": 10}
         });
         let result =
-            AnthropicClient::parse_response("claude-sonnet-4-5-20250929", &response).unwrap();
+            AnthropicClient::parse_response("claude-sonnet-4-5-20250929", &response, None).unwrap();
         let tool_calls = result.tool_calls.unwrap();
         let tc = &tool_calls[0];
         assert!(tc.arguments.as_object().unwrap().is_empty());
@@ -1102,7 +1231,7 @@ mod tests {
             "usage": {"input_tokens": 10, "output_tokens": 5}
         });
         let result =
-            AnthropicClient::parse_response("claude-sonnet-4-5-20250929", &response).unwrap();
+            AnthropicClient::parse_response("claude-sonnet-4-5-20250929", &response, None).unwrap();
         assert_eq!(result.finish_reason, "unknown");
     }
 
@@ -1120,7 +1249,7 @@ mod tests {
             "usage": {"input_tokens": 500, "output_tokens": 100}
         });
         let result =
-            AnthropicClient::parse_response("claude-sonnet-4-5-20250929", &response).unwrap();
+            AnthropicClient::parse_response("claude-sonnet-4-5-20250929", &response, None).unwrap();
         assert_eq!(result.content, "I'll search and query.");
         let tool_calls = result.tool_calls.unwrap();
         assert_eq!(tool_calls.len(), 2);
@@ -1144,7 +1273,7 @@ mod tests {
             "usage": {"input_tokens": 50, "output_tokens": 10}
         });
         let result =
-            AnthropicClient::parse_response("claude-sonnet-4-5-20250929", &response).unwrap();
+            AnthropicClient::parse_response("claude-sonnet-4-5-20250929", &response, None).unwrap();
         // Unknown blocks are silently skipped; text blocks concatenated.
         assert_eq!(result.content, "Hello world");
     }
@@ -1161,7 +1290,7 @@ mod tests {
             "usage": {"input_tokens": 200, "output_tokens": 30}
         });
         let result =
-            AnthropicClient::parse_response("claude-sonnet-4-5-20250929", &response).unwrap();
+            AnthropicClient::parse_response("claude-sonnet-4-5-20250929", &response, None).unwrap();
         assert_eq!(result.content, ""); // No text content.
         assert!(result.tool_calls.is_some());
         assert_eq!(result.tool_calls.as_ref().unwrap().len(), 1);
@@ -1182,12 +1311,13 @@ mod tests {
             }
         });
         let result =
-            AnthropicClient::parse_response("claude-sonnet-4-5-20250929", &response).unwrap();
+            AnthropicClient::parse_response("claude-sonnet-4-5-20250929", &response, None).unwrap();
         assert_eq!(result.usage.input_tokens, 1000);
         assert_eq!(result.usage.output_tokens, 500);
         assert_eq!(result.usage.cache_creation_input_tokens, 2000);
         assert_eq!(result.usage.cache_read_input_tokens, 8000);
-        assert!(result.cost.is_none());
+        // Sonnet 4.5: 1000*3 + 500*15 + 2000*3.75 + 8000*0.3 = 20,400 / 1e6.
+        assert!((result.cost.unwrap() - 0.0204).abs() < 1e-12);
     }
 
     // -- Contract: parse_response missing content array ----------------------
@@ -1198,7 +1328,7 @@ mod tests {
             "stop_reason": "end_turn",
             "usage": {"input_tokens": 10, "output_tokens": 5}
         });
-        let result = AnthropicClient::parse_response("claude-sonnet-4-5-20250929", &response);
+        let result = AnthropicClient::parse_response("claude-sonnet-4-5-20250929", &response, None);
         assert!(result.is_err());
     }
 
@@ -1270,10 +1400,94 @@ mod tests {
             "stop_reason": "end_turn"
         });
         let result =
-            AnthropicClient::parse_response("claude-sonnet-4-5-20250929", &response).unwrap();
+            AnthropicClient::parse_response("claude-sonnet-4-5-20250929", &response, None).unwrap();
         assert_eq!(result.content, "");
         assert!(result.tool_calls.is_none());
         assert_eq!(result.finish_reason, "end_turn");
+        assert_eq!(
+            result.thinking_content.as_deref(),
+            Some("I need to analyze this carefully...")
+        );
+    }
+
+    #[test]
+    fn empty_omitted_thinking_block_yields_no_thinking_content() {
+        let response = json!({
+            "content": [
+                {"type": "thinking", "thinking": "", "signature": "sig"},
+                {"type": "text", "text": "hi"}
+            ],
+            "usage": {"input_tokens": 1, "output_tokens": 1},
+            "stop_reason": "end_turn"
+        });
+        let result = AnthropicClient::parse_response("claude-sonnet-5-5", &response, None).unwrap();
+        assert!(result.thinking_content.is_none());
+        assert_eq!(result.content, "hi");
+    }
+
+    #[test]
+    fn full_usage_is_parsed_and_priced() {
+        let response = json!({
+            "id": "msg_01abc",
+            "content": [{"type": "text", "text": "ok"}],
+            "stop_reason": "end_turn",
+            "usage": {
+                "input_tokens": 1000,
+                "output_tokens": 2000,
+                "cache_creation_input_tokens": 14000,
+                "cache_read_input_tokens": 50000,
+                "cache_creation": {
+                    "ephemeral_5m_input_tokens": 10000,
+                    "ephemeral_1h_input_tokens": 4000
+                },
+                "service_tier": "standard",
+                "output_tokens_details": {"thinking_tokens": 1500}
+            }
+        });
+        let r = AnthropicClient::parse_response("claude-sonnet-5-5", &response, Some("req_9".into()))
+            .unwrap();
+        let d = r.call_detail.expect("detail");
+        assert_eq!(d.message_id.as_deref(), Some("msg_01abc"));
+        assert_eq!(d.request_id.as_deref(), Some("req_9"));
+        assert_eq!(d.service_tier.as_deref(), Some("standard"));
+        assert_eq!((d.cache_creation_5m, d.cache_creation_1h), (10_000, 4_000));
+        assert!(d.price_known);
+        // 1000*2 + 2000*10 + 10000*2.5 + 4000*4 + 50000*0.1 = 68,000 / 1e6
+        assert!((r.cost.unwrap() - 0.068).abs() < 1e-12);
+        assert_eq!(r.usage.reasoning_tokens, 1500);
+    }
+
+    #[test]
+    fn cache_writes_without_ttl_breakdown_are_priced_as_five_minute() {
+        let response = json!({
+            "content": [], "stop_reason": "end_turn",
+            "usage": {"input_tokens": 0, "output_tokens": 0, "cache_creation_input_tokens": 1_000_000}
+        });
+        let r = AnthropicClient::parse_response("claude-sonnet-5-5", &response, None).unwrap();
+        assert!((r.cost.unwrap() - 2.5).abs() < 1e-12);
+    }
+
+    #[test]
+    fn unknown_model_response_has_non_zero_cost_and_flag() {
+        let response = json!({
+            "content": [], "stop_reason": "end_turn",
+            "usage": {"input_tokens": 1_000_000, "output_tokens": 0}
+        });
+        let r = AnthropicClient::parse_response("claude-future-9", &response, None).unwrap();
+        assert!(r.cost.unwrap() > 0.0);
+        assert!(!r.call_detail.unwrap().price_known);
+    }
+
+    #[test]
+    fn context_window_follows_model_and_override() {
+        let mut c = AnthropicClient::new("k".into(), Some("claude-sonnet-5-5".into())).unwrap();
+        assert_eq!(c.context_window(), 1_000_000);
+        c.set_context_window(300_000);
+        assert_eq!(c.context_window(), 300_000);
+        c.set_context_window(0);
+        assert_eq!(c.context_window(), 1_000_000);
+        let h = AnthropicClient::new("k".into(), None).unwrap();
+        assert_eq!(h.context_window(), 200_000);
     }
 
     // -- Contract: extract_error_message edge cases -------------------------
@@ -1326,6 +1540,15 @@ mod tests {
         let body = body_with(&RequestOptions::new(1024));
         assert!(body.get("output_config").is_none(), "{body}");
         assert!(body.get("temperature").is_none(), "{body}");
+    }
+
+    #[test]
+    fn summarized_adaptive_thinking_is_requested_only_for_models_that_support_it() {
+        let opts = RequestOptions::new(1024);
+        let msgs = || vec![json!({"role": "user", "content": "hi"})];
+        let body = AnthropicClient::build_request_body("claude-sonnet-5-5", None, msgs(), &[], &opts);
+        assert_eq!(body["thinking"], json!({"type": "adaptive", "display": "summarized"}));
+        let body = AnthropicClient::build_request_body("claude-haiku-4-5-20251001", None, msgs(), &[], &opts);
         assert!(body.get("thinking").is_none(), "{body}");
     }
 
@@ -1334,7 +1557,7 @@ mod tests {
         for v in ["low", "xhigh", "max", "a-new-level", "50"] {
             let body = body_with(&RequestOptions::new(1024).with_reasoning_effort(Some(v.into())));
             assert_eq!(body["output_config"], json!({"effort": v}), "{v}");
-            assert!(body.get("thinking").is_none(), "must never send thinking.budget_tokens");
+            assert!(body["thinking"].get("budget_tokens").is_none(), "must never send thinking.budget_tokens");
         }
     }
 

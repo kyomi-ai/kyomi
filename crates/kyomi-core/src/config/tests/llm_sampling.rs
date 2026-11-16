@@ -55,3 +55,29 @@ fn invalid_temperature_aborts_startup_naming_the_variable() {
 fn invalid_effort_aborts_startup_naming_the_variable() {
     from(&[("LLM_TITLE_REASONING_EFFORT", "a b")]);
 }
+
+// -- LLM_CONTEXT_WINDOW (KYO-974) -------------------------------------------
+
+fn window(value: Option<&str>) -> u32 {
+    crate::config::context_window_from(|k| {
+        (k == "LLM_CONTEXT_WINDOW").then(|| value.map(str::to_string)).flatten()
+    })
+}
+
+#[test]
+fn context_window_unset_or_empty_is_zero() {
+    assert_eq!(window(None), 0);
+    assert_eq!(window(Some("  ")), 0);
+}
+
+#[test]
+fn context_window_is_read_in_tokens() {
+    assert_eq!(window(Some("1000000")), 1_000_000);
+    assert_eq!(window(Some(" 200000 ")), 200_000);
+}
+
+#[test]
+#[should_panic(expected = "LLM_CONTEXT_WINDOW")]
+fn context_window_zero_or_garbage_aborts_startup() {
+    window(Some("lots"));
+}

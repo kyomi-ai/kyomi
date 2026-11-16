@@ -535,6 +535,7 @@ impl OpenAIProvider {
             tool_calls,
             cost,
             thinking_content,
+            call_detail: None,
         })
     }
 

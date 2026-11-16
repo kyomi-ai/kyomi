@@ -206,6 +206,32 @@ pub struct LLMResponse {
     /// Separated from `content` so it can be streamed to the thinking tracker
     /// without polluting the user-visible response.
     pub thinking_content: Option<String>,
+    /// Provider-reported per-call detail beyond [`AgentTokenUsage`] (KYO-974).
+    /// `None` for providers that report none.
+    #[serde(default)]
+    pub call_detail: Option<ProviderCallDetail>,
+}
+
+/// Per-call detail from the Anthropic Messages API, recorded in
+/// `api_usage_log.extra_metadata` so cache behaviour and cost can be audited.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ProviderCallDetail {
+    /// Response `id` (`msg_...`).
+    pub message_id: Option<String>,
+    /// `request-id` response header.
+    pub request_id: Option<String>,
+    pub service_tier: Option<String>,
+    /// Cache writes with a 5-minute TTL (priced 1.25x input).
+    pub cache_creation_5m: u32,
+    /// Cache writes with a 1-hour TTL (priced 2x input).
+    pub cache_creation_1h: u32,
+    pub stop_reason: String,
+    /// `stop_details` object when the API returns one.
+    pub stop_details: Option<serde_json::Value>,
+    /// USD price of this call from the price table.
+    pub cost_usd: f64,
+    /// `false` when the model had no price row and the fallback rates applied.
+    pub price_known: bool,
 }
 
 // ---------------------------------------------------------------------------
