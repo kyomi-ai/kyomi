@@ -371,21 +371,31 @@ fn build_agent_config(
 /// `WEB_TOOLS_UNATTENDED`; copilots never do. An incompatible backend (for
 /// example a self-hosted workspace on a different LLM than the instance's
 /// `anthropic` backend assumes) leaves the tool absent with a warning instead
-/// of failing the run. Returns whether any web tool is available to the model.
+/// of failing the run.
+///
+/// Kyomi-executed backends register function tools in `registry`; provider-executed
+/// ones come back as [`crate::web::server_tools::ServerTool`] entries for the LLM
+/// request. [`WebRunPlan::available`] says whether the model has any web tool.
+#[derive(Default)]
+struct WebRunPlan {
+    available: bool,
+    server_tools: Vec<crate::web::server_tools::ServerTool>,
+}
+
 fn register_web_tools_for_run(
     registry: &mut crate::tools::ToolRegistry,
     app_config: &kyomi_core::Config,
     config: &AgentExecutionConfig,
     provider_kind: ProviderKind,
     llm_base_url: Option<&str>,
-) -> bool {
+) -> WebRunPlan {
     let eligible = if config.tools_subset.is_some() {
         app_config.web_tools.in_unattended_runs
     } else {
         config.context_type == "chat"
     };
     if !eligible {
-        return false;
+        return WebRunPlan::default();
     }
     let provider = provider_kind.to_string();
     let facts = kyomi_core::web_tools::LlmFacts { provider: &provider, base_url: llm_base_url };
@@ -401,9 +411,24 @@ fn register_web_tools_for_run(
     let fetch = resolve(kyomi_core::web_tools::WebToolKind::Fetch);
     if let Err(e) = crate::tools::web::register_web_tools(registry, &search, &fetch, &settings.caps) {
         tracing::warn!(error = %e, "failed to construct web tool backends");
-        return false;
+        return WebRunPlan::default();
     }
-    WEB_TOOL_NAMES.iter().any(|n| registry.get_tool(n).is_some())
+    let mut server_tools = Vec::new();
+    for (kind, resolved) in [
+        (kyomi_core::web_tools::WebToolKind::Search, &search),
+        (kyomi_core::web_tools::WebToolKind::Fetch, &fetch),
+    ] {
+        if let Some(cfg) = resolved.enabled()
+            && cfg.kind == kyomi_core::web_tools::WebBackendKind::Anthropic
+        {
+            server_tools.push(crate::web::server_tools::ServerTool {
+                kind,
+                entry: crate::web::server_tools::anthropic_tool_entry(kind, cfg, &settings.caps),
+            });
+        }
+    }
+    let available = !server_tools.is_empty() || WEB_TOOL_NAMES.iter().any(|n| registry.get_tool(n).is_some());
+    WebRunPlan { available, server_tools }
 }
 
 /// Execute the agent chat loop for a single user message.
@@ -545,20 +570,21 @@ pub async fn execute_agent_chat(
         }
     };
 
-    let agent_config = build_agent_config(&config, tool_filter, &sampling);
+    let mut agent_config = build_agent_config(&config, tool_filter, &sampling);
 
     // 4. Create tool registry (filtered by tools_subset if provided).
     let mut registry = create_default_registry();
-    let web_tools_registered = register_web_tools_for_run(
+    let web_plan = register_web_tools_for_run(
         &mut registry,
         app_config,
         &config,
         provider_kind,
         llm_base_url.as_deref(),
     );
-    if web_tools_registered {
+    if web_plan.available {
         system_prompt.push_str(prompt::WEB_ACCESS_SECTION);
     }
+    agent_config.server_tools = web_plan.server_tools;
     let registry = Arc::new(registry);
 
     // 5. Tool context was already built at the top of this function (see
@@ -2390,10 +2416,10 @@ mod tests {
 
     fn registered(app: &kyomi_core::Config, cfg: &AgentExecutionConfig, kind: ProviderKind) -> Vec<&'static str> {
         let mut registry = crate::tools::ToolRegistry::new();
-        let any = register_web_tools_for_run(&mut registry, app, cfg, kind, None);
+        let plan = register_web_tools_for_run(&mut registry, app, cfg, kind, None);
         let names: Vec<&'static str> =
             WEB_TOOL_NAMES.iter().copied().filter(|n| registry.get_tool(n).is_some()).collect();
-        assert_eq!(any, !names.is_empty());
+        assert_eq!(plan.available, !names.is_empty() || !plan.server_tools.is_empty());
         names
     }
 
@@ -2423,5 +2449,25 @@ mod tests {
         let app = web_config(&[("WEB_SEARCH_PROVIDER", "anthropic")]);
         let chat = AgentExecutionConfig::default();
         assert!(registered(&app, &chat, ProviderKind::OpenAI).is_empty());
+    }
+
+    #[test]
+    fn anthropic_backend_yields_server_tool_entries_not_function_tools() {
+        let app = web_config(&[("WEB_SEARCH_PROVIDER", "anthropic"), ("WEB_FETCH_PROVIDER", "anthropic")]);
+        let mut registry = crate::tools::ToolRegistry::new();
+        let plan = register_web_tools_for_run(&mut registry, &app, &AgentExecutionConfig::default(), ProviderKind::Anthropic, None);
+        assert!(plan.available);
+        assert!(WEB_TOOL_NAMES.iter().all(|n| registry.get_tool(n).is_none()), "Kyomi executes nothing");
+        let types: Vec<&str> = plan.server_tools.iter().map(|t| t.entry["type"].as_str().unwrap()).collect();
+        assert_eq!(types, ["web_search_20250305", "web_fetch_20250910"]);
+    }
+
+    #[test]
+    fn mixed_backends_search_provider_executed_fetch_kyomi_executed() {
+        let app = web_config(&[("WEB_SEARCH_PROVIDER", "anthropic"), ("WEB_FETCH_PROVIDER", "builtin")]);
+        let mut registry = crate::tools::ToolRegistry::new();
+        let plan = register_web_tools_for_run(&mut registry, &app, &AgentExecutionConfig::default(), ProviderKind::Anthropic, None);
+        assert_eq!(plan.server_tools.len(), 1);
+        assert!(registry.get_tool("web_fetch").is_some() && registry.get_tool("web_search").is_none());
     }
 }

@@ -69,6 +69,40 @@ pub async fn reserve_monthly(
     Ok(Ok(()))
 }
 
+/// Whether the monthly budget still has room, without spending any. Used for
+/// provider-executed backends, which Kyomi cannot meter per call: the counters
+/// are fed afterwards from the provider's reported usage ([`add_usage`]).
+pub async fn check_monthly(
+    kv: &KVPool,
+    caps: &WebCaps,
+    workspace_id: &str,
+    tool: WebToolKind,
+) -> kyomi_core::Result<Result<(), CapRefusal>> {
+    let read = |key: String| async move {
+        Ok::<i64, kyomi_core::Error>(kv.get(&key).await?.and_then(|v| v.parse().ok()).unwrap_or(0))
+    };
+    if read(month_key(&format!("ws:{workspace_id}"), tool)).await? >= i64::from(caps.workspace_monthly) {
+        return Ok(Err(CapRefusal::WorkspaceMonthly));
+    }
+    if read(month_key("global", tool)).await? >= i64::from(caps.global_monthly) {
+        return Ok(Err(CapRefusal::GlobalMonthly));
+    }
+    Ok(Ok(()))
+}
+
+/// Add `calls` provider-reported billable calls to the monthly counters.
+pub async fn add_usage(kv: &KVPool, workspace_id: &str, tool: WebToolKind, calls: u32) -> kyomi_core::Result<()> {
+    for scope in [format!("ws:{workspace_id}"), "global".to_string()] {
+        let key = month_key(&scope, tool);
+        for _ in 0..calls {
+            if kv.incr(&key).await? == 1 {
+                kv.expire(&key, MONTH_TTL_SECS).await?;
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Per-turn counter shared by every tool call of one tool in one agent turn.
 #[derive(Debug, Default)]
 pub struct TurnCounter(std::sync::atomic::AtomicU32);
@@ -108,6 +142,19 @@ mod tests {
         let c = caps(1, 10);
         assert_eq!(reserve_monthly(&kv, &c, "a", WebToolKind::Search).await.unwrap(), Ok(()));
         assert_eq!(reserve_monthly(&kv, &c, "a", WebToolKind::Fetch).await.unwrap(), Ok(()));
+    }
+
+    #[tokio::test]
+    async fn usage_reported_by_the_provider_feeds_the_budget_check() {
+        let kv = kyomi_core::kv_store_memory::InMemoryKVStore::new_pool();
+        let c = caps(2, 10);
+        let t = WebToolKind::Search;
+        assert_eq!(check_monthly(&kv, &c, "a", t).await.unwrap(), Ok(()));
+        add_usage(&kv, "a", t, 2).await.unwrap();
+        assert_eq!(check_monthly(&kv, &c, "a", t).await.unwrap(), Err(CapRefusal::WorkspaceMonthly));
+        assert_eq!(check_monthly(&kv, &c, "b", t).await.unwrap(), Ok(()), "other workspaces unaffected");
+        add_usage(&kv, "b", t, 8).await.unwrap();
+        assert_eq!(check_monthly(&kv, &c, "c", t).await.unwrap(), Err(CapRefusal::GlobalMonthly));
     }
 
     #[test]
