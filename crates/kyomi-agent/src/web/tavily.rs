@@ -158,6 +158,7 @@ mod tests {
             api_key: Some("tvly-test".into()),
             base_url: Some(base.into()),
             options: serde_json::Map::from_iter([("topic".to_string(), json!("news")), ("max_results".to_string(), json!(99)), ("search_depth".to_string(), json!("advanced"))]),
+            ..Default::default()
         };
         TavilyProvider::new(&cfg).unwrap()
     }

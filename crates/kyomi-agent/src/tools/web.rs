@@ -80,7 +80,15 @@ async fn admit(
     if let Err(refusal) = turn.reserve(per_turn) {
         return Ok(Some(refusal.to_string()));
     }
-    Ok(reserve_monthly(&ctx.kv, caps, &ctx.workspace_id, tool).await?.err().map(|r| r.to_string()))
+    let refused = reserve_monthly(&ctx.kv, caps, &ctx.workspace_id, tool).await?.err().map(|r| r.to_string());
+    if refused.is_none()
+        && let Ok((workspace_remaining, global_remaining)) =
+            crate::web::caps::remaining_monthly(&ctx.kv, caps, &ctx.workspace_id, tool).await
+    {
+        // Metered call: record what is left of the monthly quota.
+        tracing::info!(tool = tool.tool_name(), workspace_remaining, global_remaining, "web call metered");
+    }
+    Ok(refused)
 }
 
 /// One source for the model and the UI. Every free-text field from the web is
@@ -488,7 +496,7 @@ mod tests {
     }
 
     fn enabled(kind: WebBackendKind) -> ResolvedBackend {
-        ResolvedBackend::Enabled(WebBackendConfig { kind, api_key: Some("k".into()), base_url: None, options: Default::default() })
+        ResolvedBackend::Enabled(WebBackendConfig { kind, api_key: Some("k".into()), base_url: None, options: Default::default(), ..Default::default() })
     }
 
     #[test]

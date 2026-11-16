@@ -141,6 +141,7 @@ mod tests {
             api_key: Some("lk-test".into()),
             base_url: Some(base.into()),
             options: serde_json::Map::from_iter([("depth".to_string(), json!("deep"))]),
+            ..Default::default()
         })
         .unwrap()
     }

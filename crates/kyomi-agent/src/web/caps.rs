@@ -79,6 +79,22 @@ pub async fn check_monthly(
     Ok(Ok(()))
 }
 
+/// Calls left this month for the workspace and for the whole instance (saturating at
+/// zero), for observability: logged whenever a call is metered.
+pub async fn remaining_monthly(
+    kv: &KVPool,
+    caps: &WebCaps,
+    workspace_id: &str,
+    tool: WebToolKind,
+) -> kyomi_core::Result<(u32, u32)> {
+    let read = |key: String| async move {
+        Ok::<u32, kyomi_core::Error>(kv.get(&key).await?.and_then(|v| v.parse::<u32>().ok()).unwrap_or(0))
+    };
+    let ws = read(month_key(&format!("ws:{workspace_id}"), tool)).await?;
+    let global = read(month_key("global", tool)).await?;
+    Ok((caps.workspace_monthly.saturating_sub(ws), caps.global_monthly.saturating_sub(global)))
+}
+
 /// Add `calls` provider-reported billable calls to the monthly counters.
 pub async fn add_usage(kv: &KVPool, workspace_id: &str, tool: WebToolKind, calls: u32) -> kyomi_core::Result<()> {
     for scope in [format!("ws:{workspace_id}"), "global".to_string()] {
@@ -147,6 +163,18 @@ mod tests {
         assert_eq!(check_monthly(&kv, &c, "b", t).await.unwrap(), Ok(()), "other workspaces unaffected");
         add_usage(&kv, "b", t, 8).await.unwrap();
         assert_eq!(check_monthly(&kv, &c, "c", t).await.unwrap(), Err(CapRefusal::GlobalMonthly));
+    }
+
+    #[tokio::test]
+    async fn remaining_quota_reflects_usage_and_saturates_at_zero() {
+        let kv = kyomi_core::kv_store_memory::InMemoryKVStore::new_pool();
+        let c = caps(5, 8);
+        let t = WebToolKind::Fetch;
+        assert_eq!(remaining_monthly(&kv, &c, "a", t).await.unwrap(), (5, 8));
+        add_usage(&kv, "a", t, 3).await.unwrap();
+        assert_eq!(remaining_monthly(&kv, &c, "a", t).await.unwrap(), (2, 5));
+        add_usage(&kv, "b", t, 9).await.unwrap();
+        assert_eq!(remaining_monthly(&kv, &c, "a", t).await.unwrap(), (2, 0), "global saturates at zero");
     }
 
     #[test]

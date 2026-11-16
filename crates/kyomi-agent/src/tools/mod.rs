@@ -28,8 +28,8 @@ pub mod knowledge;
 pub mod query_utils;
 pub mod resources;
 pub mod validate_chartml;
-pub mod web;
 pub mod watch;
+pub mod web;
 pub mod workspace;
 
 mod personal_privacy;

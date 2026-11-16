@@ -35,6 +35,10 @@ const MAX_URL_LEN: usize = 2048;
 
 pub struct BuiltinFetcher {
     resolver: Arc<dyn Resolver>,
+    /// Operator domain lists (`WEB_FETCH_ALLOWED_DOMAINS` / `WEB_FETCH_BLOCKED_DOMAINS`):
+    /// lower-cased, each matching itself and its subdomains.
+    allowed_domains: Vec<String>,
+    blocked_domains: Vec<String>,
     /// Test seam (same precedent as `kyomi-mcp-client`): lets tests reach a
     /// loopback server. Compiled out of non-test builds.
     #[cfg(test)]
@@ -42,13 +46,18 @@ pub struct BuiltinFetcher {
 }
 
 impl BuiltinFetcher {
-    pub fn new(_cfg: &WebBackendConfig) -> kyomi_core::Result<Self> {
-        Ok(Self::with_resolver(Arc::new(SystemResolver)))
+    pub fn new(cfg: &WebBackendConfig) -> kyomi_core::Result<Self> {
+        let mut fetcher = Self::with_resolver(Arc::new(SystemResolver));
+        fetcher.allowed_domains = cfg.allowed_domains.clone();
+        fetcher.blocked_domains = cfg.blocked_domains.clone();
+        Ok(fetcher)
     }
 
     pub fn with_resolver(resolver: Arc<dyn Resolver>) -> Self {
         Self {
             resolver,
+            allowed_domains: Vec::new(),
+            blocked_domains: Vec::new(),
             #[cfg(test)]
             allow_loopback: false,
         }
@@ -60,6 +69,20 @@ impl BuiltinFetcher {
             return true;
         }
         is_public_address(ip)
+    }
+
+    /// Operator policy, applied to the host of every hop (including redirects): the
+    /// deny list first, then the allow list when one is configured.
+    fn check_domain_policy(&self, host: &str) -> Result<(), WebError> {
+        let host = host.trim_matches(['[', ']']).trim_end_matches('.').to_lowercase();
+        let matches = |d: &String| host == *d || host.ends_with(&format!(".{d}"));
+        if self.blocked_domains.iter().any(matches) {
+            return Err(WebError::Blocked("this domain is blocked by the operator".into()));
+        }
+        if !self.allowed_domains.is_empty() && !self.allowed_domains.iter().any(matches) {
+            return Err(WebError::Blocked("this domain is not on the operator's allow list".into()));
+        }
+        Ok(())
     }
 
     fn check_url(&self, raw: &str) -> Result<Url, WebError> {
@@ -74,9 +97,10 @@ impl BuiltinFetcher {
         if !url.username().is_empty() || url.password().is_some() {
             return Err(blocked("URLs with credentials are not allowed"));
         }
-        if url.host_str().is_none() {
+        let Some(host) = url.host_str() else {
             return Err(blocked("URL has no host"));
-        }
+        };
+        self.check_domain_policy(host)?;
         #[cfg(test)]
         if self.allow_loopback {
             return Ok(url);
@@ -393,5 +417,77 @@ mod tests {
         assert!(matches!(f.fetch(&req(&format!("{base}/big"))).await.unwrap_err(), WebError::InvalidRequest(_)));
         let page = f.fetch(&FetchRequest { url: format!("{base}/t"), max_chars: 10 }).await.unwrap();
         assert_eq!((page.content.as_str(), page.truncated), ("0123456789", true));
+    }
+
+    #[tokio::test]
+    async fn operator_deny_and_allow_lists_apply_to_the_host_and_every_redirect_hop() {
+        let base = origin(vec![
+            ("/a", "HTTP/1.1 302 F\r\nlocation: http://blocked.test/x\r\ncontent-length: 0\r\nconnection: close\r\n\r\n".into()),
+            ("/ok", ok("text/plain", "fine")),
+        ])
+        .await;
+        let mut f = loopback_fetcher();
+        f.blocked_domains = vec!["blocked.test".into(), "evil.example".into()];
+        // Denied directly, as a subdomain, and with case/trailing-dot variations.
+        for url in ["http://blocked.test/", "http://www.Blocked.Test./x", "https://a.b.evil.example/"] {
+            assert!(matches!(f.fetch(&req(url)).await.unwrap_err(), WebError::Blocked(m) if m.contains("blocked by the operator")), "{url}");
+        }
+        // Not a subdomain match: a different registrable name is fine for the deny list.
+        assert_eq!(f.fetch(&req(&format!("{base}/ok"))).await.unwrap().content, "fine");
+        // A redirect to a denied host is stopped at that hop.
+        let host = base.trim_start_matches("http://").split(':').next().unwrap().to_string();
+        f.blocked_domains = vec!["blocked.test".into()];
+        let err = f.fetch(&req(&format!("{base}/a"))).await.unwrap_err();
+        assert!(matches!(err, WebError::Blocked(m) if m.contains("blocked by the operator")), "redirect hop");
+        // Allow list: only listed domains (and subdomains) pass.
+        f.blocked_domains.clear();
+        f.allowed_domains = vec!["docs.rs".into()];
+        assert!(matches!(f.fetch(&req(&format!("{base}/ok"))).await.unwrap_err(), WebError::Blocked(m) if m.contains("allow list")));
+        assert!(matches!(f.fetch(&req("http://evildocs.rs/")).await.unwrap_err(), WebError::Blocked(_)), "suffix must be a label boundary");
+        f.allowed_domains = vec![host];
+        assert_eq!(f.fetch(&req(&format!("{base}/ok"))).await.unwrap().content, "fine");
+    }
+
+    /// DNS rebinding: a name that resolves to an allowed address when checked and to
+    /// something else on any later lookup. The connection is pinned to the validated
+    /// answers, so the second answer can never be used: the fetch connects to the first
+    /// answer (the local test origin) even though the host name does not exist in DNS,
+    /// and the resolver is asked exactly once per hop.
+    struct RebindingResolver {
+        first: SocketAddr,
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait]
+    impl Resolver for RebindingResolver {
+        async fn resolve(&self, _host: &str, port: u16) -> Result<Vec<SocketAddr>, McpError> {
+            let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(vec![if n == 0 { SocketAddr::new(self.first.ip(), port) } else { SocketAddr::new("10.0.0.1".parse().unwrap(), port) }])
+        }
+    }
+
+    #[tokio::test]
+    async fn dns_rebinding_cannot_redirect_the_pinned_connection() {
+        let base = origin(vec![("/", ok("text/plain", "from the validated address"))]).await;
+        let port: u16 = base.rsplit(':').next().unwrap().parse().unwrap();
+        let resolver = Arc::new(RebindingResolver { first: SocketAddr::new("127.0.0.1".parse().unwrap(), port), calls: Default::default() });
+        let mut f = BuiltinFetcher::with_resolver(resolver.clone());
+        f.allow_loopback = true;
+        let page = f.fetch(&req(&format!("http://rebind.invalid:{port}/"))).await.unwrap();
+        assert_eq!(page.content, "from the validated address");
+        assert_eq!(resolver.calls.load(std::sync::atomic::Ordering::SeqCst), 1, "no second lookup at connect time");
+    }
+
+    #[tokio::test]
+    async fn a_private_first_answer_is_refused_before_any_connection() {
+        struct PrivateFirst;
+        #[async_trait]
+        impl Resolver for PrivateFirst {
+            async fn resolve(&self, _h: &str, port: u16) -> Result<Vec<SocketAddr>, McpError> {
+                Ok(vec![SocketAddr::new("10.0.0.1".parse().unwrap(), port)])
+            }
+        }
+        let f = BuiltinFetcher::with_resolver(Arc::new(PrivateFirst));
+        assert!(matches!(f.fetch(&req("http://rebind.invalid/")).await.unwrap_err(), WebError::Blocked(_)));
     }
 }

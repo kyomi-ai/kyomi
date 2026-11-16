@@ -203,6 +203,36 @@ pub fn safe_date(date: &str) -> Option<&str> {
     .then_some(date)
 }
 
+/// Observability record for one metered web call: backend, tool, billable calls,
+/// latency of the call that ran it, result/citation count and the monthly quota left
+/// (workspace / instance) after counting it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WebCallRecord {
+    pub backend: String,
+    pub tool: &'static str,
+    pub billable_calls: u32,
+    pub latency_ms: u64,
+    pub result_count: usize,
+    pub workspace_remaining: Option<u32>,
+    pub global_remaining: Option<u32>,
+}
+
+impl WebCallRecord {
+    /// Emit the record as one structured info log line.
+    pub fn log(&self) {
+        tracing::info!(
+            backend = %self.backend,
+            tool = self.tool,
+            billable_calls = self.billable_calls,
+            latency_ms = self.latency_ms,
+            result_count = self.result_count,
+            workspace_remaining = ?self.workspace_remaining,
+            global_remaining = ?self.global_remaining,
+            "provider web tool used"
+        );
+    }
+}
+
 /// Startup validation against the instance LLM config (`LLM_PROVIDER` /
 /// `LLM_BASE_URL`): an incompatible or half-configured web backend fails the
 /// server start with a clear message instead of a 400 at runtime. Logs the
@@ -220,6 +250,10 @@ pub fn validate_startup(config: &kyomi_core::Config) -> kyomi_core::Result<()> {
         match outcome {
             kyomi_core::web_tools::ResolvedBackend::Enabled(c) => {
                 tracing::info!(tool, backend = %c.kind, "web tool enabled");
+            }
+            kyomi_core::web_tools::ResolvedBackend::Incomplete(reason) => {
+                // Mirrors the LLM provider's partial-config warning: the server starts, the tool is unavailable.
+                tracing::warn!(tool, reason = %reason, "web tool configuration is incomplete");
             }
             kyomi_core::web_tools::ResolvedBackend::Disabled(reason) => {
                 tracing::info!(tool, reason = %reason, "web tool not available");
@@ -264,7 +298,7 @@ mod tests {
 
     #[test]
     fn provider_executed_kinds_have_no_kyomi_provider() {
-        let cfg = |kind| WebBackendConfig { kind, api_key: Some("k".into()), base_url: None, options: Default::default() };
+        let cfg = |kind| WebBackendConfig { kind, api_key: Some("k".into()), base_url: None, options: Default::default(), ..Default::default() };
         assert!(create_search_provider(&cfg(WebBackendKind::Anthropic)).is_err());
         assert!(create_fetch_provider(&cfg(WebBackendKind::OpenRouter)).is_err());
         assert!(create_search_provider(&cfg(WebBackendKind::Builtin)).is_err());

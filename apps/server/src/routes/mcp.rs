@@ -1188,6 +1188,7 @@ mod tests {
                 api_key: Some("test-key".into()),
                 base_url: None,
                 options: Default::default(),
+                ..Default::default()
             })
         };
         let mut registry = create_default_registry();

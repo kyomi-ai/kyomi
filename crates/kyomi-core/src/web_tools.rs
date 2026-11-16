@@ -59,7 +59,7 @@ impl WebToolKind {
 }
 
 /// A backend selection.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum WebBackendKind {
     /// Tavily search / extract API (Kyomi-executed).
     Tavily,
@@ -72,6 +72,7 @@ pub enum WebBackendKind {
     /// OpenRouter server tools (OpenRouter base URL only).
     OpenRouter,
     /// Tool disabled.
+    #[default]
     None,
 }
 
@@ -139,13 +140,17 @@ pub struct WebBackendSettings {
 }
 
 /// A resolved backend ready to be constructed.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct WebBackendConfig {
     pub kind: WebBackendKind,
     pub api_key: Option<String>,
     pub base_url: Option<String>,
     /// Opaque options; always a JSON object (empty when unset).
     pub options: serde_json::Map<String, serde_json::Value>,
+    /// Operator domain allow list for the `builtin` fetcher (empty = any public host).
+    pub allowed_domains: Vec<String>,
+    /// Operator domain deny list for the `builtin` fetcher.
+    pub blocked_domains: Vec<String>,
 }
 
 /// Usage caps. Owner-confirmed defaults; all env-configurable.
@@ -176,9 +181,27 @@ pub struct WebToolsSettings {
     pub caps: WebCaps,
     /// Whether watches / scheduled runs may use the web tools (chat-only by default).
     pub in_unattended_runs: bool,
+    /// `WEB_FETCH_ALLOWED_DOMAINS`: when non-empty the `builtin` fetcher may only
+    /// fetch these domains (and their subdomains).
+    pub fetch_allowed_domains: Vec<String>,
+    /// `WEB_FETCH_BLOCKED_DOMAINS`: the `builtin` fetcher never fetches these
+    /// domains (or their subdomains). Checked before the allow list.
+    pub fetch_blocked_domains: Vec<String>,
     /// Cap variables that were set but are not non-negative integers; reported by
     /// [`validate`](Self::validate) instead of silently falling back to a default.
     pub invalid_caps: Vec<String>,
+}
+
+/// Parse a comma-separated domain list: lower-cased, trimmed, with a leading `*.` or
+/// `.` removed. A listed domain matches itself and all its subdomains.
+fn domain_list(raw: Option<String>) -> Vec<String> {
+    raw.map(|r| {
+        r.split(',')
+            .map(|d| d.trim().trim_start_matches("*.").trim_start_matches('.').to_lowercase())
+            .filter(|d| !d.is_empty())
+            .collect()
+    })
+    .unwrap_or_default()
 }
 
 impl Default for WebToolsSettings {
@@ -241,6 +264,8 @@ impl WebToolsSettings {
             fetch: backend(WebToolKind::Fetch),
             caps,
             invalid_caps,
+            fetch_allowed_domains: domain_list(non_empty("WEB_FETCH_ALLOWED_DOMAINS")),
+            fetch_blocked_domains: domain_list(non_empty("WEB_FETCH_BLOCKED_DOMAINS")),
             in_unattended_runs: non_empty("WEB_TOOLS_UNATTENDED")
                 .is_some_and(|v| matches!(v.to_lowercase().as_str(), "1" | "true" | "yes")),
         }
@@ -299,8 +324,8 @@ impl WebToolsSettings {
             Some(name) => WebBackendKind::parse(tool, name)?,
             None => {
                 if s.api_key.is_some() || s.base_url.is_some() {
-                    return Err(crate::Error::Internal(format!(
-                        "{p}_API_KEY / {p}_BASE_URL is set but {p}_PROVIDER is not. \
+                    return Ok(ResolvedBackend::Incomplete(format!(
+                        "{p}_API_KEY / {p}_BASE_URL is set but {p}_PROVIDER is not: the tool is unavailable. \
                          Set {p}_PROVIDER (tavily, linkup, ...) or remove them."
                     )));
                 }
@@ -329,11 +354,14 @@ impl WebToolsSettings {
                 }
             },
         };
+        let fetch = tool == WebToolKind::Fetch;
         Ok(ResolvedBackend::Enabled(WebBackendConfig {
             kind,
             api_key: s.api_key.clone(),
             base_url: s.base_url.clone(),
             options,
+            allowed_domains: if fetch { self.fetch_allowed_domains.clone() } else { Vec::new() },
+            blocked_domains: if fetch { self.fetch_blocked_domains.clone() } else { Vec::new() },
         }))
     }
 
@@ -378,6 +406,10 @@ pub enum ResolvedBackend {
     Enabled(WebBackendConfig),
     /// Tool is off; the reason is for the startup log.
     Disabled(String),
+    /// Tool is off because its configuration is incomplete (for example a key set
+    /// without a provider). Reported as a warning, mirroring the LLM provider's
+    /// partial-config handling; the server still starts.
+    Incomplete(String),
 }
 
 impl ResolvedBackend {
@@ -385,7 +417,7 @@ impl ResolvedBackend {
     pub fn enabled(&self) -> Option<&WebBackendConfig> {
         match self {
             Self::Enabled(c) => Some(c),
-            Self::Disabled(_) => None,
+            Self::Disabled(_) | Self::Incomplete(_) => None,
         }
     }
 }
@@ -416,7 +448,7 @@ mod tests {
 
     fn r_reason(r: &ResolvedBackend) -> String {
         match r {
-            ResolvedBackend::Disabled(s) => s.clone(),
+            ResolvedBackend::Disabled(s) | ResolvedBackend::Incomplete(s) => s.clone(),
             ResolvedBackend::Enabled(_) => String::new(),
         }
     }
@@ -448,9 +480,34 @@ mod tests {
     }
 
     #[test]
-    fn partial_config_key_without_provider_is_an_error() {
-        let err = settings(&[("WEB_SEARCH_API_KEY", "k")]).validate(ANTHROPIC).unwrap_err();
-        assert!(err.to_string().contains("WEB_SEARCH_PROVIDER is not"));
+    fn partial_config_key_without_provider_is_a_warning_with_the_tool_absent() {
+        let (search, fetch) = settings(&[("WEB_SEARCH_API_KEY", "k")]).validate(ANTHROPIC).unwrap();
+        assert!(search.enabled().is_none());
+        match &search {
+            ResolvedBackend::Incomplete(m) => assert!(m.contains("WEB_SEARCH_PROVIDER is not"), "{m}"),
+            other => panic!("expected incomplete, got {other:?}"),
+        }
+        assert!(matches!(fetch, ResolvedBackend::Disabled(_)), "the other tool is unaffected");
+        assert!(matches!(
+            settings(&[("WEB_FETCH_BASE_URL", "https://x.example")]).resolve(WebToolKind::Fetch, ANTHROPIC).unwrap(),
+            ResolvedBackend::Incomplete(_)
+        ));
+    }
+
+    #[test]
+    fn fetch_domain_lists_are_parsed_and_only_reach_the_fetch_backend() {
+        let s = settings(&[
+            ("WEB_FETCH_PROVIDER", "builtin"),
+            ("WEB_SEARCH_PROVIDER", "anthropic"),
+            ("WEB_FETCH_ALLOWED_DOMAINS", " Example.com, *.Docs.rs ,, .rust-lang.org"),
+            ("WEB_FETCH_BLOCKED_DOMAINS", "evil.example"),
+        ]);
+        let fetch = s.resolve(WebToolKind::Fetch, ANTHROPIC).unwrap();
+        let fetch = fetch.enabled().unwrap();
+        assert_eq!(fetch.allowed_domains, ["example.com", "docs.rs", "rust-lang.org"]);
+        assert_eq!(fetch.blocked_domains, ["evil.example"]);
+        let search = s.resolve(WebToolKind::Search, ANTHROPIC).unwrap();
+        assert!(search.enabled().unwrap().allowed_domains.is_empty());
     }
 
     #[test]

@@ -364,28 +364,15 @@ fn build_agent_config(
     }
 }
 
-/// Resolve the web tool backends for this run and register the Kyomi-executed ones.
-///
-/// Chat (no explicit tool subset) gets the tools whenever a backend is
-/// configured; a subset run (watches / scheduled) gets them only with
-/// `WEB_TOOLS_UNATTENDED`; copilots never do. An incompatible backend (for
-/// example a self-hosted workspace on a different LLM than the instance's
-/// `anthropic` backend assumes) leaves the tool absent with a warning instead
-/// of failing the run.
-///
-/// Kyomi-executed backends register function tools in `registry`; provider-executed
-/// ones come back as [`crate::web::server_tools::ServerTool`] entries for the LLM
-/// request. [`WebRunPlan::available`] says whether the model has any web tool.
+/// What [`register_web_tools_for_run`] decided for one run: whether the model has any
+/// web tool at all, and the provider-executed tools to attach to every LLM request
+/// (Kyomi-executed tools are registered as function tools in the registry instead).
 #[derive(Default)]
 struct WebRunPlan {
     available: bool,
     server_tools: Vec<crate::web::server_tools::ServerTool>,
 }
 
-/// Whether this run may use the web tools at all: interactive chat (no explicit
-/// tool subset), or a watch run when the operator enabled unattended use.
-/// Copilots, Slack and every other context never do. The single source of truth
-/// for registration and for extending a watch's tool subset.
 /// The web settings for one run: the instance settings with the workspace's
 /// override applied. If the override cannot be read (database error, missing
 /// secrets key, a key that no longer decrypts, malformed options) the tools are
@@ -406,6 +393,10 @@ fn web_settings_for_run(
     }
 }
 
+/// Whether this run may use the web tools at all: interactive chat (no explicit
+/// tool subset), or a watch run when the operator enabled unattended use.
+/// Copilots, Slack and every other context never do. The single source of truth
+/// for registration and for extending a watch's tool subset.
 fn web_tools_eligible(settings: &kyomi_core::web_tools::WebToolsSettings, config: &AgentExecutionConfig) -> bool {
     match config.context_type.as_str() {
         "chat" => config.tools_subset.is_none(),
@@ -414,6 +405,15 @@ fn web_tools_eligible(settings: &kyomi_core::web_tools::WebToolsSettings, config
     }
 }
 
+/// Resolve the web tool backends for this run and register the Kyomi-executed ones.
+///
+/// Chat (no explicit tool subset) gets the tools whenever a backend is configured;
+/// a watch run gets them only with `WEB_TOOLS_UNATTENDED`; copilots never do (see
+/// [`web_tools_eligible`]). An incompatible backend (for example a self-hosted
+/// workspace on a different LLM than the instance's `anthropic` backend assumes)
+/// leaves the tool absent with a warning instead of failing the run. Provider-executed
+/// backends come back as [`crate::web::server_tools::ServerTool`] entries in the
+/// returned [`WebRunPlan`].
 fn register_web_tools_for_run(
     registry: &mut crate::tools::ToolRegistry,
     settings: &kyomi_core::web_tools::WebToolsSettings,

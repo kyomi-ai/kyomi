@@ -353,7 +353,7 @@ mod tests {
     use super::*;
 
     fn cfg(kind: kyomi_core::web_tools::WebBackendKind, options: Value) -> WebBackendConfig {
-        WebBackendConfig { kind, api_key: None, base_url: None, options: options.as_object().cloned().unwrap_or_default() }
+        WebBackendConfig { kind, api_key: None, base_url: None, options: options.as_object().cloned().unwrap_or_default(), ..Default::default() }
     }
     fn caps() -> WebCaps {
         WebCaps { per_turn_search: 5, per_turn_fetch: 5, workspace_monthly: 200, global_monthly: 1000 }

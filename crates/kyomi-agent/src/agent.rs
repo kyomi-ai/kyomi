@@ -493,6 +493,8 @@ pub struct CustomAgent {
     /// Provider-reported web calls used so far in this run, per tool: the per-turn
     /// allowance is spent across every request of the run, not per request.
     web_usage: HashMap<kyomi_core::web_tools::WebToolKind, u32>,
+    /// One record per metered provider web call in this run (also logged).
+    web_call_log: Vec<crate::web::WebCallRecord>,
 }
 
 impl CustomAgent {
@@ -515,6 +517,7 @@ impl CustomAgent {
             user_names,
             web_sources: Vec::new(),
             web_usage: HashMap::new(),
+            web_call_log: Vec::new(),
         }
     }
 
@@ -723,6 +726,7 @@ impl CustomAgent {
             }
 
             // Call the LLM with cancellation support.
+            let call_started = std::time::Instant::now();
             let response = tokio::select! {
                 result = self.call_llm(&llm_messages, &tools) => result?,
                 _ = cancel_token.cancelled() => {
@@ -743,7 +747,7 @@ impl CustomAgent {
             iterations_used += 1;
 
             // Provider-executed web tools (KYO-969): usage, sources, verbatim blocks.
-            let server_activity = self.note_server_tools(&response).await;
+            let server_activity = self.note_server_tools(&response, call_started.elapsed()).await;
 
             // Track token usage.
             // Total input tokens = regular + cache-creation + cache-read.
@@ -1320,7 +1324,7 @@ impl CustomAgent {
     /// Record what the provider's web tools did in one response: log it, feed
     /// the monthly budget from the provider-reported usage, and remember the
     /// sources for the answer footer. Returns the parsed activity.
-    async fn note_server_tools(&mut self, response: &crate::types::LLMResponse) -> crate::web::server_tools::ServerToolActivity {
+    async fn note_server_tools(&mut self, response: &crate::types::LLMResponse, latency: Duration) -> crate::web::server_tools::ServerToolActivity {
         if self.config.server_tools.is_empty() {
             return Default::default();
         }
@@ -1337,10 +1341,23 @@ impl CustomAgent {
                 continue;
             }
             *self.web_usage.entry(tool).or_default() += calls;
-            info!(backend = ?self.config.server_tools.first().map(|t| t.backend), tool = tool.tool_name(), billable_calls = calls, "provider web tool used");
             if let Err(e) = crate::web::caps::add_usage(&ctx.kv, &ctx.workspace_id, tool, calls).await {
                 warn!(error = %e, "failed to record web tool usage");
             }
+            // Per call: backend, latency of the model call that ran the tool, result/citation
+            // count, and the monthly quota left (workspace / instance) after counting it.
+            let remaining = crate::web::caps::remaining_monthly(&ctx.kv, &ctx.config.web_tools.caps, &ctx.workspace_id, tool).await.ok();
+            let record = crate::web::WebCallRecord {
+                backend: self.config.server_tools.first().map(|t| t.backend.to_string()).unwrap_or_default(),
+                tool: tool.tool_name(),
+                billable_calls: calls,
+                latency_ms: latency.as_millis() as u64,
+                result_count: activity.sources.len(),
+                workspace_remaining: remaining.map(|r| r.0),
+                global_remaining: remaining.map(|r| r.1),
+            };
+            record.log();
+            self.web_call_log.push(record);
         }
         for error in &activity.errors {
             warn!(error = %error, "provider web tool reported an error");
@@ -3963,5 +3980,22 @@ Second chart:\n{CHARTML_STRIPPED_NOTE}\nDone."
         let answer = agent.chat("hi", CancellationToken::new(), None, None, None).await.unwrap();
         assert_eq!(*seen.lock().unwrap(), vec![1, 0], "first request carries the tool, the one after the restriction does not");
         assert!(answer.starts_with("final") && answer.contains("**Sources**"), "{answer}");
+    }
+
+    #[tokio::test]
+    async fn each_provider_web_call_is_recorded_with_latency_result_count_and_remaining_quota() {
+        let (mut agent, _calls) = scripted_agent_with_config(
+            server_tool_agent_config(),
+            vec![Reply::Response(server_response("end_turn", None))],
+            Reply::Text("x".into()),
+        )
+        .await;
+        agent.chat("hi", CancellationToken::new(), None, None, None).await.unwrap();
+        let caps = agent.tool_context.config.web_tools.caps.clone();
+        assert_eq!(agent.web_call_log.len(), 1);
+        let r = &agent.web_call_log[0];
+        assert_eq!((r.backend.as_str(), r.tool, r.billable_calls, r.result_count), ("anthropic", "web_search", 1, 1));
+        assert_eq!(r.workspace_remaining, Some(caps.workspace_monthly - 1));
+        assert_eq!(r.global_remaining, Some(caps.global_monthly - 1));
     }
 }
