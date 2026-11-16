@@ -384,13 +384,13 @@ struct WebRunPlan {
 
 fn register_web_tools_for_run(
     registry: &mut crate::tools::ToolRegistry,
-    app_config: &kyomi_core::Config,
+    settings: &kyomi_core::web_tools::WebToolsSettings,
     config: &AgentExecutionConfig,
     provider_kind: ProviderKind,
     llm_base_url: Option<&str>,
 ) -> WebRunPlan {
     let eligible = if config.tools_subset.is_some() {
-        app_config.web_tools.in_unattended_runs
+        settings.in_unattended_runs
     } else {
         config.context_type == "chat"
     };
@@ -399,7 +399,6 @@ fn register_web_tools_for_run(
     }
     let provider = provider_kind.to_string();
     let facts = kyomi_core::web_tools::LlmFacts { provider: &provider, base_url: llm_base_url };
-    let settings = &app_config.web_tools;
     let resolve = |tool| match settings.resolve(tool, facts) {
         Ok(resolved) => resolved,
         Err(e) => {
@@ -574,9 +573,17 @@ pub async fn execute_agent_chat(
 
     // 4. Create tool registry (filtered by tools_subset if provided).
     let mut registry = create_default_registry();
+    // A workspace may override the instance's web backend (own key / provider).
+    let web_settings = match kyomi_auth::workspace_web_config::load(db, &config.workspace_id).await {
+        Ok(ov) => app_config.web_tools.with_workspace_override(ov.search, ov.fetch),
+        Err(e) => {
+            tracing::warn!(workspace_id = %config.workspace_id, error = %e, "ignoring unreadable workspace web tool override");
+            app_config.web_tools.clone()
+        }
+    };
     let web_plan = register_web_tools_for_run(
         &mut registry,
-        app_config,
+        &web_settings,
         &config,
         provider_kind,
         llm_base_url.as_deref(),
@@ -2416,7 +2423,7 @@ mod tests {
 
     fn registered(app: &kyomi_core::Config, cfg: &AgentExecutionConfig, kind: ProviderKind) -> Vec<&'static str> {
         let mut registry = crate::tools::ToolRegistry::new();
-        let plan = register_web_tools_for_run(&mut registry, app, cfg, kind, None);
+        let plan = register_web_tools_for_run(&mut registry, &app.web_tools, cfg, kind, None);
         let names: Vec<&'static str> =
             WEB_TOOL_NAMES.iter().copied().filter(|n| registry.get_tool(n).is_some()).collect();
         assert_eq!(plan.available, !names.is_empty() || !plan.server_tools.is_empty());
@@ -2455,7 +2462,7 @@ mod tests {
     fn anthropic_backend_yields_server_tool_entries_not_function_tools() {
         let app = web_config(&[("WEB_SEARCH_PROVIDER", "anthropic"), ("WEB_FETCH_PROVIDER", "anthropic")]);
         let mut registry = crate::tools::ToolRegistry::new();
-        let plan = register_web_tools_for_run(&mut registry, &app, &AgentExecutionConfig::default(), ProviderKind::Anthropic, None);
+        let plan = register_web_tools_for_run(&mut registry, &app.web_tools, &AgentExecutionConfig::default(), ProviderKind::Anthropic, None);
         assert!(plan.available);
         assert!(WEB_TOOL_NAMES.iter().all(|n| registry.get_tool(n).is_none()), "Kyomi executes nothing");
         let types: Vec<&str> = plan.server_tools.iter().map(|t| t.entry["type"].as_str().unwrap()).collect();
@@ -2466,7 +2473,7 @@ mod tests {
     fn mixed_backends_search_provider_executed_fetch_kyomi_executed() {
         let app = web_config(&[("WEB_SEARCH_PROVIDER", "anthropic"), ("WEB_FETCH_PROVIDER", "builtin")]);
         let mut registry = crate::tools::ToolRegistry::new();
-        let plan = register_web_tools_for_run(&mut registry, &app, &AgentExecutionConfig::default(), ProviderKind::Anthropic, None);
+        let plan = register_web_tools_for_run(&mut registry, &app.web_tools, &AgentExecutionConfig::default(), ProviderKind::Anthropic, None);
         assert_eq!(plan.server_tools.len(), 1);
         assert!(registry.get_tool("web_fetch").is_some() && registry.get_tool("web_search").is_none());
     }

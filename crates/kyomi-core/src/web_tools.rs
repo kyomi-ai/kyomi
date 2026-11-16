@@ -236,6 +236,25 @@ impl WebToolsSettings {
         }
     }
 
+    /// These settings with per-workspace overrides applied. A workspace entry
+    /// replaces the instance entry for that tool *entirely* (provider, key, URL
+    /// and options), so one workspace's key can never be paired with another
+    /// level's provider.
+    pub fn with_workspace_override(
+        &self,
+        search: Option<WebBackendSettings>,
+        fetch: Option<WebBackendSettings>,
+    ) -> Self {
+        let mut out = self.clone();
+        if let Some(s) = search {
+            out.search = s;
+        }
+        if let Some(f) = fetch {
+            out.fetch = f;
+        }
+        out
+    }
+
     fn settings(&self, tool: WebToolKind) -> &WebBackendSettings {
         match tool {
             WebToolKind::Search => &self.search,
@@ -423,6 +442,28 @@ mod tests {
         let cfg = s.resolve(WebToolKind::Search, ANTHROPIC).unwrap();
         assert_eq!(cfg.enabled().unwrap().options["max_uses"], 3);
         assert!(settings(&[("WEB_SEARCH_PROVIDER", "anthropic"), ("WEB_SEARCH_OPTIONS", "[1]")]).validate(ANTHROPIC).is_err());
+    }
+
+    #[test]
+    fn workspace_override_replaces_the_instance_entry_wholesale() {
+        let instance = settings(&[("WEB_SEARCH_PROVIDER", "tavily"), ("WEB_SEARCH_API_KEY", "instance-key")]);
+        let ws = WebBackendSettings { provider: Some("linkup".into()), api_key: Some("ws-key".into()), ..Default::default() };
+        let merged = instance.with_workspace_override(Some(ws), None);
+        let cfg = merged.resolve(WebToolKind::Search, OPENAI).unwrap();
+        let cfg = cfg.enabled().unwrap();
+        assert_eq!((cfg.kind, cfg.api_key.as_deref()), (WebBackendKind::Linkup, Some("ws-key")));
+        // Untouched tool keeps the instance setting.
+        assert_eq!(merged.search.api_key.as_deref(), Some("ws-key"));
+        assert_eq!(instance.search.api_key.as_deref(), Some("instance-key"));
+    }
+
+    #[test]
+    fn workspace_can_enable_a_backend_the_instance_has_none_for() {
+        let instance = settings(&[]);
+        assert!(instance.resolve(WebToolKind::Fetch, OPENAI).unwrap().enabled().is_none());
+        let ws = WebBackendSettings { provider: Some("builtin".into()), ..Default::default() };
+        let merged = instance.with_workspace_override(None, Some(ws));
+        assert!(merged.resolve(WebToolKind::Fetch, OPENAI).unwrap().enabled().is_some());
     }
 
     #[test]
