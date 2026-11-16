@@ -76,7 +76,7 @@ impl UsageLedger {
     }
 
     /// Whether no call is waiting to be billed.
-    pub fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         self.lock().is_empty()
     }
 
@@ -114,12 +114,20 @@ impl UsageLedger {
             return None;
         }
         if !is_byok && self.lock().iter().any(|c| c.cost.is_none()) {
-            warn!(
-                provider,
-                model,
-                component,
-                "Kyomi-billed LLM call reports no cost: billed at $0 (only Anthropic, which is priced here, and OpenRouter report cost)"
-            );
+            // A static configuration fact: say it once per provider/model, not on every call.
+            static SEEN: std::sync::OnceLock<Mutex<std::collections::HashSet<String>>> = std::sync::OnceLock::new();
+            let first = SEEN
+                .get_or_init(Mutex::default)
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(format!("{provider}/{model}"));
+            if first {
+                warn!(
+                    provider,
+                    model,
+                    "Kyomi-billed LLM calls report no cost: billed at $0 (only Anthropic, which is priced here, and OpenRouter report cost)"
+                );
+            }
         }
         // BYOK: the workspace pays the provider, so Kyomi credits are untouched
         // (`cost_estimate` 0) and the real cost is kept for observability.
@@ -209,7 +217,7 @@ pub struct BillingContext<'a> {
 
 /// A [`BillingContext`] that owns its data, so it can outlive the run that made it.
 #[derive(Clone)]
-pub struct OwnedBilling {
+pub(crate) struct OwnedBilling {
     pub db: DbPool,
     pub encryption_key: [u8; 32],
     pub user_id: String,
@@ -223,7 +231,7 @@ pub struct OwnedBilling {
 }
 
 impl OwnedBilling {
-    pub fn context(&self) -> BillingContext<'_> {
+    pub(crate) fn context(&self) -> BillingContext<'_> {
         BillingContext {
             db: &self.db,
             user_id: &self.user_id,
@@ -243,13 +251,13 @@ impl OwnedBilling {
 /// the future holding the client and its ledger is discarded and the normal bill
 /// at the end of the run never executes, so the calls already paid for would be
 /// lost. After a normal `bill` the ledger is empty and this does nothing.
-pub struct BillOnDrop {
+pub(crate) struct BillOnDrop {
     ledger: UsageLedger,
     billing: OwnedBilling,
 }
 
 impl BillOnDrop {
-    pub fn new(ledger: UsageLedger, billing: OwnedBilling) -> Self {
+    pub(crate) fn new(ledger: UsageLedger, billing: OwnedBilling) -> Self {
         Self { ledger, billing }
     }
 }
@@ -285,10 +293,49 @@ impl Drop for BillOnDrop {
     }
 }
 
+/// Hands a durable run's ledger to the worker that owns the run. The run's execution
+/// future can be dropped mid-flight (user cancel seen through the DB heartbeat), and
+/// the lease-fenced usage write is only valid while the run is still `Running`, so the
+/// worker bills what is left *before* it finishes the run: deterministic, unlike a
+/// spawned task racing the terminal write. After a normal run the ledger is empty and
+/// this does nothing. (If the lease was lost the fence rightly rejects the write and
+/// the loss is logged: another owner now owns the run.)
+#[derive(Clone, Default)]
+pub struct BillingSlot(Arc<Mutex<Option<(UsageLedger, OwnedBilling)>>>);
+
+impl std::fmt::Debug for BillingSlot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("BillingSlot")
+    }
+}
+
+impl BillingSlot {
+    /// Called by `execute_agent_chat` once the run's ledger and billing identity exist.
+    pub(crate) fn register(&self, ledger: UsageLedger, billing: OwnedBilling) {
+        *self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some((ledger, billing));
+    }
+
+    /// Bill any calls the run made but never billed, under the run's *current* lease.
+    pub async fn bill_remaining(
+        &self,
+        run: &crate::adapter::DurableRun,
+        encryption_key: &[u8; 32],
+    ) -> kyomi_core::Result<()> {
+        let registered = self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
+        let Some((ledger, mut billing)) = registered else { return Ok(()) };
+        if ledger.is_empty() {
+            return Ok(());
+        }
+        billing.durable = Some(run.clone());
+        billing.encryption_key = *encryption_key;
+        ledger.bill(&billing.context()).await
+    }
+}
+
 impl UsageLedger {
     /// Take the calls recorded since the last `bill`, so each call is billed once.
-    fn drain(&self) -> UsageLedger {
-        UsageLedger(Arc::new(Mutex::new(std::mem::take(&mut *self.lock()))))
+    fn drain(&self) -> Vec<CallRecord> {
+        std::mem::take(&mut *self.lock())
     }
 
     /// Write the `api_usage_log` row for the calls recorded since the last
@@ -297,13 +344,14 @@ impl UsageLedger {
     /// of the run); any other failure means that call is not billed, so it is
     /// logged with every value needed to rebuild the row.
     pub async fn bill(&self, ctx: &BillingContext<'_>) -> kyomi_core::Result<()> {
-        let calls = self.drain();
+        let taken = self.drain();
+        let calls = UsageLedger(Arc::new(Mutex::new(taken.clone())));
         let Some(mut usage) = calls.billing_row(ctx.is_byok, ctx.provider, ctx.model, ctx.component) else {
             return Ok(());
         };
         if let Some((run, encryption_key)) = ctx.durable {
             usage.request_id = Some(run.run_id.as_str().to_string());
-            return kyomi_auth::conversation_events::ConversationStore::new(
+            let written = kyomi_auth::conversation_events::ConversationStore::new(
                 ctx.db, encryption_key, ctx.user_id, ctx.workspace_id,
             )
             .fenced_api_usage(
@@ -312,6 +360,12 @@ impl UsageLedger {
             )
             .await
             .map_err(|error| kyomi_core::Error::ServiceUnavailable(error.to_string()));
+            if written.is_err() {
+                // Keep the calls so a later attempt (the worker bills what is left before it
+                // finishes the run) can still write them.
+                self.lock().extend(taken);
+            }
+            return written;
         }
         if let Err(e) = kyomi_core::db_execute!(
             ctx.db,
@@ -498,6 +552,20 @@ mod tests {
         l.record("m", &response(u32::MAX, u32::MAX, 0, 0, 0));
         let row = l.billing_row(false, "anthropic", "m", "chat_agent").unwrap();
         assert_eq!((row.input_tokens, row.total_tokens), (i32::MAX, i32::MAX));
+    }
+
+    /// A Kyomi-billed call whose provider reports no cost (OpenAI direct, Gemini) is
+    /// flagged in the row's per-call metadata instead of looking priced.
+    #[test]
+    fn a_call_with_no_reported_cost_is_flagged_in_the_row_metadata() {
+        let l = UsageLedger::default();
+        let mut r = response(10, 5, 0, 0, 0);
+        r.cost = None;
+        l.record("gpt-direct", &r);
+        let row = l.billing_row(false, "openai", "gpt-direct", "custom_agent").unwrap();
+        let meta: serde_json::Value = serde_json::from_str(row.extra_metadata.as_deref().unwrap()).unwrap();
+        assert_eq!(meta["calls"][0]["cost_reported"], false);
+        assert_eq!(row.cost_estimate, 0.0);
     }
 
     #[test]

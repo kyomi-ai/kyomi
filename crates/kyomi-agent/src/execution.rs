@@ -482,9 +482,18 @@ pub async fn execute_agent_chat(
         is_byok,
         durable: config.assistant_message_persistence.durable_run().cloned(),
     };
-    // A durable run dropped mid-flight (DB-heartbeat cancel, lease loss) never reaches the
-    // bill below; this still bills the calls already paid for.
-    let _bill_if_dropped = crate::usage_ledger::BillOnDrop::new(usage_ledger.clone(), billing.clone());
+    // A run dropped mid-flight never reaches the bill below, so its calls are billed by
+    // someone else: the durable worker, deterministically before it finishes the run (via the
+    // slot in the run), or, for a non-durable run, a guard that bills when the run is dropped.
+    let _bill_if_dropped = match config.assistant_message_persistence.durable_run() {
+        Some(run) => {
+            let mut registered = billing.clone();
+            registered.durable = None; // the worker supplies the run's current lease
+            run.billing.register(usage_ledger.clone(), registered);
+            None
+        }
+        None => Some(crate::usage_ledger::BillOnDrop::new(usage_ledger.clone(), billing.clone())),
+    };
 
 
     // 3. Create agent config with context-appropriate tool filter.

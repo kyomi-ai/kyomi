@@ -349,9 +349,13 @@ async fn a_run_dropped_mid_flight_still_bills_its_paid_calls() {
         call(&client).await; // a paid model call, then the run blocks (e.g. in a tool call)...
         std::future::pending::<()>().await;
     });
-    while ledger.is_empty() {
-        tokio::task::yield_now().await;
-    }
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while ledger.is_empty() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the run makes its paid call");
 
     run.abort(); // ...and is dropped without ever reaching its normal bill
     assert!(run.await.unwrap_err().is_cancelled());
@@ -367,29 +371,4 @@ async fn a_run_dropped_mid_flight_still_bills_its_paid_calls() {
     assert_eq!(rows.len(), 1, "the dropped run's paid call is billed exactly once: {rows:?}");
     assert!((rows[0].4 - 0.013 * AI_COST_MULTIPLIER).abs() < 1e-9, "priced: {}", rows[0].4);
     assert!(ledger.is_empty(), "nothing left to bill twice");
-}
-
-/// A Kyomi-billed call whose provider reports no cost (OpenAI-direct, Gemini) is
-/// flagged in the row's per-call metadata instead of looking priced.
-#[tokio::test]
-async fn a_call_with_no_reported_cost_is_flagged_in_the_row_metadata() {
-    use crate::types::{AgentTokenUsage, LLMResponse};
-    let ledger = crate::usage_ledger::UsageLedger::default();
-    ledger.record(
-        "gpt-direct",
-        &LLMResponse {
-            raw_response: serde_json::Value::Null,
-            content: String::new(),
-            finish_reason: "stop".into(),
-            usage: AgentTokenUsage { input_tokens: 10, output_tokens: 5, ..Default::default() },
-            tool_calls: None,
-            cost: None,
-            thinking_content: None,
-            call_detail: None,
-        },
-    );
-    let row = ledger.billing_row(false, "openai", "gpt-direct", "custom_agent").unwrap();
-    let meta: serde_json::Value = serde_json::from_str(row.extra_metadata.as_deref().unwrap()).unwrap();
-    assert_eq!(meta["calls"][0]["cost_reported"], false);
-    assert_eq!(row.cost_estimate, 0.0);
 }

@@ -132,6 +132,8 @@ impl DurableChatWorker {
                 "Invalid stored submission".into(),
             ));
         };
+        // Shared with the run so its usage ledger outlives a dropped execution future.
+        let usage_slot = crate::usage_ledger::BillingSlot::default();
         let execution = async {
             let membership = kyomi_auth::user_service::get_workspace_user(
                 &self.db,
@@ -183,6 +185,7 @@ impl DurableChatWorker {
                         run_id: run_id.clone(),
                         lease: lease.clone(),
                         context: claimed_context.clone(),
+                        billing: usage_slot.clone(),
                     },
                 },
                 ..AgentExecutionConfig::default()
@@ -207,6 +210,7 @@ impl DurableChatWorker {
             run_id: run_id.clone(),
             lease: lease.clone(),
             context: claimed_context.clone(),
+            billing: usage_slot.clone(),
         };
         let (result, lease) = drive_execution(
             &store,
@@ -219,6 +223,15 @@ impl DurableChatWorker {
             },
         )
         .await?;
+        // Bill whatever the run paid for but never billed (execution dropped on a user cancel
+        // seen through the heartbeat, or ended in an error after a paid call) *before* the
+        // run is finished: the fenced write is only valid while the run is still `Running`.
+        {
+            let current = DurableRun { lease: lease.clone(), ..owned.clone() };
+            if let Err(e) = owned.billing.bill_remaining(&current, &self.encryption_key).await {
+                tracing::error!(error = %e, run_id = %run_id.as_str(), "BILLING ROW LOST: failed to bill a durable run's remaining usage");
+            }
+        }
         let (state, content, metadata, model, usage) = match result {
             Ok(result) => {
                 let (state, content) = terminal_outcome(&result.status, &result.response_text);
@@ -436,6 +449,7 @@ mod tests {
             run_id,
             lease: result.snapshot.lease.expect("lease"),
             context: Arc::new(result.context),
+            billing: Default::default(),
         }
     }
 
@@ -532,6 +546,95 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(assistants.len(), 1);
         assert_eq!(assistants[0].status, "cancelled");
+    }
+
+    /// A durable run cancelled through the DB heartbeat has its execution future dropped
+    /// with paid model calls unbilled. The worker bills them before it finishes the run
+    /// (the fenced write is only valid while the run is `Running`); billed after the run
+    /// is terminal the write is refused and the calls are kept, which is why the order
+    /// matters (KYO-974).
+    #[tokio::test]
+    async fn a_run_cancelled_through_the_heartbeat_is_billed_before_it_is_finished() {
+        use crate::usage_ledger::{OwnedBilling, UsageLedger};
+        let db = crate::test_support::test_pool().await;
+        crate::test_support::seed_user_and_workspace(&db).await;
+        let key = [7u8; 32];
+        let owned = claimed(&db, &key).await;
+        let store = ConversationStore::new(&db, &key, "user-a", "ws-1");
+        let billing_for = |model: &str| OwnedBilling {
+            db: db.clone(),
+            encryption_key: key,
+            user_id: "user-a".into(),
+            workspace_id: "ws-1".into(),
+            session_id: Some(owned.conversation_id.as_str().to_string()),
+            component: "custom_agent".into(),
+            provider: "anthropic".into(),
+            model: model.into(),
+            is_byok: false,
+            durable: None,
+        };
+        let paid_call = |ledger: &UsageLedger| {
+            let body = serde_json::json!({
+                "content": [{"type": "text", "text": "ok"}], "stop_reason": "end_turn",
+                "usage": {"input_tokens": 1000, "output_tokens": 100,
+                          "cache_creation_input_tokens": 2000, "cache_read_input_tokens": 50000}
+            });
+            let response = crate::anthropic::AnthropicClient::parse_response("claude-sonnet-5-5", &body, None).unwrap();
+            ledger.record("claude-sonnet-5-5", &response);
+        };
+
+        // The run paid for a call, registered its ledger, and blocks (e.g. in a tool call).
+        let ledger = UsageLedger::default();
+        paid_call(&ledger);
+        owned.billing.register(ledger.clone(), billing_for("claude-sonnet-5-5"));
+        store.cancel(&owned.conversation_id, &owned.run_id, now()).await.expect("user cancels");
+        let cancel = CancellationToken::new();
+        let (result, lease) = drive_execution(
+            &store,
+            &owned,
+            &cancel,
+            std::future::pending::<kyomi_core::Result<()>>(),
+            LeaseTiming { ttl_ms: 30_000, heartbeat: Duration::from_millis(10) },
+        )
+        .await
+        .expect("drive");
+        assert!(result.is_err(), "the execution was dropped on cancellation");
+        assert!(!ledger.is_empty(), "its paid call was never billed by the run itself");
+
+        // The worker bills the remainder before finishing the run.
+        let current = DurableRun { lease: lease.clone(), ..owned.clone() };
+        owned.billing.bill_remaining(&current, &key).await.expect("billed under the live lease");
+        async fn rows(db: &DbPool, run: &str) -> i64 {
+            kyomi_core::db_fetch_scalar!(
+                db, i64, "SELECT COUNT(*) FROM api_usage_log WHERE request_id=$1", run
+            ).expect("count")
+        }
+        assert_eq!(rows(&db, owned.run_id.as_str()).await, 1, "exactly one fenced row, keyed by run id");
+        let (cost, cache_read): (f64, i32) = kyomi_core::db_fetch_one!(
+            &db, (f64, i32),
+            "SELECT cost_estimate, cache_read_input_tokens FROM api_usage_log WHERE request_id=$1",
+            owned.run_id.as_str()
+        ).expect("row");
+        // 1000*$2 + 100*$10 + 2000*$2.5 + 50000*$0.1 = $0.013, x1.1.
+        assert!((cost - 0.013 * 1.1).abs() < 1e-9, "priced: {cost}");
+        assert_eq!(cache_read, 50_000);
+
+        // Now the run is finished; nothing is left, so billing again adds no row.
+        store
+            .finish_with_metadata(&owned.conversation_id, &owned.run_id, &lease, now(), (RunState::Failed, "stopped"), None)
+            .await
+            .expect("finish");
+        owned.billing.bill_remaining(&current, &key).await.expect("nothing left");
+        assert_eq!(rows(&db, owned.run_id.as_str()).await, 1);
+
+        // Ordering matters: calls billed only after the run is terminal are refused by the
+        // fence, and kept (not lost) so the failure is visible and retryable.
+        let late = UsageLedger::default();
+        paid_call(&late);
+        owned.billing.register(late.clone(), billing_for("claude-sonnet-5-5"));
+        assert!(owned.billing.bill_remaining(&current, &key).await.is_err(), "terminal run: stale fence");
+        assert!(!late.is_empty(), "the refused calls are kept, not dropped");
+        assert_eq!(rows(&db, owned.run_id.as_str()).await, 1);
     }
 
     #[tokio::test]

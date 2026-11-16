@@ -218,10 +218,21 @@ pub fn stored_temperature(raw: &str) -> Value {
 }
 
 /// The retired `omit` keyword is now an ordinary value that would be sent
-/// literally (and rejected by the provider). Say so in the log, once per read, so a
-/// leftover `omit` is found by whoever sees the 400s.
+/// literally (and rejected by the provider). Say so in the log (once per process per
+/// source), so a leftover `omit` is found by whoever sees the 400s.
 pub fn warn_if_legacy_omit(source: &str, value: Option<&str>) {
     if value.is_some_and(|v| v.trim().eq_ignore_ascii_case("omit")) {
+        // Workspace settings are read on every LLM call: say it once per process per source.
+        static SEEN: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+            std::sync::OnceLock::new();
+        let first = SEEN
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(source.to_string());
+        if !first {
+            return;
+        }
         tracing::warn!(
             source,
             "the `omit` keyword was removed (KYO-974): this value is now sent to the provider literally and will be rejected; clear it to send nothing"
