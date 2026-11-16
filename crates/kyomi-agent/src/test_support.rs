@@ -319,8 +319,12 @@ impl LLMProvider for ScriptedProvider {
 // `agent.rs` (legacy, non-runtime path) and `adapter.rs` (durable runtime path).
 // ---------------------------------------------------------------------------
 
+/// An [`LLMProvider`] that overrides a [`ScriptedProvider`]'s tool calls with a
+/// scripted list: response `i` carries `requested[i*batch..(i+1)*batch]`, then the
+/// inner provider's text reply. Used to drive real tool outcomes through the
+/// durable `ChatAgentAdapter::chat()` path.
 pub(crate) struct ActualToolsProvider {
-    pub(crate) inner: crate::test_support::ScriptedProvider,
+    pub(crate) inner: ScriptedProvider,
     pub(crate) requested: Vec<(&'static str, serde_json::Value)>,
     pub(crate) index: std::sync::atomic::AtomicUsize,
     pub(crate) truncation: Truncation,
@@ -339,7 +343,7 @@ pub(crate) enum Truncation {
     EveryCall,
 }
 #[async_trait::async_trait]
-impl crate::provider::LLMProvider for ActualToolsProvider {
+impl LLMProvider for ActualToolsProvider {
     async fn complete(&self, messages: &[Message], tools: &[crate::types::Tool], temperature: Option<f32>, max_tokens: u32,
         names: &std::collections::HashMap<String,String>) -> kyomi_core::Result<crate::types::LLMResponse> {
         let mut response = self.inner.complete(messages, tools, temperature, max_tokens, names).await?;
@@ -374,6 +378,8 @@ impl crate::provider::LLMProvider for ActualToolsProvider {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// How a [`FailingTool`] fails: the failure classes a tool can report, so tests can
+/// pin how each one is classified and budgeted.
 pub(crate) enum FailureKind {
     BadRequest,
     ServerError,
@@ -390,6 +396,8 @@ pub(crate) enum FailureKind {
     Succeeded,
 }
 
+/// A tool that fails (or succeeds) in the way its [`FailureKind`] selects, counting
+/// invocations. `name` lets one test registry hold several failure classes.
 pub(crate) struct FailingTool {
     pub(crate) kind: FailureKind,
     pub(crate) name: &'static str,
@@ -397,7 +405,7 @@ pub(crate) struct FailingTool {
 }
 
 #[async_trait::async_trait]
-impl crate::tools::AgentTool for FailingTool {
+impl AgentTool for FailingTool {
     fn name(&self) -> &str { self.name }
     fn description(&self) -> &str { "Failure-class fixture" }
     fn parameters_schema(&self) -> serde_json::Value { serde_json::json!({"type":"object","properties":{}}) }
@@ -416,7 +424,7 @@ impl crate::tools::AgentTool for FailingTool {
             agent_runtime::DomainOutcome::Succeeded
         }
     }
-    async fn execute(&self, _: serde_json::Value, ctx: &crate::tools::ToolContext) -> kyomi_core::Result<String> {
+    async fn execute(&self, _: serde_json::Value, ctx: &ToolContext) -> kyomi_core::Result<String> {
         self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         match self.kind {
             FailureKind::BadRequest => Err(kyomi_core::Error::BadRequest("Missing required parameter 'x'".into())),
@@ -444,22 +452,25 @@ impl crate::tools::AgentTool for FailingTool {
 
 /// A tool that rejects every call with a definite pre-effect rejection
 /// (`BadRequest`), like a SQL analysis error the model can repair.
+/// A [`FailingTool`] that rejects every call with a definite pre-effect rejection
+/// (`BadRequest`), like a SQL analysis error the model can repair.
 pub(crate) fn rejecting_tool(calls: &Arc<std::sync::atomic::AtomicUsize>) -> Arc<FailingTool> {
     Arc::new(FailingTool { kind: FailureKind::BadRequest, name: "rejecting_tool", calls: calls.clone() })
 }
 
+/// A tool that always succeeds, counting invocations (used to prove a success
+/// resets a consecutive-failure budget).
 pub(crate) struct SucceedingTool {
     pub(crate) calls: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 #[async_trait::async_trait]
-impl crate::tools::AgentTool for SucceedingTool {
+impl AgentTool for SucceedingTool {
     fn name(&self) -> &str { "succeeding_tool" }
     fn description(&self) -> &str { "Succeeding fixture" }
     fn parameters_schema(&self) -> serde_json::Value { serde_json::json!({"type":"object","properties":{}}) }
-    async fn execute(&self, _: serde_json::Value, _: &crate::tools::ToolContext) -> kyomi_core::Result<String> {
+    async fn execute(&self, _: serde_json::Value, _: &ToolContext) -> kyomi_core::Result<String> {
         self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Ok("{\"ok\":true}".into())
     }
 }
-

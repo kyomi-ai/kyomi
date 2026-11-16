@@ -3912,7 +3912,6 @@ mod tests {
         assert_eq!(rejecting_calls.load(std::sync::atomic::Ordering::SeqCst), 4);
         assert_eq!(failing_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
         assert_eq!(outcomes.len(), 5, "all five calls must run");
-        assert!(!answer.contains("consecutive tool calls failed"), "{answer}");
         assert_eq!(answer, "Handled the tool error");
     }
 
