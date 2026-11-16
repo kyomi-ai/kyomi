@@ -390,6 +390,8 @@ pub struct WatchBatchRun {
     pub deadline: chrono::DateTime<chrono::Utc>,
     /// Set when this instance loses the run's lease to another instance.
     pub lease_lost: Arc<std::sync::atomic::AtomicBool>,
+    /// Told when the run starts or stops waiting on a batch.
+    pub on_waiting: Option<crate::batch_run::WaitingHook>,
 }
 
 /// [`execute_agent_chat`] with per-run [`ExecutionExtras`].
@@ -468,6 +470,7 @@ pub async fn execute_agent_chat_with(
                         failure_policy,
                         poll_interval: crate::batch_run::poll_interval(),
                         lease_lost: run.lease_lost.clone(),
+                        on_waiting: run.on_waiting.clone(),
                     },
                 ));
             }

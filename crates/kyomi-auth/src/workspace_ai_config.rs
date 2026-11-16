@@ -463,6 +463,115 @@ pub async fn update(
 }
 
 // ---------------------------------------------------------------------------
+// Watch LLM override (KYO-973)
+// ---------------------------------------------------------------------------
+
+/// What to do with the stored watch LLM API key.
+#[derive(Clone, PartialEq)]
+pub enum WatchKeyChange {
+    /// Leave the stored key as is.
+    Keep,
+    /// Encrypt and store this key.
+    Set(String),
+    /// Remove the stored key.
+    Clear,
+}
+
+impl std::fmt::Debug for WatchKeyChange {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Keep => f.write_str("Keep"),
+            Self::Set(_) => f.write_str("Set(<redacted>)"),
+            Self::Clear => f.write_str("Clear"),
+        }
+    }
+}
+
+/// Whether the workspace has a stored watch LLM API key.
+pub async fn has_watch_api_key(db: &DbPool, workspace_id: &str) -> Result<bool, WorkspaceAiConfigError> {
+    #[derive(sqlx::FromRow)]
+    struct KeyRow {
+        watch_ai_api_key_encrypted: Option<String>,
+    }
+    let row = kyomi_core::db_fetch_optional!(
+        db,
+        KeyRow,
+        "SELECT watch_ai_api_key_encrypted FROM workspaces WHERE workspace_id = $1",
+        workspace_id
+    )?
+    .ok_or_else(|| WorkspaceAiConfigError::WorkspaceNotFound(workspace_id.to_string()))?;
+    Ok(row.watch_ai_api_key_encrypted.is_some())
+}
+
+/// Replace the workspace's watch LLM override.
+///
+/// `settings` is the whole non-secret block: a `None` field clears its key so
+/// the instance value or the main LLM applies again. The settings JSON is
+/// edited atomically (compare-and-swap) so a concurrent save of another
+/// setting is never clobbered. The API key lives in its own encrypted column.
+pub async fn update_watch_llm(
+    db: &DbPool,
+    workspace_id: &str,
+    settings: &kyomi_core::watch_llm::WatchLlmSettings,
+    key: &WatchKeyChange,
+) -> Result<(), WorkspaceAiConfigError> {
+    use kyomi_core::watch_llm as w;
+
+    // Encrypt first so an unavailable key store fails before anything is written.
+    let new_key: Option<Option<String>> = match key {
+        WatchKeyChange::Keep => None,
+        WatchKeyChange::Clear => Some(None),
+        WatchKeyChange::Set(plain) => {
+            if !workspace_secrets::is_available() {
+                return Err(WorkspaceAiConfigError::EncryptionUnavailable);
+            }
+            Some(Some(workspace_secrets::encrypt_secret(plain)?))
+        }
+    };
+
+    let edits: Vec<(&'static str, Option<serde_json::Value>)> = vec![
+        (w::KEY_PROVIDER, settings.provider.clone().map(Into::into)),
+        (w::KEY_MODEL, settings.model.clone().map(Into::into)),
+        (w::KEY_BASE_URL, settings.base_url.clone().map(Into::into)),
+        (w::KEY_MODE, settings.mode.map(|m| m.as_str().into())),
+        (w::KEY_BATCH_WINDOW, settings.batch_window_minutes.map(Into::into)),
+        (w::KEY_BATCH_FAILURE, settings.batch_failure.map(|p| p.as_str().into())),
+    ];
+    let found = crate::workspace_service::update_workspace_settings_with(db, workspace_id, |current| {
+        let mut s = current.clone().unwrap_or_else(|| serde_json::json!({}));
+        if !s.get("custom_settings").is_some_and(serde_json::Value::is_object) {
+            s["custom_settings"] = serde_json::json!({});
+        }
+        for (k, v) in &edits {
+            match v {
+                Some(v) => s["custom_settings"][*k] = v.clone(),
+                None => {
+                    if let Some(cs) = s["custom_settings"].as_object_mut() {
+                        cs.remove(*k);
+                    }
+                }
+            }
+        }
+        Ok(s)
+    })
+    .await
+    .map_err(|e| WorkspaceAiConfigError::Json(e.to_string()))?;
+    if !found {
+        return Err(WorkspaceAiConfigError::WorkspaceNotFound(workspace_id.to_string()));
+    }
+
+    if let Some(value) = new_key {
+        kyomi_core::db_execute!(
+            db,
+            "UPDATE workspaces SET watch_ai_api_key_encrypted = $1 WHERE workspace_id = $2",
+            value.as_deref(),
+            workspace_id
+        )?;
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Settings JSON helpers
 // ---------------------------------------------------------------------------
 
@@ -844,6 +953,104 @@ mod tests {
         let user_id = format!("user-{workspace_id}");
         seed_user(sq, &user_id, &format!("{workspace_id}@test.local")).await;
         seed_workspace(sq, workspace_id, &user_id).await;
+    }
+
+    // --- Watch LLM override (KYO-973) -------------------------------------
+
+    fn watch_settings() -> kyomi_core::watch_llm::WatchLlmSettings {
+        use kyomi_core::watch_llm::{BatchFailurePolicy, WatchLlmMode, WatchLlmSettings};
+        WatchLlmSettings {
+            provider: Some("anthropic".into()),
+            model: Some("claude-haiku-x".into()),
+            base_url: None,
+            api_key: None,
+            mode: Some(WatchLlmMode::Batch),
+            batch_window_minutes: Some(90),
+            batch_failure: Some(BatchFailurePolicy::Error),
+        }
+    }
+
+    #[tokio::test]
+    async fn watch_llm_override_round_trips_with_an_encrypted_key_and_keeps_other_settings() {
+        let _env = with_key(&test_key());
+        let db = test_sqlite_pool().await;
+        let ws = "ws-watch-llm";
+        insert_test_workspace(&db, ws).await;
+        crate::workspace_service::update_workspace_settings_with(&db, ws, |c| {
+            let mut s = c.clone().unwrap_or_else(|| serde_json::json!({}));
+            s["custom_settings"]["title_model"] = serde_json::json!("keep-me");
+            Ok(s)
+        })
+        .await
+        .unwrap();
+
+        update_watch_llm(&db, ws, &watch_settings(), &WatchKeyChange::Set("sk-watch-secret".into()))
+            .await
+            .unwrap();
+
+        let cfg = load(&db, ws).await.unwrap();
+        assert_eq!(cfg.watch_llm.provider.as_deref(), Some("anthropic"));
+        assert_eq!(cfg.watch_llm.model.as_deref(), Some("claude-haiku-x"));
+        assert_eq!(cfg.watch_llm.api_key.as_deref(), Some("sk-watch-secret"));
+        assert_eq!(cfg.watch_llm.batch_window_minutes, Some(90));
+        assert_eq!(cfg.title_model.as_deref(), Some("keep-me"), "unrelated settings survive");
+        assert!(cfg.watch_llm_warnings.is_empty());
+        assert!(has_watch_api_key(&db, ws).await.unwrap());
+
+        // The key is encrypted at rest and never part of the settings JSON.
+        let sq = sqlite_pool(&db);
+        let (raw, settings): (Option<String>, Option<String>) = sqlx::query_as(
+            "SELECT watch_ai_api_key_encrypted, CAST(settings AS TEXT) FROM workspaces WHERE workspace_id = $1",
+        )
+        .bind(ws)
+        .fetch_one(sq)
+        .await
+        .unwrap();
+        assert!(!raw.unwrap().contains("sk-watch-secret"));
+        assert!(!settings.unwrap().contains("sk-watch-secret"));
+
+        // Keep leaves the key, a cleared field is removed, Clear drops the key.
+        let mut next = watch_settings();
+        next.model = None;
+        update_watch_llm(&db, ws, &next, &WatchKeyChange::Keep).await.unwrap();
+        let cfg = load(&db, ws).await.unwrap();
+        assert_eq!(cfg.watch_llm.model, None);
+        assert_eq!(cfg.watch_llm.api_key.as_deref(), Some("sk-watch-secret"));
+        update_watch_llm(&db, ws, &Default::default(), &WatchKeyChange::Clear).await.unwrap();
+        let cfg = load(&db, ws).await.unwrap();
+        assert_eq!(cfg.watch_llm, Default::default());
+        assert!(!has_watch_api_key(&db, ws).await.unwrap());
+        assert_eq!(cfg.title_model.as_deref(), Some("keep-me"));
+    }
+
+    #[tokio::test]
+    async fn storing_a_watch_key_without_the_secrets_master_key_is_refused_and_writes_nothing() {
+        let _env = EnvVarGuard::acquire().remove("WORKSPACE_SECRETS_KEY");
+        let db = test_sqlite_pool().await;
+        let ws = "ws-watch-nokey";
+        insert_test_workspace(&db, ws).await;
+        let err = update_watch_llm(&db, ws, &watch_settings(), &WatchKeyChange::Set("k".into()))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, WorkspaceAiConfigError::EncryptionUnavailable), "{err:?}");
+        let cfg = load(&db, ws).await.unwrap();
+        assert_eq!(cfg.watch_llm, Default::default(), "nothing is written when the key cannot be stored");
+    }
+
+    #[tokio::test]
+    async fn an_undecryptable_stored_watch_key_is_dropped_with_a_warning_not_a_failed_load() {
+        let _env = with_key(&test_key());
+        let db = test_sqlite_pool().await;
+        let ws = "ws-watch-badkey";
+        insert_test_workspace(&db, ws).await;
+        sqlx::query("UPDATE workspaces SET watch_ai_api_key_encrypted = 'not-ciphertext' WHERE workspace_id = $1")
+            .bind(ws)
+            .execute(sqlite_pool(&db))
+            .await
+            .unwrap();
+        let cfg = load(&db, ws).await.unwrap();
+        assert_eq!(cfg.watch_llm.api_key, None);
+        assert!(cfg.watch_llm_warnings.iter().any(|w| w.contains("watch LLM API key")));
     }
 
     // --- Tests ----------------------------------------------------------

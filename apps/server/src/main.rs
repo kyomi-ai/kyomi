@@ -83,6 +83,12 @@ async fn serve() {
         }
     }
 
+    // The watch LLM configuration (LLM_WATCH_*) must be usable: batch mode on a
+    // provider without a batch API is a startup error, not a failed run later.
+    if let Err(e) = kyomi_agent::watch_llm::validate_instance(&config) {
+        panic!("{e}");
+    }
+
     // Derive encryption key at startup (fail fast if misconfigured)
     let encryption_key = kyomi_auth::encryption::derive_key(&config.encryption_key)
         .expect("ENCRYPTION_KEY must be a valid 32-byte base64url-encoded key");

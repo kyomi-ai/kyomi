@@ -114,6 +114,11 @@ fn execution_to_item(
         read_at: execution.read_at.map(|dt| dt.to_rfc3339()),
         deleted_at: execution.deleted_at.map(|dt| dt.to_rfc3339()),
         deleted_by: execution.deleted_by.clone(),
+        llm_provider: execution.llm_provider.clone(),
+        llm_model: execution.llm_model.clone(),
+        llm_mode: execution.llm_mode.clone(),
+        batch_ids: execution.batch_ids.clone(),
+        batch_fallback_reason: execution.batch_fallback_reason.clone(),
     }
 }
 

@@ -215,6 +215,19 @@ pub struct WatchExecutionItem {
     pub read_at: Option<String>,
     pub deleted_at: Option<String>,
     pub deleted_by: Option<String>,
+    /// Provider, model and mode the run used (KYO-973); `None` for old rows.
+    #[serde(default)]
+    pub llm_provider: Option<String>,
+    #[serde(default)]
+    pub llm_model: Option<String>,
+    #[serde(default)]
+    pub llm_mode: Option<String>,
+    /// JSON array text of the vendor batch ids the run submitted.
+    #[serde(default)]
+    pub batch_ids: Option<String>,
+    /// Why a batch-configured run (or part of it) ran realtime.
+    #[serde(default)]
+    pub batch_fallback_reason: Option<String>,
 }
 
 /// An alert item (a watch execution that triggered an alert).

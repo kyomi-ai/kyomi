@@ -91,6 +91,8 @@ fn status_badge_config(status: &str) -> (StatusBadgeVariant, &'static str) {
         "success" => (StatusBadgeVariant::Success, "Success"),
         "error" => (StatusBadgeVariant::Error, "Error"),
         "running" => (StatusBadgeVariant::Info, "Running"),
+        // A batch-mode run waiting on the provider's batch API (KYO-973).
+        "waiting_batch" => (StatusBadgeVariant::Info, "Waiting on batch"),
         // "no_alert" and default
         _ => (StatusBadgeVariant::Default, "No Alert"),
     }
@@ -193,7 +195,7 @@ fn WatchCard(
                                     view! { <Icon icon=phosphor_leptos::CHECK_CIRCLE attr:class="h-3 w-3" /> }.into_any()
                                 } else if status == "error" {
                                     view! { <Icon icon=phosphor_leptos::X_CIRCLE attr:class="h-3 w-3" /> }.into_any()
-                                } else if status == "running" {
+                                } else if status == "running" || status == "waiting_batch" {
                                     view! { <Icon icon=phosphor_leptos::CIRCLE_NOTCH attr:class="h-3 w-3 animate-spin" /> }.into_any()
                                 } else {
                                     view! { <Icon icon=phosphor_leptos::CHECK_CIRCLE attr:class="h-3 w-3" /> }.into_any()
@@ -737,5 +739,16 @@ pub fn WatchesPage() -> impl IntoView {
         </div>
             }.into_any()
         }}
+    }
+}
+
+#[cfg(test)]
+mod waiting_batch_tests {
+    use super::*;
+
+    #[test]
+    fn a_run_waiting_on_a_batch_has_its_own_badge_label() {
+        assert_eq!(status_badge_config("waiting_batch").1, "Waiting on batch");
+        assert_eq!(status_badge_config("running").1, "Running");
     }
 }

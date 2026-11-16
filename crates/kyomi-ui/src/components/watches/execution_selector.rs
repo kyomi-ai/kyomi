@@ -31,6 +31,7 @@ fn get_status_label(status: &str) -> &'static str {
         "no_alert" => "No Alert",
         "error" => "Error",
         "running" => "Running",
+        "waiting_batch" => "Waiting on batch",
         _ => "Unknown",
     }
 }

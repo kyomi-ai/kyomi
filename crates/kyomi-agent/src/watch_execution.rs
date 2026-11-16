@@ -1292,6 +1292,25 @@ async fn execute_watch_inner(
                 execution_id,
                 deadline: *deadline,
                 lease_lost: run.lease_lost.clone(),
+                on_waiting: Some({
+                    let ws = ws_manager.clone();
+                    let workspace_id = watch.workspace_id.clone();
+                    let user_id = watch.created_by.clone();
+                    let watch_id = watch.watch_id.clone();
+                    Arc::new(move |waiting: bool| {
+                        let (ws, workspace_id, user_id, watch_id) =
+                            (ws.clone(), workspace_id.clone(), user_id.clone(), watch_id.clone());
+                        Box::pin(async move {
+                            ws_helpers::send_watch_state_update(
+                                ws.for_workspace(&workspace_id),
+                                &user_id,
+                                &watch_id,
+                                if waiting { "waiting_batch" } else { "running" },
+                            )
+                            .await;
+                        })
+                    })
+                }),
             }),
         },
         crate::watch_llm::RunPlan::Realtime { .. } => crate::execution::ExecutionExtras::default(),

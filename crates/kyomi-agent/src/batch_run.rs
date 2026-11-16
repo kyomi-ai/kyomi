@@ -61,6 +61,10 @@ pub fn instance_id() -> &'static str {
     ID.get_or_init(|| format!("{}:{}", std::process::id(), uuid::Uuid::new_v4()))
 }
 
+/// Told when the run starts or stops waiting on a batch, so the UI can show it
+/// live. Best-effort: a failure here never affects the run.
+pub type WaitingHook = Arc<dyn Fn(bool) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> + Send + Sync>;
+
 /// Everything a batch-mode run needs besides the provider.
 #[derive(Clone)]
 pub struct BatchRunContext {
@@ -74,6 +78,7 @@ pub struct BatchRunContext {
     pub poll_interval: Duration,
     /// Set when this instance lost the run's lease to another instance.
     pub lease_lost: Arc<AtomicBool>,
+    pub on_waiting: Option<WaitingHook>,
 }
 
 pub struct BatchingProvider {
@@ -96,6 +101,14 @@ impl BatchingProvider {
 
     fn lease_expiry() -> DateTime<Utc> {
         Utc::now() + chrono::Duration::seconds(LEASE_TTL_SECONDS)
+    }
+
+    async fn set_waiting(&self, waiting: bool) -> kyomi_core::Result<()> {
+        store::set_waiting(&self.ctx.db, self.ctx.execution_id, waiting).await?;
+        if let Some(hook) = &self.ctx.on_waiting {
+            hook(waiting).await;
+        }
+        Ok(())
     }
 
     /// Renew the lease; `Err` when another instance owns the run now.
@@ -222,7 +235,7 @@ impl LLMProvider for BatchingProvider {
             }
         };
 
-        store::set_waiting(&self.ctx.db, self.ctx.execution_id, true).await?;
+        self.set_waiting(true).await?;
         let outcome = loop {
             if Utc::now() >= self.ctx.deadline {
                 break None;
@@ -240,7 +253,7 @@ impl LLMProvider for BatchingProvider {
                 Err(e) => break Some(BatchPoll::Failed(e.to_string())),
             }
         };
-        store::set_waiting(&self.ctx.db, self.ctx.execution_id, false).await?;
+        self.set_waiting(false).await?;
 
         match outcome {
             Some(BatchPoll::Succeeded(response)) => {
@@ -339,6 +352,7 @@ mod tests {
             failure_policy: policy,
             poll_interval: Duration::from_millis(5),
             lease_lost: Arc::new(AtomicBool::new(false)),
+            on_waiting: None,
         }
     }
 

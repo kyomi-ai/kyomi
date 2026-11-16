@@ -121,6 +121,39 @@ pub struct LlmTuningView {
     pub warnings: Vec<String>,
 }
 
+/// Watch LLM override fields as text, for the Settings form (KYO-973).
+/// Empty means "not set" (the instance value or the main LLM applies).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct WatchLlmValues {
+    pub provider: String,
+    pub model: String,
+    pub base_url: String,
+    /// `realtime | batch`, or empty.
+    pub mode: String,
+    pub batch_window_minutes: String,
+    /// `realtime_retry | error`, or empty.
+    pub batch_failure: String,
+    /// Write-only: a new API key to store. Never returned by the server.
+    #[serde(default)]
+    pub new_api_key: String,
+    /// Write-only: remove the stored API key.
+    #[serde(default)]
+    pub clear_api_key: bool,
+}
+
+/// The watch LLM override as stored for the workspace and as set by the
+/// instance (`LLM_WATCH_*` env), so the page can show where a value comes from.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct WatchLlmView {
+    pub workspace: WatchLlmValues,
+    pub instance: WatchLlmValues,
+    pub has_workspace_api_key: bool,
+    pub has_instance_api_key: bool,
+    /// Stored workspace values that are invalid and therefore ignored.
+    #[serde(default)]
+    pub warnings: Vec<String>,
+}
+
 /// Result of a candidate-config connectivity test.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TestAiConfigResult {
@@ -268,6 +301,123 @@ pub async fn update_llm_tuning(values: LlmTuningValues) -> Result<(), ServerFnEr
         settings.unwrap_or_else(|| serde_json::json!({}))
     })
     .await?;
+    Ok(())
+}
+
+#[cfg(feature = "ssr")]
+fn watch_llm_values(s: &kyomi_core::watch_llm::WatchLlmSettings) -> WatchLlmValues {
+    WatchLlmValues {
+        provider: s.provider.clone().unwrap_or_default(),
+        model: s.model.clone().unwrap_or_default(),
+        base_url: s.base_url.clone().unwrap_or_default(),
+        mode: s.mode.map(|m| m.as_str().to_string()).unwrap_or_default(),
+        batch_window_minutes: s.batch_window_minutes.map(|n| n.to_string()).unwrap_or_default(),
+        batch_failure: s.batch_failure.map(|p| p.as_str().to_string()).unwrap_or_default(),
+        new_api_key: String::new(),
+        clear_api_key: false,
+    }
+}
+
+/// Read the workspace and instance watch LLM configuration. Self-hosted
+/// admins only. API keys are never returned, only whether one is stored.
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
+pub async fn get_watch_llm() -> Result<WatchLlmView, ServerFnError> {
+    let ac = AuthenticatedContext::extract().await?;
+    if !ac.ctx.config.self_hosted {
+        return Err(ServerFnError::new(
+            "Watch LLM settings are only configurable on self-hosted deployments.",
+        ));
+    }
+    ac.require(Permission::ManageAiConfig, "Workspace admin access required")?;
+
+    let ws_config = kyomi_auth::workspace_ai_config::load(ac.db(), &ac.ws_id)
+        .await
+        .into_sfn()?;
+    Ok(WatchLlmView {
+        workspace: watch_llm_values(&ws_config.watch_llm),
+        instance: watch_llm_values(&ac.ctx.config.llm_watch),
+        has_workspace_api_key: ws_config.watch_llm.api_key.is_some(),
+        has_instance_api_key: ac.ctx.config.llm_watch.api_key.is_some(),
+        warnings: ws_config.watch_llm_warnings.clone(),
+    })
+}
+
+/// Validate and store the workspace watch LLM override. Self-hosted admins
+/// only.
+///
+/// Empty fields clear their key so the instance `LLM_WATCH_*` value or the
+/// main LLM applies again. The whole request is rejected, and nothing saved,
+/// when any value is invalid, when a provider is chosen without an API key,
+/// or when `mode = batch` resolves to a provider without a batch API.
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
+pub async fn update_watch_llm(values: WatchLlmValues) -> Result<(), ServerFnError> {
+    use kyomi_auth::workspace_ai_config::WatchKeyChange;
+    use kyomi_core::watch_llm::{
+        parse_batch_window_minutes, BatchFailurePolicy, WatchLlmMode, WatchLlmSettings,
+    };
+
+    let ac = AuthenticatedContext::extract().await?;
+    if !ac.ctx.config.self_hosted {
+        return Err(ServerFnError::new(
+            "Watch LLM settings are only configurable on self-hosted deployments.",
+        ));
+    }
+    ac.require(Permission::ManageAiConfig, "Workspace admin access required")?;
+
+    let text = |v: &str| Some(v.trim().to_string()).filter(|v| !v.is_empty());
+    let bad = |field: &str, e: kyomi_core::llm_sampling::InvalidSetting| {
+        ServerFnError::new(format!("{field}: {e}"))
+    };
+    let provider = text(&values.provider);
+    if let Some(p) = &provider {
+        kyomi_agent::ProviderKind::parse(p).map_err(|e| ServerFnError::new(e.to_string()))?;
+    }
+    let settings = WatchLlmSettings {
+        provider,
+        model: text(&values.model),
+        base_url: text(&values.base_url),
+        api_key: None,
+        mode: text(&values.mode).map(|m| WatchLlmMode::parse(&m)).transpose().map_err(|e| bad("mode", e))?,
+        batch_window_minutes: text(&values.batch_window_minutes)
+            .map(|w| parse_batch_window_minutes(&w))
+            .transpose()
+            .map_err(|e| bad("batch window", e))?,
+        batch_failure: text(&values.batch_failure)
+            .map(|p| BatchFailurePolicy::parse(&p))
+            .transpose()
+            .map_err(|e| bad("batch failure policy", e))?,
+    };
+
+    let key = if values.clear_api_key {
+        WatchKeyChange::Clear
+    } else if let Some(k) = text(&values.new_api_key) {
+        WatchKeyChange::Set(k)
+    } else {
+        WatchKeyChange::Keep
+    };
+    let will_have_key = match &key {
+        WatchKeyChange::Set(_) => true,
+        WatchKeyChange::Clear => false,
+        WatchKeyChange::Keep => kyomi_auth::workspace_ai_config::has_watch_api_key(ac.db(), &ac.ws_id)
+            .await
+            .into_sfn()?,
+    };
+
+    // Validate the configuration that would result, exactly as a run resolves it.
+    let mut candidate = kyomi_auth::workspace_ai_config::load(ac.db(), &ac.ws_id)
+        .await
+        .into_sfn()?;
+    candidate.watch_llm = WatchLlmSettings {
+        api_key: will_have_key.then(|| "placeholder".to_string()),
+        ..settings.clone()
+    };
+    candidate.watch_llm.validate().map_err(|e| bad("watch LLM", e))?;
+    kyomi_agent::watch_llm::validate_selection(&candidate, &ac.ctx.config)
+        .map_err(ServerFnError::new)?;
+
+    kyomi_auth::workspace_ai_config::update_watch_llm(ac.db(), &ac.ws_id, &settings, &key)
+        .await
+        .into_sfn()?;
     Ok(())
 }
 

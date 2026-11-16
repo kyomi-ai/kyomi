@@ -64,6 +64,45 @@ pub fn resolve_watch_selection(
     Ok(WatchLlmSelection { provider_config, resolved, workspace_billed })
 }
 
+/// Whether the watch LLM configuration `ws_config` + `app_config` would
+/// produce is usable: the provider resolves, and `mode = batch` is only
+/// accepted for a provider that has a batch adapter. Called when a workspace
+/// saves its watch settings, so an unsupported choice is rejected there with
+/// a clear message and never fails at run time.
+pub fn validate_selection(ws_config: &WorkspaceAiConfig, app_config: &Config) -> Result<(), String> {
+    use kyomi_core::watch_llm::WatchLlmMode;
+    let selection = resolve_watch_selection(ws_config, app_config).map_err(|e| e.to_string())?;
+    if selection.resolved.mode == WatchLlmMode::Batch {
+        crate::batch::batch_support(
+            selection.provider_config.provider,
+            selection.provider_config.base_url.as_deref(),
+        )?;
+    }
+    Ok(())
+}
+
+/// Validate the instance-level watch LLM configuration at startup. A deployment
+/// with no LLM configured at all is not an error here (watches skip AI then).
+pub fn validate_instance(app_config: &Config) -> Result<(), String> {
+    if !app_config.llm_configured() {
+        return Ok(());
+    }
+    let default_workspace = WorkspaceAiConfig {
+        provider: kyomi_auth::workspace_ai_config::WorkspaceAiProvider::Kyomi,
+        model: None,
+        api_key: None,
+        base_url: None,
+        title_model: None,
+        context_window: 0,
+        sampling: Default::default(),
+        sampling_warnings: Vec::new(),
+        watch_llm: Default::default(),
+        watch_llm_warnings: Vec::new(),
+    };
+    validate_selection(&default_workspace, app_config)
+        .map_err(|e| format!("invalid watch LLM configuration (LLM_WATCH_*): {e}"))
+}
+
 /// How one watch run talks to the LLM.
 #[derive(Debug, Clone, PartialEq)]
 pub enum RunPlan {
@@ -446,5 +485,50 @@ mod tests {
         assert_eq!(p, Err("no batch api".into()));
         // Realtime mode does not care about batch support.
         assert!(plan_run(&resolved(WatchLlmMode::Realtime, 60), Err("x".into()), true, None, at()).is_ok());
+    }
+
+    // -- validation ---------------------------------------------------------
+
+    #[test]
+    fn batch_mode_is_rejected_for_providers_without_a_batch_api_with_a_clear_message() {
+        let mut c = config(true); // main provider: anthropic, no base URL
+        c.llm_watch.mode = Some(WatchLlmMode::Batch);
+        assert!(validate_selection(&ws(Default::default()), &c).is_ok(), "Anthropic supports batch");
+
+        c.llm_watch.provider = Some("gemini".into());
+        c.llm_watch.api_key = Some("k".into());
+        let err = validate_selection(&ws(Default::default()), &c).unwrap_err();
+        assert!(err.contains("Gemini"), "{err}");
+
+        // Realtime on the same provider is fine.
+        c.llm_watch.mode = Some(WatchLlmMode::Realtime);
+        assert!(validate_selection(&ws(Default::default()), &c).is_ok());
+    }
+
+    #[test]
+    fn a_workspace_choosing_batch_is_validated_against_the_provider_it_resolves_to() {
+        let c = config(true);
+        let mut w = connection("openai", "k");
+        w.mode = Some(WatchLlmMode::Batch);
+        let err = validate_selection(&ws(w.clone()), &c).unwrap_err();
+        assert!(err.contains("OpenRouter"), "{err}");
+        w.base_url = Some("https://openrouter.ai/api/v1".into());
+        assert!(validate_selection(&ws(w), &c).is_ok());
+    }
+
+    #[test]
+    fn instance_validation_names_the_variables_and_ignores_unconfigured_deployments() {
+        let mut c = config(true);
+        c.llm_watch.mode = Some(WatchLlmMode::Batch);
+        c.llm_provider = Some("gemini".into());
+        let err = validate_instance(&c).unwrap_err();
+        assert!(err.contains("LLM_WATCH_") && err.contains("Gemini"), "{err}");
+
+        let bare = Config::test_config();
+        let mut bare = bare;
+        bare.anthropic_api_key = None;
+        bare.llm_api_key = None;
+        bare.llm_watch.mode = Some(WatchLlmMode::Batch);
+        assert!(validate_instance(&bare).is_ok());
     }
 }
