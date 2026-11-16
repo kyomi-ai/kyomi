@@ -204,6 +204,37 @@ mod tests {
     }
 }
 
+/// The LLM-side facts the backend compatibility check needs.
+pub fn llm_facts(provider: crate::provider::ProviderKind, base_url: Option<&str>) -> (String, Option<String>) {
+    (provider.to_string(), base_url.map(str::to_string))
+}
+
+/// Startup validation against the instance LLM config (`LLM_PROVIDER` /
+/// `LLM_BASE_URL`): an incompatible or half-configured web backend fails the
+/// server start with a clear message instead of a 400 at runtime. Logs the
+/// outcome per tool at info level.
+pub fn validate_startup(config: &kyomi_core::Config) -> kyomi_core::Result<()> {
+    let (provider, base_url) = match crate::provider::resolve_provider_config(config) {
+        Ok(c) => llm_facts(c.provider, c.base_url.as_deref()),
+        // No LLM configured: nothing can be paired with it, so provider-executed
+        // backends are reported as incompatible rather than assumed to work.
+        Err(_) => (String::new(), config.llm_base_url.clone()),
+    };
+    let facts = kyomi_core::web_tools::LlmFacts { provider: &provider, base_url: base_url.as_deref() };
+    let (search, fetch) = config.web_tools.validate(facts)?;
+    for (tool, outcome) in [("web_search", &search), ("web_fetch", &fetch)] {
+        match outcome {
+            kyomi_core::web_tools::ResolvedBackend::Enabled(c) => {
+                tracing::info!(tool, backend = %c.kind, "web tool enabled");
+            }
+            kyomi_core::web_tools::ResolvedBackend::Disabled(reason) => {
+                tracing::info!(tool, reason = %reason, "web tool not available");
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Truncate to at most `max` characters; the flag says whether anything was cut.
 pub(crate) fn truncate_chars(s: &str, max: usize) -> (String, bool) {
     match s.char_indices().nth(max) {

@@ -28,6 +28,9 @@ use crate::web::{
     UNTRUSTED_NOTICE,
 };
 
+/// Names of the web tools.
+pub const WEB_TOOL_NAMES: [&str; 2] = ["web_search", "web_fetch"];
+
 const MAX_RESULTS_LIMIT: u64 = 10;
 const DEFAULT_RESULTS: u64 = 5;
 const MAX_QUERY_CHARS: usize = 400;

@@ -54,6 +54,7 @@ use crate::provider::{
     create_provider_from_workspace, resolve_provider_config, ProviderKind,
 };
 use crate::thinking::AgentThinkingTracker;
+use crate::tools::web::WEB_TOOL_NAMES;
 use crate::tools::{create_default_registry, ToolContext, ToolFilter};
 
 // ---------------------------------------------------------------------------
@@ -363,6 +364,48 @@ fn build_agent_config(
     }
 }
 
+/// Resolve the web tool backends for this run and register the Kyomi-executed ones.
+///
+/// Chat (no explicit tool subset) gets the tools whenever a backend is
+/// configured; a subset run (watches / scheduled) gets them only with
+/// `WEB_TOOLS_UNATTENDED`; copilots never do. An incompatible backend (for
+/// example a self-hosted workspace on a different LLM than the instance's
+/// `anthropic` backend assumes) leaves the tool absent with a warning instead
+/// of failing the run. Returns whether any web tool is available to the model.
+fn register_web_tools_for_run(
+    registry: &mut crate::tools::ToolRegistry,
+    app_config: &kyomi_core::Config,
+    config: &AgentExecutionConfig,
+    provider_kind: ProviderKind,
+    llm_base_url: Option<&str>,
+) -> bool {
+    let eligible = if config.tools_subset.is_some() {
+        app_config.web_tools.in_unattended_runs
+    } else {
+        config.context_type == "chat"
+    };
+    if !eligible {
+        return false;
+    }
+    let provider = provider_kind.to_string();
+    let facts = kyomi_core::web_tools::LlmFacts { provider: &provider, base_url: llm_base_url };
+    let settings = &app_config.web_tools;
+    let resolve = |tool| match settings.resolve(tool, facts) {
+        Ok(resolved) => resolved,
+        Err(e) => {
+            tracing::warn!(tool = tool.tool_name(), error = %e, "web tool unavailable for this run");
+            kyomi_core::web_tools::ResolvedBackend::Disabled(e.to_string())
+        }
+    };
+    let search = resolve(kyomi_core::web_tools::WebToolKind::Search);
+    let fetch = resolve(kyomi_core::web_tools::WebToolKind::Fetch);
+    if let Err(e) = crate::tools::web::register_web_tools(registry, &search, &fetch, &settings.caps) {
+        tracing::warn!(error = %e, "failed to construct web tool backends");
+        return false;
+    }
+    WEB_TOOL_NAMES.iter().any(|n| registry.get_tool(n).is_some())
+}
+
 /// Execute the agent chat loop for a single user message.
 ///
 /// This is the main entry point that coordinates all the pieces:
@@ -386,14 +429,14 @@ pub async fn execute_agent_chat(
         ..
     } = env;
     // 1. Build system prompt (or use provided custom one).
-    let system_prompt = if let Some(ref custom) = config.system_prompt {
+    let mut system_prompt = if let Some(ref custom) = config.system_prompt {
         custom.clone()
     } else {
         prompt::build_system_prompt(config.is_shared_conversation)
     };
 
     // 2. Create LLM provider via the BYOK-aware factory.
-    let (client, provider_kind, is_byok, sampling) = {
+    let (client, provider_kind, is_byok, sampling, llm_base_url) = {
         let mut ws_config =
             kyomi_auth::workspace_ai_config::load(db, &config.workspace_id)
                 .await
@@ -443,7 +486,20 @@ pub async fn execute_agent_chat(
         } else {
             provider_kind
         };
-        (client, provider_kind, is_byok, sampling)
+        // The base URL the LLM client actually uses, mirroring
+        // `create_provider_from_workspace`: server env config unless a
+        // self-hosted workspace brings its own provider.
+        let llm_base_url = if !app_config.self_hosted
+            || matches!(
+                ws_config.provider,
+                kyomi_auth::workspace_ai_config::WorkspaceAiProvider::Kyomi
+            )
+        {
+            app_config.llm_base_url.clone()
+        } else {
+            ws_config.base_url.clone()
+        };
+        (client, provider_kind, is_byok, sampling, llm_base_url)
     };
     // Read the authoritative model name from the provider (not from config defaults).
     let model_name = client.model().to_string();
@@ -459,11 +515,16 @@ pub async fn execute_agent_chat(
     //
     // If tools_subset is explicitly provided it takes precedence.
     let tool_filter = if let Some(ref subset) = config.tools_subset {
-        // Explicit tools_subset overrides context-based defaults.
+        // Explicit tools_subset overrides context-based defaults. Web tools join an
+        // unattended subset only when the operator enabled them for unattended runs.
+        let mut include = subset.clone();
+        if app_config.web_tools.in_unattended_runs {
+            include.extend(crate::tools::web::WEB_TOOL_NAMES.iter().map(|n| n.to_string()));
+        }
         ToolFilter {
             exclude_copilot_only: false,
             exclude_mcp_only: false,
-            include_only: Some(subset.clone()),
+            include_only: Some(include),
         }
     } else {
         match config.context_type.as_str() {
@@ -487,7 +548,18 @@ pub async fn execute_agent_chat(
     let agent_config = build_agent_config(&config, tool_filter, &sampling);
 
     // 4. Create tool registry (filtered by tools_subset if provided).
-    let registry = Arc::new(create_default_registry());
+    let mut registry = create_default_registry();
+    let web_tools_registered = register_web_tools_for_run(
+        &mut registry,
+        app_config,
+        &config,
+        provider_kind,
+        llm_base_url.as_deref(),
+    );
+    if web_tools_registered {
+        system_prompt.push_str(prompt::WEB_ACCESS_SECTION);
+    }
+    let registry = Arc::new(registry);
 
     // 5. Tool context was already built at the top of this function (see
     // `build_tool_context`) — nothing to do here.
@@ -2304,5 +2376,52 @@ mod tests {
         );
         assert_eq!(agent_config.temperature, Some(0.42));
         assert_eq!(agent_config.reasoning_effort.as_deref(), Some("max"));
+    }
+
+    // -- web tools wiring (KYO-969) --------------------------------------
+
+    fn web_config(vars: &[(&str, &str)]) -> kyomi_core::Config {
+        let map: std::collections::HashMap<String, String> =
+            vars.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+        let mut c = kyomi_core::Config::test_config();
+        c.web_tools = kyomi_core::web_tools::WebToolsSettings::from_lookup(|k| map.get(k).cloned());
+        c
+    }
+
+    fn registered(app: &kyomi_core::Config, cfg: &AgentExecutionConfig, kind: ProviderKind) -> Vec<&'static str> {
+        let mut registry = crate::tools::ToolRegistry::new();
+        let any = register_web_tools_for_run(&mut registry, app, cfg, kind, None);
+        let names: Vec<&'static str> =
+            WEB_TOOL_NAMES.iter().copied().filter(|n| registry.get_tool(n).is_some()).collect();
+        assert_eq!(any, !names.is_empty());
+        names
+    }
+
+    const TAVILY: &[(&str, &str)] = &[("WEB_SEARCH_PROVIDER", "tavily"), ("WEB_SEARCH_API_KEY", "k")];
+
+    #[test]
+    fn web_tools_absent_when_unconfigured_present_when_configured() {
+        let chat = AgentExecutionConfig::default();
+        assert!(registered(&web_config(&[]), &chat, ProviderKind::Anthropic).is_empty());
+        assert_eq!(registered(&web_config(TAVILY), &chat, ProviderKind::OpenAI), ["web_search"]);
+    }
+
+    #[test]
+    fn web_tools_are_chat_only_unless_unattended_flag_is_set() {
+        let app = web_config(TAVILY);
+        let copilot = AgentExecutionConfig { context_type: "dashboard_copilot".into(), ..AgentExecutionConfig::default() };
+        assert!(registered(&app, &copilot, ProviderKind::OpenAI).is_empty());
+        let watch = AgentExecutionConfig { tools_subset: Some(vec!["query_datasource".into()]), ..AgentExecutionConfig::default() };
+        assert!(registered(&app, &watch, ProviderKind::OpenAI).is_empty());
+        let mut with_flag = TAVILY.to_vec();
+        with_flag.push(("WEB_TOOLS_UNATTENDED", "true"));
+        assert_eq!(registered(&web_config(&with_flag), &watch, ProviderKind::OpenAI), ["web_search"]);
+    }
+
+    #[test]
+    fn incompatible_backend_for_this_run_leaves_the_tool_absent_instead_of_failing() {
+        let app = web_config(&[("WEB_SEARCH_PROVIDER", "anthropic")]);
+        let chat = AgentExecutionConfig::default();
+        assert!(registered(&app, &chat, ProviderKind::OpenAI).is_empty());
     }
 }
