@@ -344,8 +344,8 @@ pub(crate) enum Truncation {
 }
 #[async_trait::async_trait]
 impl LLMProvider for ActualToolsProvider {
-    async fn complete(&self, messages: &[Message], tools: &[crate::types::Tool], temperature: Option<f32>, max_tokens: u32,
-        names: &std::collections::HashMap<String,String>) -> kyomi_core::Result<crate::types::LLMResponse> {
+    async fn complete(&self, messages: &[Message], tools: &[Tool], temperature: Option<f32>, max_tokens: u32,
+        names: &HashMap<String, String>) -> kyomi_core::Result<LLMResponse> {
         let mut response = self.inner.complete(messages, tools, temperature, max_tokens, names).await?;
         let index = self.index.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let start = index * self.batch;
@@ -356,10 +356,10 @@ impl LLMProvider for ActualToolsProvider {
                 Truncation::FirstCall => index == 0 && offset == 0,
                 Truncation::EveryCall => true,
             };
-            let calls: Vec<crate::types::ToolCall> = self.requested[start..end]
+            let calls: Vec<ToolCall> = self.requested[start..end]
                 .iter()
                 .enumerate()
-                .map(|(offset, (name, arguments))| crate::types::ToolCall {
+                .map(|(offset, (name, arguments))| ToolCall {
                     id: format!("provider-call-{}", start + offset),
                     name: (*name).into(),
                     arguments: arguments.clone(),
@@ -377,9 +377,9 @@ impl LLMProvider for ActualToolsProvider {
     fn model(&self) -> &str { "actual-tool-outcome-fixture" }
 }
 
+/// The outcome a [`FailingTool`] produces: the failure classes a tool can report,
+/// plus one success, so tests can pin how each is classified and budgeted.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-/// How a [`FailingTool`] fails: the failure classes a tool can report, so tests can
-/// pin how each one is classified and budgeted.
 pub(crate) enum FailureKind {
     BadRequest,
     ServerError,
@@ -450,8 +450,6 @@ impl AgentTool for FailingTool {
     }
 }
 
-/// A tool that rejects every call with a definite pre-effect rejection
-/// (`BadRequest`), like a SQL analysis error the model can repair.
 /// A [`FailingTool`] that rejects every call with a definite pre-effect rejection
 /// (`BadRequest`), like a SQL analysis error the model can repair.
 pub(crate) fn rejecting_tool(calls: &Arc<std::sync::atomic::AtomicUsize>) -> Arc<FailingTool> {
