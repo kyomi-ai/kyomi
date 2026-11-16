@@ -3879,7 +3879,9 @@ Second chart:\n{CHARTML_STRIPPED_NOTE}\nDone."
                     agent.tool_context.session_id = Some("s-pause".into());
                 }
             }
-            // The first request must still carry the tool, except for the restricted session.
+            // (In the restricted case the tool is never sent at all; the scripted pause reply
+            // still ends flagged without a continuation. The guard itself is asserted in
+            // `the_pause_guard_probe_is_false_for_each_withholding_reason`.)
             let answer = agent.chat("hi", CancellationToken::new(), None, None, None).await.unwrap();
             let calls = calls.lock().unwrap();
             assert_eq!(calls.len(), 1, "{reason}: no continuation request is sent");
@@ -3891,22 +3893,75 @@ Second chart:\n{CHARTML_STRIPPED_NOTE}\nDone."
         }
     }
 
+    /// The guard that stops a pause continuation is `admitted_server_tools(false)`;
+    /// assert it directly for each withholding reason (and that it is open otherwise).
     #[tokio::test]
-    async fn sources_gathered_before_a_session_became_restricted_are_still_shown() {
-        // Sources are inbound web data, not outbound private data: showing them in the
-        // answer discloses nothing about the session. (Only further requests are withheld.)
-        let (mut agent, _calls) = scripted_agent_with_config(
-            server_tool_agent_config(),
-            vec![Reply::Response(server_response("end_turn", None))],
-            Reply::Text("x".into()),
-        )
-        .await;
+    async fn the_pause_guard_probe_is_false_for_each_withholding_reason() {
+        let fresh = || async { scripted_agent_with_config(server_tool_agent_config(), vec![], Reply::Text("x".into())).await.0 };
+        let agent = fresh().await;
+        assert_eq!(agent.admitted_server_tools(false).await.len(), 1, "open when nothing withholds it");
+
+        let mut agent = fresh().await;
+        agent.web_usage.insert(kyomi_core::web_tools::WebToolKind::Search, 5);
+        assert!(agent.admitted_server_tools(false).await.is_empty(), "allowance spent");
+
+        let agent = fresh().await;
+        let ctx = &agent.tool_context;
+        crate::web::caps::add_usage(&ctx.kv, &ctx.workspace_id, kyomi_core::web_tools::WebToolKind::Search, ctx.config.web_tools.caps.workspace_monthly).await.unwrap();
+        assert!(agent.admitted_server_tools(false).await.is_empty(), "monthly budget spent");
+
+        let mut agent = fresh().await;
         crate::test_support::seed_user_and_workspace(&agent.tool_context.db).await;
-        kyomi_core::db_execute!(&agent.tool_context.db, "INSERT INTO chat_sessions (session_id,user_id,workspace_id,personal_data_owner_id) VALUES ('s-late','user-a','ws-1','user-a')").unwrap();
-        agent.tool_context.session_id = Some("s-late".into());
+        kyomi_core::db_execute!(&agent.tool_context.db, "INSERT INTO chat_sessions (session_id,user_id,workspace_id,personal_data_owner_id) VALUES ('s-guard','user-a','ws-1','user-a')").unwrap();
+        agent.tool_context.session_id = Some("s-guard".into());
+        assert!(agent.admitted_server_tools(false).await.is_empty(), "restricted session");
+    }
+
+    /// A tool that restricts the session while the run is in progress (as a private
+    /// document read does), to exercise a restriction that appears mid-run.
+    struct RestrictSessionTool;
+    #[async_trait::async_trait]
+    impl crate::tools::AgentTool for RestrictSessionTool {
+        // A read-only native tool name: the privacy wrapper does not count it as a publication
+        // (which would itself block the restriction from being recorded).
+        fn name(&self) -> &str { "list_datasources" }
+        fn description(&self) -> &str { "restricts the session" }
+        fn parameters_schema(&self) -> serde_json::Value { serde_json::json!({"type": "object", "properties": {}}) }
+        async fn execute(&self, _args: serde_json::Value, ctx: &crate::tools::ToolContext) -> kyomi_core::Result<String> {
+            kyomi_core::db_execute!(&ctx.db, "INSERT INTO personal_mcp_private_contexts (owner_user_id,workspace_id) VALUES ('user-a','ws-1')").unwrap();
+            kyomi_auth::personal_mcp_privacy::inherit_private_document_context(&ctx.db, "user-a", "ws-1", Some("s-late"), None).await.unwrap();
+            Ok("restricted".into())
+        }
+    }
+
+    #[tokio::test]
+    async fn sources_gathered_before_a_mid_run_restriction_are_still_shown_but_later_requests_are_withheld() {
+        // Sources are inbound web data, not outbound private data: showing them discloses
+        // nothing. Only further requests are withheld.
+        let tool_call = ToolCall { id: "tc_1".into(), name: "list_datasources".into(), arguments: serde_json::json!({}), arguments_error: None };
+        let first = server_response("tool_use", Some(vec![tool_call]));
+        let seen = Arc::new(Mutex::new(Vec::<usize>::new()));
+        struct Spy(Arc<Mutex<Vec<usize>>>, ScriptedProvider);
+        #[async_trait::async_trait]
+        impl crate::provider::LLMProvider for Spy {
+            async fn complete(&self, m: &[Message], t: &[Tool], o: &crate::provider::RequestOptions, u: &HashMap<String, String>) -> kyomi_core::Result<crate::types::LLMResponse> {
+                self.0.lock().unwrap().push(o.server_tools.len());
+                self.1.complete(m, t, o, u).await
+            }
+            fn model(&self) -> &str { "spy" }
+        }
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let inner = ScriptedProvider { script: Mutex::new(vec![Reply::Response(first)].into()), after_script: Reply::Text("final".into()), calls };
+        let mut registry = ToolRegistry::new();
+        registry.register(Arc::new(RestrictSessionTool));
+        let ctx = test_tool_context().await;
+        crate::test_support::seed_user_and_workspace(&ctx.db).await;
+        kyomi_core::db_execute!(&ctx.db, "INSERT INTO chat_sessions (session_id,user_id,workspace_id,session_type) VALUES ('s-late','user-a','ws-1','chat')").unwrap();
+        let mut ctx = ctx;
+        ctx.session_id = Some("s-late".into());
+        let mut agent = CustomAgent::new(Box::new(Spy(Arc::clone(&seen), inner)), server_tool_agent_config(), Arc::new(registry), ctx, HashMap::new());
         let answer = agent.chat("hi", CancellationToken::new(), None, None, None).await.unwrap();
-        // The restricted session never sent the tool, so the provider response here is the
-        // scripted one: its citations are still the only sources and are shown.
-        assert!(answer.contains("**Sources**"), "{answer}");
+        assert_eq!(*seen.lock().unwrap(), vec![1, 0], "first request carries the tool, the one after the restriction does not");
+        assert!(answer.starts_with("final") && answer.contains("**Sources**"), "{answer}");
     }
 }

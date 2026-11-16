@@ -10,6 +10,7 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+unicode-general-category = "1.1"
 serde = { workspace = true }
 serde_json = { workspace = true }
 

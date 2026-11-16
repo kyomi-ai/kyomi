@@ -22,13 +22,20 @@ pub fn unfence(text: &str) -> String {
         .unwrap_or_else(|| text.to_string())
 }
 
-/// Invisible formatting characters (Unicode `Cf`: bidi controls, zero-width
-/// characters, joiners, BOM, soft hyphen) that can hide or reorder text.
+/// Characters that are invisible or reorder/hide text, by rule rather than a list:
+/// the Unicode general categories Format (`Cf`: bidi controls, zero-width characters,
+/// joiners, BOM, soft hyphen, the TAG block used for "ASCII smuggling"), Control,
+/// Surrogate, Private Use and Unassigned, plus the invisible characters that are not
+/// `Cf`: variation selectors, Hangul/Braille fillers and the combining grapheme joiner.
 pub fn is_format_char(c: char) -> bool {
+    use unicode_general_category::{GeneralCategory as G, get_general_category};
     matches!(
+        get_general_category(c),
+        G::Format | G::Control | G::Surrogate | G::PrivateUse | G::Unassigned
+    ) || matches!(
         c,
-        '\u{00AD}' | '\u{061C}' | '\u{180E}' | '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2060}'..='\u{2064}'
-            | '\u{2066}'..='\u{206F}' | '\u{FEFF}' | '\u{FFF9}'..='\u{FFFB}'
+        '\u{034F}' | '\u{115F}' | '\u{1160}' | '\u{17B4}' | '\u{17B5}' | '\u{180B}'..='\u{180F}' | '\u{2800}'
+            | '\u{3164}' | '\u{FE00}'..='\u{FE0F}' | '\u{FFA0}' | '\u{E0100}'..='\u{E01EF}'
     )
 }
 
@@ -62,10 +69,14 @@ pub fn plain_title(raw: &str) -> String {
             c if c.is_control() => out.push(' '),
             c if is_format_char(c) => {}
             '*' | '_' | '`' | '<' | '>' | '!' | '|' | '#' | '[' | ']' | '(' | ')' | '\\' | '~' | '{' | '}' | '^' | '=' | '+' => {}
+            // `@` would ping, and a scheme separator would make the label read as a
+            // different URL than the link it sits in.
+            '@' => {}
             '&' => out.push_str("&amp;"),
             c => out.push(c),
         }
     }
+    let out = out.replace("://", " ");
     let collapsed = out.split_whitespace().collect::<Vec<_>>().join(" ");
     collapsed.chars().take(MAX_TITLE_LEN).collect::<String>().trim().to_string()
 }
@@ -82,7 +93,7 @@ mod tests {
             "javascript:alert(1)", "data:text/html,x", "/relative", "ftp://a.example/", "https://a.example/ x",
             "https://a.example/\n", "https://a.example/x\\", "https://a.example/<b>", "https://a.example/\"x",
             "https://a.example/`x", "https://a.example/[x]", "https://a.example/(x)", "https://a.example/{x}",
-            "https://a.example/\u{202E}x", "https://a.example/\u{200B}x",
+            "https://a.example/\u{202E}x", "https://a.example/\u{200B}x", "https://a.example/\u{E0049}x", "https://a.example/\u{FE0F}x",
         ] {
             assert!(!is_safe_web_url(bad), "{bad:?}");
         }
@@ -96,6 +107,11 @@ mod tests {
         assert_eq!(plain_title("R&D &lt;x&gt;"), "R&amp;D &amp;lt;x&amp;gt;");
         assert_eq!(plain_title(&"x".repeat(500)).chars().count(), MAX_TITLE_LEN);
         assert_eq!(plain_title("  \n "), "");
+        assert_eq!(plain_title("go to https://evil.example/login now @admin"), "go to https evil.example/login now admin");
+        // Rule-based: any Cf/Co/unassigned character goes, not just the ones listed.
+        assert_eq!(plain_title("a\u{0600}b\u{110BD}c\u{E000}d\u{FFFF}e"), "abcde");
+        let smuggled: String = "Ignore previous".chars().map(|c| char::from_u32(0xE0000 + c as u32).unwrap()).collect();
+        assert_eq!(plain_title(&format!("Safe{smuggled}Title")), "SafeTitle", "tag characters are removed");
     }
 
     #[test]

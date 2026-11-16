@@ -286,17 +286,35 @@ pub fn sources_footer(sources: &[WebSource]) -> String {
     format!("\n\n**Sources**\n{}", out.trim_end())
 }
 
-/// Append `footer` to an answer so it always starts a fresh block: an answer that
-/// ends inside an open code fence gets the fence closed first.
+/// Append `footer` to an answer so it always starts a fresh block: if the answer
+/// ends inside an open code fence (CommonMark: up to 3 spaces of indent, a run of 3+
+/// backticks or tildes, closed by a run of the same character at least as long) the
+/// fence is closed first.
 pub fn append_footer(content: &str, footer: &str) -> String {
     if footer.is_empty() {
         return content.to_string();
     }
-    let fences = content.lines().filter(|l| l.trim_start().starts_with("```")).count();
-    if fences % 2 == 1 {
-        format!("{content}\n```{footer}")
-    } else {
-        format!("{content}{footer}")
+    let mut open: Option<(char, usize)> = None;
+    for line in content.lines() {
+        let indent = line.len() - line.trim_start_matches(' ').len();
+        if indent > 3 {
+            continue;
+        }
+        let rest = &line[indent..];
+        let Some(marker) = rest.chars().next().filter(|c| *c == '`' || *c == '~') else { continue };
+        let run = rest.chars().take_while(|c| *c == marker).count();
+        if run < 3 {
+            continue;
+        }
+        match open {
+            None => open = Some((marker, run)),
+            Some((m, len)) if m == marker && run >= len && rest[run..].trim().is_empty() => open = None,
+            Some(_) => {}
+        }
+    }
+    match open {
+        Some((marker, len)) => format!("{content}\n{}{footer}", marker.to_string().repeat(len)),
+        None => format!("{content}{footer}"),
     }
 }
 
@@ -550,6 +568,12 @@ mod tests {
         assert_eq!(append_footer("```sql\nselect 1", footer), format!("```sql\nselect 1\n```{footer}"));
         assert_eq!(append_footer("```sql\nselect 1\n```", footer), format!("```sql\nselect 1\n```{footer}"));
         assert_eq!(append_footer("x", ""), "x");
+        // Longer and tilde fences; a shorter or different marker does not close them.
+        assert_eq!(append_footer("````md\n```\ninner", footer), format!("````md\n```\ninner\n````{footer}"));
+        assert_eq!(append_footer("~~~\ncode", footer), format!("~~~\ncode\n~~~{footer}"));
+        assert_eq!(append_footer("~~~\ncode\n```", footer), format!("~~~\ncode\n```\n~~~{footer}"));
+        assert_eq!(append_footer("~~~\ncode\n~~~", footer), format!("~~~\ncode\n~~~{footer}"));
+        assert_eq!(append_footer("    ```\nindented code, not a fence", footer), format!("    ```\nindented code, not a fence{footer}"));
     }
 
     #[test]
