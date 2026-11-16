@@ -128,6 +128,12 @@ pub trait LLMProvider: Send + Sync {
 
     /// Return the model's context window size in tokens (0 = unknown).
     fn context_window(&self) -> u32 { 0 }
+
+    /// The provider's batch API, when it has one (KYO-973). `None` means
+    /// batch mode is unsupported for this provider and endpoint.
+    fn batch(&self) -> Option<&dyn crate::batch::BatchLLMProvider> {
+        None
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -281,6 +287,12 @@ impl LLMProvider for AnthropicClient {
         // All Claude models share a 200,000-token context window.
         200_000
     }
+
+    fn batch(&self) -> Option<&dyn crate::batch::BatchLLMProvider> {
+        crate::batch::batch_support(ProviderKind::Anthropic, self.custom_base_url())
+            .is_ok()
+            .then_some(self as &dyn crate::batch::BatchLLMProvider)
+    }
 }
 
 #[async_trait]
@@ -301,6 +313,11 @@ impl LLMProvider for OpenAIProvider {
 
     fn context_window(&self) -> u32 {
         self.context_window()
+    }
+
+    fn batch(&self) -> Option<&dyn crate::batch::BatchLLMProvider> {
+        crate::batch::is_openrouter(self.base_url())
+            .then_some(self as &dyn crate::batch::BatchLLMProvider)
     }
 }
 
