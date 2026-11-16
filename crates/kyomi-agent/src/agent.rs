@@ -142,15 +142,21 @@ pub(crate) const WRAP_UP_FAILED_MESSAGE: &str =
 /// entry as the most urgent one.
 const BUDGET_NOTICE_TENTHS: [u32; 2] = [7, 9];
 
-/// Stop a turn after this many consecutive failed tool calls whose outcome is
-/// NOT a definite pre-effect rejection (unknown or failed outcomes). Tool
-/// failures are returned to the model so it can repair; this bound prevents an
-/// unbounded error loop.
+/// Stop a turn after this many failed tool calls, counted since the last
+/// success, whose domain outcome is not `Rejected` (an `Unknown` outcome: the
+/// call may have had an effect, so it is not safely repairable). Tool failures
+/// are returned to the model so it can repair; this bound prevents an unbounded
+/// error loop. Counted separately from
+/// [`MAX_CONSECUTIVE_REJECTED_TOOL_FAILURES`]: neither counter resets the other,
+/// only a success resets both.
 const MAX_CONSECUTIVE_TOOL_FAILURES: usize = 5;
 
-/// Stop a turn after this many consecutive failed tool calls whose domain
-/// outcome is `Rejected`: the runtime has established the call had no effect
-/// and the model may repair and retry (for example a SQL analysis error).
+/// Stop a turn after this many failed tool calls, counted since the last
+/// success, whose domain outcome is `Rejected`: the runtime has established the
+/// call had no effect and the model may repair and retry (for example a SQL
+/// analysis error). Counted independently of [`MAX_CONSECUTIVE_TOOL_FAILURES`];
+/// a failure of the other class does not reset this count, so a turn can run up
+/// to 4 strict plus 9 rejected failures before either cap trips.
 /// Fixing a hard query legitimately takes several such repairs, each with a
 /// different call, so this budget is larger than
 /// [`MAX_CONSECUTIVE_TOOL_FAILURES`]. A genuinely stuck model repeating the
@@ -854,7 +860,7 @@ impl CustomAgent {
                     self.execute_tool(tool_call).await
                 };
                 let succeeded = outcome.succeeded();
-                let rejected = !succeeded && outcome.domain == agent_runtime::DomainOutcome::Rejected;
+                let rejected = outcome.domain == agent_runtime::DomainOutcome::Rejected;
                 let result = outcome.text;
                 self.state.messages.push(Message::tool_result(
                     &tool_call.id,

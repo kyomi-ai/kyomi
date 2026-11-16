@@ -3832,6 +3832,9 @@ mod tests {
 
     /// Fails every call with a definite pre-effect rejection (`BadRequest`),
     /// like a SQL analysis error the model can repair by changing its query.
+    /// A separate fixture (not `FailureKind::BadRequest`) because the budget
+    /// tests register it next to `FailingTool` in one registry, which needs a
+    /// distinct tool name.
     struct RejectingTool {
         calls: Arc<std::sync::atomic::AtomicUsize>,
     }
@@ -4012,15 +4015,14 @@ mod tests {
         let mut requested: Vec<(&'static str, serde_json::Value)> = Vec::new();
         for n in 0..4 { requested.push(("failing_tool", serde_json::json!({"n": n}))); }
         for n in 0..9 { requested.push(("rejecting_tool", serde_json::json!({"n": n}))); }
-        let (result, outcomes, _, _) = run_tool_script(
+        // The replay harness caps visible events at 100, so count executions on
+        // the tools themselves rather than through the returned outcomes.
+        let (result, _, _, _) = run_tool_script(
             requested,
             |registry| { registry.register(rejecting); registry.register(failing); },
             false,
         ).await;
         let answer = result.unwrap();
-        // The replay harness caps visible events at 100, so count executions on
-        // the tools themselves rather than through `outcomes`.
-        let _ = outcomes;
         assert_eq!(failing_calls.load(std::sync::atomic::Ordering::SeqCst), 4);
         assert_eq!(rejecting_calls.load(std::sync::atomic::Ordering::SeqCst), 9);
         assert_eq!(answer, "Handled the tool error");
@@ -4041,9 +4043,10 @@ mod tests {
         assert!(answer.contains("I did not retry automatically"), "{answer}");
     }
 
-    /// A success clears both consecutive counters.
+    /// A success clears the repairable-rejection counter: nine rejections, a
+    /// success, then nine more must not reach the budget of ten.
     #[tokio::test]
-    async fn a_success_resets_both_consecutive_failure_budgets() {
+    async fn a_success_resets_the_repairable_failure_budget() {
         let rejecting_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let succeeding_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let rejecting = Arc::new(RejectingTool { calls: rejecting_calls.clone() });
@@ -4052,16 +4055,61 @@ mod tests {
         for n in 0..9 { requested.push(("rejecting_tool", serde_json::json!({"n": n}))); }
         requested.push(("succeeding_tool", serde_json::json!({})));
         for n in 100..109 { requested.push(("rejecting_tool", serde_json::json!({"n": n}))); }
-        let (result, outcomes, _, _) = run_tool_script(
+        let (result, _, _, _) = run_tool_script(
             requested,
             |registry| { registry.register(rejecting); registry.register(succeeding); },
             false,
         ).await;
         let answer = result.unwrap();
-        let _ = outcomes; // replay harness caps visible events at 100; count executions on the tools
         assert_eq!(rejecting_calls.load(std::sync::atomic::Ordering::SeqCst), 18);
         assert_eq!(succeeding_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
         assert_eq!(answer, "Handled the tool error");
+    }
+
+    /// A success also clears the strict counter: four unknown-outcome failures,
+    /// a success, then four more must not reach the strict budget of five.
+    #[tokio::test]
+    async fn a_success_resets_the_strict_failure_budget() {
+        let failing_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let succeeding_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let failing = Arc::new(FailingTool { kind: FailureKind::ServerError, calls: failing_calls.clone() });
+        let succeeding = Arc::new(SucceedingTool { calls: succeeding_calls.clone() });
+        let mut requested: Vec<(&'static str, serde_json::Value)> = Vec::new();
+        for n in 0..4 { requested.push(("failing_tool", serde_json::json!({"n": n}))); }
+        requested.push(("succeeding_tool", serde_json::json!({})));
+        for n in 100..104 { requested.push(("failing_tool", serde_json::json!({"n": n}))); }
+        let (result, _, _, _) = run_tool_script(
+            requested,
+            |registry| { registry.register(failing); registry.register(succeeding); },
+            false,
+        ).await;
+        let answer = result.unwrap();
+        assert_eq!(failing_calls.load(std::sync::atomic::Ordering::SeqCst), 8);
+        assert_eq!(succeeding_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(answer, "Handled the tool error");
+    }
+
+    /// The stop message reports the combined count when both counters are
+    /// non-zero: two unknown-outcome failures then ten rejections stop on the
+    /// tenth rejection, with twelve consecutive failures since the last success.
+    #[tokio::test]
+    async fn stop_message_reports_the_combined_failure_count() {
+        let rejecting_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let failing_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let rejecting = Arc::new(RejectingTool { calls: rejecting_calls.clone() });
+        let failing = Arc::new(FailingTool { kind: FailureKind::ServerError, calls: failing_calls.clone() });
+        let mut requested: Vec<(&'static str, serde_json::Value)> = Vec::new();
+        for n in 0..2 { requested.push(("failing_tool", serde_json::json!({"n": n}))); }
+        for n in 0..11 { requested.push(("rejecting_tool", serde_json::json!({"n": n}))); }
+        let (result, _, _, _) = run_tool_script(
+            requested,
+            |registry| { registry.register(rejecting); registry.register(failing); },
+            false,
+        ).await;
+        let answer = result.unwrap();
+        assert_eq!(failing_calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert_eq!(rejecting_calls.load(std::sync::atomic::Ordering::SeqCst), 10, "stop on the tenth rejection");
+        assert!(answer.contains("12 consecutive tool calls failed"), "{answer}");
     }
 
     #[tokio::test]
