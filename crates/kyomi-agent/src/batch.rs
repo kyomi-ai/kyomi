@@ -369,6 +369,9 @@ impl BatchLLMProvider for crate::openai::OpenAIProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A poll scenario's expectation.
+    type Check = fn(&BatchPoll) -> bool;
     use crate::anthropic::AnthropicClient;
     use crate::openai::OpenAIProvider;
     use crate::provider::LLMProvider;
@@ -458,7 +461,7 @@ mod tests {
                 .to_string()
                 .into_boxed_str(),
         );
-        let cases: Vec<(&'static str, &'static str, fn(&BatchPoll) -> bool)> = vec![
+        let cases: Vec<(&'static str, &'static str, Check)> = vec![
             ("in_progress", "", |p| *p == BatchPoll::Pending),
             ("canceling", "", |p| *p == BatchPoll::Pending),
             ("ended", ok_line, |p| matches!(p, BatchPoll::Succeeded(_))),
@@ -531,7 +534,7 @@ mod tests {
             {"custom_id": "other", "response": null, "error": {"message": "x"}},
             {"custom_id": "r", "response": {"status_code": 200, "body": {"choices": [{"message": {"content": "done"}, "finish_reason": "stop"}], "usage": {}}}, "error": null}
         ]});
-        let cases: Vec<(Value, fn(&BatchPoll) -> bool)> = vec![
+        let cases: Vec<(Value, Check)> = vec![
             (json!({"status": "validating"}), |p| *p == BatchPoll::Pending),
             (json!({"status": "in_progress"}), |p| *p == BatchPoll::Pending),
             (json!({"status": "finalizing"}), |p| *p == BatchPoll::Pending),

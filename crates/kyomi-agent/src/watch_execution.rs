@@ -1424,15 +1424,15 @@ async fn execute_watch_inner(
     )
     .await?;
     // The configured model may be the provider default; record the real one.
-    if let Some(model) = agent_result.model.as_deref() {
-        if let Err(e) = kyomi_core::db_execute!(
+    if let Some(model) = agent_result.model.as_deref()
+        && let Err(e) = kyomi_core::db_execute!(
             db,
             "UPDATE watch_executions SET llm_model = $1 WHERE id = $2",
             model,
             execution_id
-        ) {
-            warn!(execution_id, error = %e, "Failed to record the watch run's model (non-fatal)");
-        }
+        )
+    {
+        warn!(execution_id, error = %e, "Failed to record the watch run's model (non-fatal)");
     }
 
     let mut raw_response = agent_result.response_text;
