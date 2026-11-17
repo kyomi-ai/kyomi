@@ -33,7 +33,6 @@ pub const WEB_TOOL_NAMES: [&str; 2] = ["web_search", "web_fetch"];
 
 const MAX_RESULTS_LIMIT: u64 = 10;
 const DEFAULT_RESULTS: u64 = 5;
-const MAX_QUERY_CHARS: usize = 400;
 const FETCH_MAX_CHARS: usize = 20_000;
 
 /// Build the "unavailable" result for a refusal or backend failure.
@@ -187,9 +186,6 @@ impl AgentTool for WebSearchTool {
             .map(str::trim)
             .filter(|q| !q.is_empty())
             .ok_or_else(|| kyomi_core::Error::BadRequest("query is required".into()))?;
-        if query.chars().count() > MAX_QUERY_CHARS {
-            return Err(kyomi_core::Error::BadRequest(format!("query is longer than {MAX_QUERY_CHARS} characters")));
-        }
         let request = SearchRequest {
             query: query.to_string(),
             max_results: args
@@ -197,7 +193,7 @@ impl AgentTool for WebSearchTool {
                 .and_then(Value::as_u64)
                 .unwrap_or(DEFAULT_RESULTS)
                 .clamp(1, MAX_RESULTS_LIMIT) as u32,
-            recency_days: args.get("recency_days").and_then(Value::as_u64).map(|d| d.min(3650) as u32),
+            recency_days: args.get("recency_days").and_then(Value::as_u64).and_then(|d| u32::try_from(d).ok()),
             allowed_domains: string_list(&args, "allowed_domains")?,
             blocked_domains: string_list(&args, "blocked_domains")?,
         };

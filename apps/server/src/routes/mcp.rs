@@ -1216,12 +1216,42 @@ mod tests {
         assert!(names.contains(&"query_datasource"), "other tools are unaffected");
     }
 
-    #[test]
-    fn mcp_tools_call_cannot_reach_web_search_and_fetch() {
+    /// `tools/call` through the real handler: a web tool is refused as unknown, with
+    /// no side effect, while an ordinary registered tool is still found.
+    #[tokio::test]
+    async fn mcp_tools_call_cannot_reach_web_search_and_fetch() {
         let registry = registry_with_web_tools();
-        assert!(lookup_mcp_tool(&registry, "web_search").is_none());
-        assert!(lookup_mcp_tool(&registry, "web_fetch").is_none());
-        assert!(lookup_mcp_tool(&registry, "query_datasource").is_some());
+        let db = kyomi_core::DbPool::connect("sqlite::memory:").await.unwrap();
+        let ctx = || ToolContext {
+            ws_manager: kyomi_auth::websocket::WebSocketManager::new(None, db.clone()),
+            db: db.clone(),
+            kv: kyomi_core::kv_store_memory::InMemoryKVStore::new_pool(),
+            user_id: "user-a".into(),
+            workspace_id: "ws-1".into(),
+            encryption_key: std::sync::Arc::new([0u8; 32]),
+            embedding: kyomi_embed::LazyEmbedding::new(),
+            config: std::sync::Arc::new(kyomi_core::Config::test_config()),
+            session_id: None,
+            supports_mcp_apps: false,
+            workspace_roles: Vec::new(),
+            connect_registry: None,
+            platforms: std::sync::Arc::new(kyomi_core::platform::PlatformRegistry::new()),
+            user_display_name: "User A".into(),
+            document_id: None,
+        };
+        for (name, arguments) in [("web_search", json!({"query": "rust"})), ("web_fetch", json!({"url": "https://example.com"}))] {
+            let params = json!({"name": name, "arguments": arguments});
+            let response = handle_tools_call(Some(json!(1)), &params, ctx(), &registry).await;
+            let error = response.error.as_ref().unwrap_or_else(|| panic!("{name} must be refused: {response:?}"));
+            assert_eq!(error.code, -32602, "{name}");
+            assert!(error.message.contains(&format!("Unknown tool: {name}")), "{name}: {}", error.message);
+            assert!(response.result.is_none(), "{name}: nothing was executed");
+        }
+        // The same handler still serves an ordinary tool (it is found; it then runs
+        // against an empty database and reports its own error, not "Unknown tool").
+        let params = json!({"name": "query_datasource", "arguments": {}});
+        let response = handle_tools_call(Some(json!(2)), &params, ctx(), &registry).await;
+        assert!(response.error.is_none(), "{response:?}");
     }
 
     // -----------------------------------------------------------------------

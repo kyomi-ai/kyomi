@@ -129,7 +129,8 @@ impl WebBackendKind {
 /// Raw (unparsed) configuration of one tool's backend.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct WebBackendSettings {
-    /// Backend name; `None` = use the tool's default.
+    /// Backend name; `None` = not configured (there is no default backend: the tool
+    /// is off).
     pub provider: Option<String>,
     /// API key for Kyomi-executed backends.
     pub api_key: Option<String>,
@@ -334,8 +335,8 @@ impl WebToolsSettings {
     /// registered and not offered to the model. An *explicit* choice that is
     /// incompatible with the LLM provider is an error, not a disable.
     ///
-    /// A Kyomi-executed backend without an API key is an error. An API key / base URL
-    /// without a provider (partial config) is not: it resolves to
+    /// Partial configuration is not an error: a Kyomi-executed backend without its
+    /// API key, or an API key / base URL without a provider, resolves to
     /// [`ResolvedBackend::Incomplete`] (a warning, tool absent), mirroring how the
     /// LLM provider treats a partial `LLM_PROVIDER` / `LLM_API_KEY`.
     pub fn resolve(&self, tool: WebToolKind, llm: LlmFacts<'_>) -> crate::Result<ResolvedBackend> {
@@ -359,8 +360,9 @@ impl WebToolsSettings {
             return Ok(ResolvedBackend::Disabled(format!("{p}_PROVIDER=none")));
         }
         if kind.needs_api_key() && s.api_key.is_none() {
-            return Err(crate::Error::Internal(format!(
-                "{p}_PROVIDER={kind} requires {p}_API_KEY (set {p}_PROVIDER=none to disable the tool)"
+            return Ok(ResolvedBackend::Incomplete(format!(
+                "{p}_PROVIDER={kind} needs {p}_API_KEY, which is not set: the tool is unavailable. \
+                 Set {p}_API_KEY or {p}_PROVIDER=none."
             )));
         }
         Self::check_compat(p, kind, llm)?;
@@ -494,7 +496,15 @@ mod tests {
 
     #[test]
     fn kyomi_executed_backend_needs_key_and_switching_is_config_only() {
-        assert!(settings(&[("WEB_SEARCH_PROVIDER", "tavily")]).validate(OPENAI).is_err());
+        // A provider without its key is a warning with the tool absent, like the other
+        // partial configurations; it does not stop the server.
+        let (search, fetch) = settings(&[("WEB_SEARCH_PROVIDER", "tavily")]).validate(OPENAI).unwrap();
+        match &search {
+            ResolvedBackend::Incomplete(m) => assert!(m.contains("WEB_SEARCH_API_KEY"), "{m}"),
+            other => panic!("expected incomplete, got {other:?}"),
+        }
+        assert!(search.enabled().is_none());
+        assert!(matches!(fetch, ResolvedBackend::Disabled(_)));
         let s = settings(&[("WEB_SEARCH_PROVIDER", "tavily"), ("WEB_SEARCH_API_KEY", "k")]);
         assert_eq!(s.resolve(WebToolKind::Search, OPENAI).unwrap().enabled().unwrap().kind, WebBackendKind::Tavily);
         let s = settings(&[("WEB_SEARCH_PROVIDER", "linkup"), ("WEB_SEARCH_API_KEY", "k")]);

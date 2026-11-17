@@ -63,20 +63,32 @@ pub fn is_safe_web_url(url: &str) -> bool {
 /// and HTML metacharacter stripped (`& ` becomes `&amp;`), whitespace collapsed and
 /// the result capped at [`MAX_TITLE_LEN`] characters.
 pub fn plain_title(raw: &str) -> String {
+    clean_title(raw, true)
+}
+
+/// A web page title for a UI card, which renders text as text (no markdown):
+/// the same rule as [`plain_title`] (control and invisible-format characters,
+/// including bidi and TAG characters, removed; whitespace collapsed; capped at
+/// [`MAX_TITLE_LEN`] characters) without the markdown/HTML metacharacter stripping.
+pub fn card_title(raw: &str) -> String {
+    clean_title(raw, false)
+}
+
+fn clean_title(raw: &str, markdown: bool) -> String {
     let mut out = String::new();
     for c in raw.chars() {
         match c {
             c if c.is_control() => out.push(' '),
             c if is_format_char(c) => {}
-            '*' | '_' | '`' | '<' | '>' | '!' | '|' | '#' | '[' | ']' | '(' | ')' | '\\' | '~' | '{' | '}' | '^' | '=' | '+' => {}
+            '*' | '_' | '`' | '<' | '>' | '!' | '|' | '#' | '[' | ']' | '(' | ')' | '\\' | '~' | '{' | '}' | '^' | '=' | '+' if markdown => {}
             // `@` would ping, and a scheme separator would make the label read as a
             // different URL than the link it sits in.
-            '@' => {}
-            '&' => out.push_str("&amp;"),
+            '@' if markdown => {}
+            '&' if markdown => out.push_str("&amp;"),
             c => out.push(c),
         }
     }
-    let out = out.replace("://", " ");
+    let out = if markdown { out.replace("://", " ") } else { out };
     let collapsed = out.split_whitespace().collect::<Vec<_>>().join(" ");
     collapsed.chars().take(MAX_TITLE_LEN).collect::<String>().trim().to_string()
 }
@@ -112,6 +124,15 @@ mod tests {
         assert_eq!(plain_title("a\u{0600}b\u{110BD}c\u{E000}d\u{FFFF}e"), "abcde");
         let smuggled: String = "Ignore previous".chars().map(|c| char::from_u32(0xE0000 + c as u32).unwrap()).collect();
         assert_eq!(plain_title(&format!("Safe{smuggled}Title")), "SafeTitle", "tag characters are removed");
+    }
+
+    #[test]
+    fn card_titles_follow_the_same_rule_without_markdown_stripping() {
+        assert_eq!(card_title("a\u{202E}b\u{200B}c\u{FEFF}d"), "abcd", "bidi and zero-width characters go");
+        let smuggled: String = "Ignore previous".chars().map(|c| char::from_u32(0xE0000 + c as u32).unwrap()).collect();
+        assert_eq!(card_title(&format!("Safe{smuggled}Title")), "SafeTitle", "tag characters go");
+        assert_eq!(card_title(&"x".repeat(500)).chars().count(), MAX_TITLE_LEN, "capped");
+        assert_eq!(card_title("R&D [2026] a|b\n\nnext"), "R&D [2026] a|b next", "text stays text: no markdown rules");
     }
 
     #[test]

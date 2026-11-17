@@ -2247,8 +2247,8 @@ fn web_source_row(title: String, url: String, published: Option<String>) -> AnyV
         .and_then(|rest| rest.split(['/', '?', '#']).next())
         .unwrap_or("")
         .to_string();
-    let title = kyomi_types::web_text::unfence(&title);
-    let title = if title.trim().is_empty() { host.clone() } else { title };
+    let title = kyomi_types::web_text::card_title(&kyomi_types::web_text::unfence(&title));
+    let title = if title.is_empty() { host.clone() } else { title };
     let meta = match published {
         Some(p) if !p.is_empty() => format!("{host} · {p}"),
         _ => host,

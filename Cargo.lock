@@ -6427,6 +6427,7 @@ dependencies = [
  "kyomi-knowledge",
  "kyomi-mcp-client",
  "kyomi-test-db",
+ "kyomi-test-tracing",
  "kyomi-types",
  "pgvector",
  "rand 0.9.5",

@@ -131,7 +131,6 @@ impl BuiltinFetcher {
             let (host, addresses) = self.validated_addresses(&url).await?;
             let client = kyomi_mcp_client::pinned_client(&host, &addresses, CONNECT_TIMEOUT, DEADLINE)
                 .map_err(|_| WebError::Upstream("could not build the HTTP client".into()))?
-                .user_agent("Mozilla/5.0 (compatible; KyomiBot/1.0; +https://kyomi.ai)")
                 .build()
                 .map_err(|e| WebError::Upstream(e.to_string()))?;
             let response = client
@@ -377,6 +376,27 @@ mod tests {
         let mut f = fetcher(&[]);
         f.allow_loopback = true;
         f
+    }
+
+    /// An origin that accepts the connection and never answers. The clock is paused,
+    /// so the 20 second deadline elapses in virtual time (the runtime advances it
+    /// when everything is idle) instead of making the test wait.
+    #[tokio::test(start_paused = true)]
+    async fn an_origin_that_never_answers_ends_in_a_timeout_at_the_deadline() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let held = tokio::spawn(async move {
+            let mut sockets = Vec::new();
+            while let Ok((sock, _)) = listener.accept().await {
+                sockets.push(sock);
+            }
+        });
+        let started = tokio::time::Instant::now();
+        let err = loopback_fetcher().fetch(&req(&format!("http://{addr}/"))).await.unwrap_err();
+        assert!(matches!(err, WebError::Timeout), "{err:?}");
+        let waited = started.elapsed();
+        assert!(waited >= DEADLINE && waited <= DEADLINE + Duration::from_secs(5), "ended at the deadline, not before or long after: {waited:?}");
+        held.abort();
     }
 
     #[tokio::test]

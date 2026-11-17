@@ -234,9 +234,9 @@ impl WebCallRecord {
 }
 
 /// Startup validation against the instance LLM config (`LLM_PROVIDER` /
-/// `LLM_BASE_URL`): an incompatible backend, a keyed backend without a key, or an
-/// invalid setting fails the server start with a clear message instead of a 400 at
-/// runtime. A key/base URL without a provider is only a warning (tool unavailable).
+/// `LLM_BASE_URL`): an incompatible backend or an invalid setting fails the server
+/// start with a clear message instead of a 400 at runtime. A key/base URL without a
+/// provider, or a keyed backend without its key, is only a warning (tool unavailable).
 /// Logs the outcome per tool.
 pub fn validate_startup(config: &kyomi_core::Config) -> kyomi_core::Result<()> {
     let (provider, base_url) = match crate::provider::resolve_provider_config(config) {

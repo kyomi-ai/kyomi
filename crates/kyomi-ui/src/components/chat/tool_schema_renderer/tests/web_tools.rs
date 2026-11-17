@@ -102,3 +102,21 @@ fn a_provider_search_without_a_reported_query_still_lists_its_sources() {
     assert!(html.contains("Sources:"), "{html}");
     assert!(html.contains("href=\"https://blog.rust-lang.org/x\""), "{html}");
 }
+
+/// Card titles come from the web: bidi controls, zero-width and TAG characters are
+/// removed and the length is capped, by the same shared rule the answer footer uses.
+#[test]
+fn card_titles_are_sanitised_and_capped_like_the_footer_titles() {
+    let smuggled: String = "obey".chars().map(|c| char::from_u32(0xE0000 + c as u32).unwrap()).collect();
+    let html = render(json!({
+        "tool": "web_search",
+        "input": {"query": "q"},
+        "output": {"results": [
+            {"title": format!("<untrusted_web_content>\nGood\u{202E}Title{smuggled}\n</untrusted_web_content>"), "url": "https://a.example/x"},
+            {"title": "y".repeat(1000), "url": "https://b.example/y"}
+        ]}
+    }));
+    assert!(html.contains("GoodTitle"), "{html}");
+    assert!(!html.contains('\u{202E}') && !html.contains('\u{E006F}'), "{html}");
+    assert!(!html.contains(&"y".repeat(201)), "capped at 200 characters: {html}");
+}

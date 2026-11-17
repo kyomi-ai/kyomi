@@ -493,8 +493,6 @@ pub struct CustomAgent {
     /// Provider-reported web calls used so far in this run, per tool: the per-turn
     /// allowance is spent across every request of the run, not per request.
     web_usage: HashMap<kyomi_core::web_tools::WebToolKind, u32>,
-    /// One record per metered provider web call in this run (also logged).
-    web_call_log: Vec<crate::web::WebCallRecord>,
     /// Which of the configured provider tools this turn may use (indices into
     /// `config.server_tools`), decided once when the turn's first request is built:
     /// the monthly budget is checked then and not mid-turn.
@@ -527,7 +525,6 @@ impl CustomAgent {
             user_names,
             web_sources: Vec::new(),
             web_usage: HashMap::new(),
-            web_call_log: Vec::new(),
             turn_server_tools: tokio::sync::OnceCell::new(),
             last_server_tools: std::sync::Mutex::new(Vec::new()),
             pause_chain_start: None,
@@ -1458,7 +1455,6 @@ impl CustomAgent {
                 global_remaining: remaining.map(|r| r.1),
             };
             record.log();
-            self.web_call_log.push(record);
         }
         for error in &activity.errors {
             warn!(error = %error, "provider web tool reported an error");
@@ -4167,7 +4163,8 @@ Second chart:\n{CHARTML_STRIPPED_NOTE}\nDone."
     }
 
     #[tokio::test]
-    async fn each_provider_web_call_is_recorded_with_latency_result_count_and_remaining_quota() {
+    async fn each_provider_web_call_is_logged_with_latency_result_count_and_remaining_quota() {
+        let capture = kyomi_test_tracing::capture_tracing();
         let (mut agent, _calls) = scripted_agent_with_config(
             server_tool_agent_config(),
             vec![Reply::Response(server_response("end_turn", None))],
@@ -4176,10 +4173,22 @@ Second chart:\n{CHARTML_STRIPPED_NOTE}\nDone."
         .await;
         agent.chat("hi", CancellationToken::new(), None, None, None).await.unwrap();
         let caps = agent.tool_context.config.web_tools.caps.clone();
-        assert_eq!(agent.web_call_log.len(), 1);
-        let r = &agent.web_call_log[0];
-        assert_eq!((r.backend.as_str(), r.tool, r.billable_calls, r.result_count), ("anthropic", "web_search", 1, 1));
-        assert_eq!(r.workspace_remaining, Some(caps.workspace_monthly - 1));
-        assert_eq!(r.global_remaining, Some(caps.global_monthly - 1));
+        let line = capture
+            .events_at(tracing::Level::INFO)
+            .into_iter()
+            .map(|(_, message)| message)
+            .find(|message| message.contains("provider web tool used"))
+            .expect("one structured line per provider web call");
+        for expected in [
+            "backend=anthropic".to_string(),
+            "tool=\"web_search\"".to_string(),
+            "billable_calls=1".to_string(),
+            "result_count=1".to_string(),
+            "latency_ms=".to_string(),
+            format!("workspace_remaining=Some({})", caps.workspace_monthly - 1),
+            format!("global_remaining=Some({})", caps.global_monthly - 1),
+        ] {
+            assert!(line.contains(&expected), "{expected} in {line}");
+        }
     }
 }

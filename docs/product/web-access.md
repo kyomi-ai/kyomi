@@ -28,11 +28,11 @@ Set the backend for search and for fetch separately.
 | `openrouter` | OpenRouter runs the tool | Requires an `openrouter.ai` `LLM_BASE_URL`. |
 | `none` | | Disabled. |
 
-An unsupported combination (for example `anthropic` with `LLM_PROVIDER=openai`) stops the server at startup with a message naming the variables. A key or base URL set without a provider is only a startup warning: the server starts and that tool stays unavailable. `*_OPTIONS` takes a JSON object that is passed to the backend unchanged (engine, domain lists, `max_uses`, ...).
+An unsupported combination (for example `anthropic` with `LLM_PROVIDER=openai`) stops the server at startup with a message naming the variables. A key or base URL set without a provider, or `tavily`/`linkup` set without its API key, is only a startup warning: the server starts and that tool stays unavailable. `*_OPTIONS` takes a JSON object that is passed to the backend unchanged (engine, domain lists, `max_uses`, ...).
 
 ## Limits
 
-Per conversation turn: 5 searches and 5 fetches. Per month: 200 calls per workspace and 1,000 across the instance, for each tool. At a limit the agent is told web access is unavailable and carries on without it. All are environment-configurable (see `deploy/.env.example`); a mistyped value stops the server at startup.
+Per conversation turn: 5 searches and 5 fetches. Per month: 200 calls per workspace and 1,000 across the instance, for each tool. At a limit, a tool Kyomi runs (`tavily`, `linkup`, `builtin`) returns "web access is unavailable" to the agent, which carries on without it. A tool the provider runs (`anthropic`, `openrouter`) is not offered to the model at all from the start of the turn in which a limit is reached; no result is returned and the conversation continues without it. All are environment-configurable (see `deploy/.env.example`); a mistyped value stops the server at startup.
 
 The monthly limits are soft: simultaneous conversations can overshoot slightly, and with `anthropic` / `openrouter` usage is added after the provider reports it. Without Redis the monthly counters are per server instance and reset on restart.
 
