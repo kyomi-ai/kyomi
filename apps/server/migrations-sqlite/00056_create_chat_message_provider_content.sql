@@ -3,7 +3,6 @@
 -- Mirrors Postgres migration 20261117000000_create_chat_message_provider_content.
 CREATE TABLE IF NOT EXISTS chat_message_provider_content (
     message_id TEXT NOT NULL PRIMARY KEY REFERENCES chat_messages(message_id) ON DELETE CASCADE,
-    backend TEXT NOT NULL,
     blocks TEXT NOT NULL,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );

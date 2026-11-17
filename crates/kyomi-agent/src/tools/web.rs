@@ -428,6 +428,34 @@ mod tests {
         assert!(snippet.starts_with("<untrusted_web_content>") && snippet.contains("IGNORE PREVIOUS"));
     }
 
+    /// The UI's source card reads the same payload from a Kyomi-executed search and
+    /// from a provider-executed one: every key a provider-call payload carries is a
+    /// key the real tool's payload carries, with the same value shapes.
+    #[tokio::test]
+    async fn a_provider_call_payload_has_the_shape_of_the_real_tool_payload() {
+        let tool = WebSearchTool::new(FakeSearch::ok("snippet"), caps());
+        let real = parse(&tool.execute(json!({"query": "rust"}), &ctx().await).await.unwrap());
+        let sources = vec![WebSource {
+            title: "A".into(),
+            url: "https://example.com/a".into(),
+            snippet: "snippet".into(),
+            score: None,
+            published: Some("2026-10-01".into()),
+        }];
+        let shown = parse(&display_output(kyomi_core::web_tools::WebToolKind::Search, "rust", &sources));
+        for key in shown.as_object().unwrap().keys() {
+            assert!(real.get(key).is_some(), "the real search payload has `{key}`");
+        }
+        assert_eq!(shown["tool"], real["tool"]);
+        assert_eq!(shown["available"], real["available"]);
+        // `published` is optional in both; the fake provider reports none.
+        for key in shown["results"][0].as_object().unwrap().keys().filter(|key| *key != "published") {
+            assert!(real["results"][0].get(key).is_some(), "the real result has `{key}`");
+        }
+        assert_eq!(shown["results"][0]["url"], "https://example.com/a");
+        assert_eq!(shown["results"][0]["published"], "2026-10-01");
+    }
+
     #[tokio::test]
     async fn titles_urls_and_dates_from_the_web_never_reach_the_model_unscreened() {
         let provider = Arc::new(FakeSearch {

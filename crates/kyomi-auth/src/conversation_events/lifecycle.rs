@@ -333,12 +333,11 @@ impl ConversationStore<'_> {
                     .as_ref()
                     .map(|value| encryption::restore_json_field(value, self.key))
                     .transpose()?;
-                (message.provider_backend, message.provider_content) = crate::chat_service::restore_provider_content(
+                message.provider_content = crate::chat_service::restore_provider_content(
                     &message.message_id,
-                    message.provider_backend.take(),
                     message.provider_content.as_ref(),
                     self.key,
-                );
+                )?;
                 if message.role == "assistant"
                     && message.content.trim().is_empty()
                     && message.tool_calls.is_none()
@@ -617,7 +616,7 @@ pub struct MessageWrite {
     /// The provider's verbatim blocks for this message and their format
     /// (KYO-969). Written in the same transaction as the message, so they can
     /// never be misaligned with it. `None` stores nothing.
-    pub provider_content: Option<crate::chat_service::ProviderContent>,
+    pub provider_content: Option<serde_json::Value>,
 }
 impl ConversationStore<'_> {
     pub async fn fenced_message(
@@ -679,7 +678,11 @@ impl ConversationStore<'_> {
             let existing:Option<(String,i64)>=sqlx::query_as("SELECT event_id,sequence FROM conversation_events WHERE session_id=$1 AND idempotency_key=$2").bind(conversation.as_str()).bind(command.idempotency_key.as_str()).fetch_optional(&mut *tx).await?;
             if let Some((event_id, sequence)) = existing {
                 if let Some(prior) = &prior {
+                    let stored_blocks: Option<serde_json::Value> = sqlx::query_scalar("SELECT blocks FROM chat_message_provider_content WHERE message_id=$1")
+                        .bind(&message.message_id).fetch_optional(&mut *tx).await?;
+                    let stored_blocks = stored_blocks.as_ref().map(|value| encryption::restore_json_field(value, self.key)).transpose()?;
                     if encryption::decrypt(&prior.content, self.key)? != message.content
+                        || stored_blocks != message.provider_content
                         || prior.role != message.role
                         || prior.tool_call_id != message.tool_call_id
                         || prior.tool_name != message.name
@@ -724,10 +727,10 @@ impl ConversationStore<'_> {
                 sqlx::query("INSERT INTO chat_messages(message_id,session_id,role,content,tool_call_id,tool_name,tool_calls,status,pinned,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,'complete',false,$8)")
                     .bind(&message.message_id).bind(conversation.as_str()).bind(&message.role).bind(encrypted).bind(&message.tool_call_id).bind(&message.name).bind(&tool_calls).bind(chrono::Utc::now()).execute(&mut *tx).await?;
             }
-            if let Some(content) = &message.provider_content {
-                let protected = encryption::protect_json_field(&content.blocks, self.key)?;
+            if let Some(blocks) = &message.provider_content {
+                let protected = encryption::protect_json_field(blocks, self.key)?;
                 sqlx::query(crate::chat_service::PROVIDER_CONTENT_UPSERT_SQL)
-                    .bind(&message.message_id).bind(&content.backend).bind(&protected).execute(&mut *tx).await?;
+                    .bind(&message.message_id).bind(&protected).execute(&mut *tx).await?;
             }
             write_session_sync!(
                 &scoped,

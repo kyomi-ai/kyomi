@@ -10,12 +10,11 @@
 -- ordering match against the event journal could not guarantee.
 --
 -- `blocks` is the encrypted JSON array, in the same envelope as
--- chat_messages.tool_calls. `backend` names the provider format the blocks are
--- in; replay is only attempted for a matching backend, and a message with no row
--- (or an unreadable one) falls back to the text in chat_messages.
+-- chat_messages.tool_calls. It is replayed exactly as stored; a message with no
+-- row (sessions older than this change, answers that used no server tool) has
+-- nothing to replay.
 CREATE TABLE chat_message_provider_content (
     message_id TEXT PRIMARY KEY REFERENCES chat_messages(message_id) ON DELETE CASCADE,
-    backend TEXT NOT NULL,
     blocks JSONB NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );

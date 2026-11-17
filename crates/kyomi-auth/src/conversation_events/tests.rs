@@ -1742,35 +1742,48 @@ async fn lifecycle_review_regressions(db: &DbPool) {
         tool_call_id: None,
         name: None,
         tool_calls: None,
-        provider_content: Some(crate::chat_service::ProviderContent { backend: "anthropic".into(), blocks: blocks.clone() }),
+        provider_content: Some(blocks.clone()),
     };
     store
         .fenced_message(&conversation, &receipt.run_id, &lease, 1103, &with_blocks)
         .await
         .unwrap();
+    // A retried write of the same message is a duplicate; with different blocks it
+    // is a conflict, like any other differing field.
+    assert!(
+        store.fenced_message(&conversation, &receipt.run_id, &lease, 1103, &with_blocks).await.unwrap().duplicate,
+        "an identical retry is a duplicate"
+    );
+    let different = MessageWrite { provider_content: Some(serde_json::json!([{"type": "text", "text": "other"}])), ..with_blocks.clone() };
+    assert!(
+        matches!(
+            store.fenced_message(&conversation, &receipt.run_id, &lease, 1103, &different).await,
+            Err(EventStoreError::IdempotencyConflict)
+        ),
+        "a retry with different blocks conflicts"
+    );
     let raw_blocks = kyomi_core::db_fetch_one!(
         db,
-        (serde_json::Value, String),
-        "SELECT blocks, backend FROM chat_message_provider_content WHERE message_id=$1",
+        (serde_json::Value,),
+        "SELECT blocks FROM chat_message_provider_content WHERE message_id=$1",
         &with_blocks.message_id
     )
     .unwrap();
-    assert_eq!(raw_blocks.1, "anthropic");
     assert!(!raw_blocks.0.to_string().contains(&result_marker), "blocks are encrypted at rest");
     let history = crate::chat_service::get_agent_messages(db, &KEY, &sid, None).await.unwrap();
     let loaded = history.iter().find(|item| item.message_id == with_blocks.message_id).unwrap();
-    assert_eq!(loaded.provider_backend.as_deref(), Some("anthropic"));
     assert_eq!(loaded.provider_content.as_ref(), Some(&blocks), "equal in value, encrypted_content included");
     assert!(
         history.iter().find(|item| item.message_id == message.message_id).unwrap().provider_content.is_none(),
-        "a message with no stored blocks loads as plain text"
+        "a message with no stored row has no blocks"
     );
-    assert_eq!(
-        crate::chat_service::restore_provider_content(
-            "m", Some("anthropic".into()), Some(&raw_blocks.0), &[3u8; 32]
-        ),
-        (None, None),
-        "blocks that cannot be decrypted fall back to the message text, never partially"
+    assert!(
+        crate::chat_service::restore_provider_content("m", Some(&raw_blocks.0), &[3u8; 32]).is_err(),
+        "blocks that cannot be decrypted are an error, never a silent change of what the model sees"
+    );
+    assert!(
+        crate::chat_service::restore_provider_content("m", Some(&serde_json::json!({"not": "blocks"})), &KEY).is_err(),
+        "a stored row that is not an array of blocks is an error"
     );
     assert_lifecycle_sync(db, &sid, &owner, true).await;
     let sync_before_duplicate = lifecycle_sync_count(db, &sid).await;
@@ -2057,7 +2070,6 @@ async fn lifecycle_review_regressions(db: &DbPool) {
     assert_eq!(restored.context.config, Some(config));
     // KYO-969: the run-claim query loads the stored provider blocks too.
     let claimed_with_blocks = restored.context.messages.iter().find(|item| item.message_id == with_blocks.message_id).unwrap();
-    assert_eq!(claimed_with_blocks.provider_backend.as_deref(), Some("anthropic"));
     assert_eq!(claimed_with_blocks.provider_content.as_ref(), Some(&blocks));
     assert_eq!(
         restored
@@ -2418,7 +2430,7 @@ async fn postgres_lifecycle_conformance() {
 async fn update_message_provider_blocks(db: &DbPool) {
     let (_owner, _member, _wid, sid) = seed(db).await;
     let blocks = serde_json::json!([{"type": "text", "text": "stored answer"}]);
-    let content = crate::chat_service::ProviderContent { backend: "anthropic".into(), blocks };
+    let content = blocks;
     let count = |id: String| async move {
         kyomi_core::db_fetch_scalar!(
             db,
@@ -2434,13 +2446,18 @@ async fn update_message_provider_blocks(db: &DbPool) {
     };
     let mut ids = Vec::new();
     for label in ["complete", "edit", "error", "atomic"] {
-        let id = crate::chat_service::add_message(
-            db, &KEY, &sid, "assistant", "answer", None, Some(&format!("{label}-{}", uuid::Uuid::new_v4())),
-            None, None, None, None, None, None, crate::chat_service::MessageStatus::Complete,
+        let id = crate::chat_service::insert_message(
+            db, &KEY, &sid,
+            &crate::chat_service::NewMessage {
+                role: "assistant", content: "answer", metadata: None,
+                message_id: Some(&format!("{label}-{}", uuid::Uuid::new_v4())),
+                current_time_user_tz: None, message_source: None, sent_by_user_id: None, tool_call_id: None,
+                tool_name: None, tool_calls: None, status: crate::chat_service::MessageStatus::Complete,
+            },
+            Some(&content),
         )
         .await
         .unwrap();
-        crate::chat_service::store_provider_content(db, &KEY, &id, &content).await.unwrap();
         ids.push(id);
     }
     let [complete, edit, error, atomic] = [&ids[0], &ids[1], &ids[2], &ids[3]];
@@ -2462,18 +2479,15 @@ async fn update_message_provider_blocks(db: &DbPool) {
 /// KYO-969 legacy write paths: the message (or the finalized placeholder text) and
 /// its provider blocks are one transaction.
 async fn legacy_writes_store_blocks_atomically(db: &DbPool) {
-    fn finish(content: &crate::chat_service::ProviderContent) -> crate::chat_service::PlaceholderResult<'_> {
+    fn finish(content: &serde_json::Value) -> crate::chat_service::PlaceholderResult<'_> {
         crate::chat_service::PlaceholderResult { content: "final", tool_call_id: None, tool_name: None, tool_calls: None, provider_content: Some(content) }
     }
     let (_owner, _member, _wid, sid) = seed(db).await;
-    let content = crate::chat_service::ProviderContent {
-        backend: "anthropic".into(),
-        blocks: serde_json::json!([{"type": "text", "text": "stored answer"}]),
-    };
+    let content = serde_json::json!([{"type": "text", "text": "stored answer"}]);
     let rows = |id: String, table: &'static str| async move {
         kyomi_core::db_fetch_scalar!(db, i64, &format!("SELECT COUNT(*) FROM {table} WHERE message_id=$1"), &id).unwrap()
     };
-    let add = |id: String, provider: Option<&crate::chat_service::ProviderContent>| {
+    let add = |id: String, provider: Option<&serde_json::Value>| {
         let sid = sid.clone();
         let provider = provider.cloned();
         async move {

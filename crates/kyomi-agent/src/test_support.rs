@@ -228,6 +228,8 @@ pub(crate) fn tool_call_response(usage: AgentTokenUsage) -> LLMResponse {
 pub(crate) struct RecordedCall {
     pub messages: Vec<Message>,
     pub tools: Vec<Tool>,
+    /// The provider-executed tools this request carried.
+    pub server_tools: Vec<serde_json::Value>,
 }
 
 impl RecordedCall {
@@ -255,7 +257,7 @@ impl LLMProvider for ScriptedProvider {
         &self,
         messages: &[Message],
         tools: &[Tool],
-        _options: &crate::provider::RequestOptions,
+        options: &crate::provider::RequestOptions,
         _user_names: &HashMap<String, String>,
     ) -> kyomi_core::Result<LLMResponse> {
         self.calls
@@ -264,6 +266,7 @@ impl LLMProvider for ScriptedProvider {
             .push(RecordedCall {
                 messages: messages.to_vec(),
                 tools: tools.to_vec(),
+                server_tools: options.server_tools.clone(),
             });
 
         let reply = self

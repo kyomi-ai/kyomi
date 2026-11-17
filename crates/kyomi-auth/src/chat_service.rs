@@ -1179,7 +1179,7 @@ pub async fn insert_message(
     encryption_key: &[u8; 32],
     session_id: &str,
     message: &NewMessage<'_>,
-    provider_content: Option<&ProviderContent>,
+    provider_content: Option<&serde_json::Value>,
 ) -> kyomi_core::Result<String> {
     let NewMessage {
         role, content, metadata, message_id, current_time_user_tz, message_source, sent_by_user_id,
@@ -1199,66 +1199,45 @@ pub async fn insert_message(
         None => None,
     };
 
-    // Insert message.
-    match provider_content {
-        None => {
-            kyomi_core::db_execute!(
-                db,
-                INSERT_MESSAGE_SQL,
-                &msg_id,
-                session_id,
-                role,
-                &encrypted_content,
-                sent_by_user_id,
-                now,
-                current_time_user_tz,
-                message_source,
-                encrypted_metadata,
-                tool_call_id,
-                tool_name,
-                tool_calls as Option<&serde_json::Value>,
-                status.as_str()
-            )
-            .map_err(|e| kyomi_core::Error::Internal(format!("failed to add message: {e}")))?;
-        }
-        Some(blocks) => {
-            let protected = encryption::protect_json_field(&blocks.blocks, encryption_key)?;
-            macro_rules! insert_with_blocks {
-                ($pool:expr) => {{
-                    let mut tx = $pool.begin().await?;
-                    sqlx::query(INSERT_MESSAGE_SQL)
-                        .bind(&msg_id)
-                        .bind(session_id)
-                        .bind(role)
-                        .bind(&encrypted_content)
-                        .bind(sent_by_user_id)
-                        .bind(now)
-                        .bind(current_time_user_tz)
-                        .bind(message_source)
-                        .bind(&encrypted_metadata)
-                        .bind(tool_call_id)
-                        .bind(tool_name)
-                        .bind(tool_calls)
-                        .bind(status.as_str())
-                        .execute(&mut *tx)
-                        .await?;
-                    sqlx::query(PROVIDER_CONTENT_UPSERT_SQL)
-                        .bind(&msg_id)
-                        .bind(blocks.backend.as_str())
-                        .bind(&protected)
-                        .execute(&mut *tx)
-                        .await?;
-                    tx.commit().await?;
-                    Ok::<(), sqlx::Error>(())
-                }};
+    // Insert the message and its provider blocks in one transaction.
+    let protected = provider_content
+        .map(|blocks| encryption::protect_json_field(blocks, encryption_key))
+        .transpose()?;
+    macro_rules! insert_in_transaction {
+        ($pool:expr) => {{
+            let mut tx = $pool.begin().await?;
+            sqlx::query(INSERT_MESSAGE_SQL)
+                .bind(&msg_id)
+                .bind(session_id)
+                .bind(role)
+                .bind(&encrypted_content)
+                .bind(sent_by_user_id)
+                .bind(now)
+                .bind(current_time_user_tz)
+                .bind(message_source)
+                .bind(&encrypted_metadata)
+                .bind(tool_call_id)
+                .bind(tool_name)
+                .bind(tool_calls)
+                .bind(status.as_str())
+                .execute(&mut *tx)
+                .await?;
+            if let Some(protected) = &protected {
+                sqlx::query(PROVIDER_CONTENT_UPSERT_SQL)
+                    .bind(&msg_id)
+                    .bind(protected)
+                    .execute(&mut *tx)
+                    .await?;
             }
-            match db {
-                DbPool::Postgres(pool) => insert_with_blocks!(pool),
-                DbPool::Sqlite(pool) => insert_with_blocks!(pool),
-            }
-            .map_err(|e| kyomi_core::Error::Internal(format!("failed to add message: {e}")))?;
-        }
+            tx.commit().await?;
+            Ok::<(), sqlx::Error>(())
+        }};
     }
+    match db {
+        DbPool::Postgres(pool) => insert_in_transaction!(pool),
+        DbPool::Sqlite(pool) => insert_in_transaction!(pool),
+    }
+    .map_err(|e| kyomi_core::Error::Internal(format!("failed to add message: {e}")))?;
 
     // Update session timestamp.
     kyomi_core::db_execute!(
@@ -2265,37 +2244,24 @@ pub struct AgentMessage {
     /// ever fabricating a source, since `build_metadata_prefix` already
     /// omits whichever part is absent.
     pub message_source: Option<String>,
-    /// Provider format of [`Self::provider_content`] (e.g. `"anthropic"`); `None`
-    /// when the provider's verbatim blocks were not stored for this message.
-    pub provider_backend: Option<String>,
-    /// The provider's verbatim assistant content blocks (KYO-969). Encrypted in
-    /// the row; the loaders decrypt it. Only meaningful with `provider_backend`.
+    /// The provider's verbatim assistant content blocks (KYO-969), if stored for
+    /// this message. Encrypted in the row; the loaders decrypt it.
     pub provider_content: Option<serde_json::Value>,
 }
 
-/// The provider's verbatim assistant content blocks for one message and the
-/// provider format they are in (KYO-969). See `chat_message_provider_content`.
-#[derive(Debug, Clone, PartialEq)]
-pub struct ProviderContent {
-    pub backend: String,
-    pub blocks: serde_json::Value,
-}
-
-/// Upsert of one message's provider blocks; `$3` is the encrypted envelope.
-/// Shared by [`store_provider_content`] and the durable write in
-/// `conversation_events` so the two cannot drift.
-pub const PROVIDER_CONTENT_UPSERT_SQL: &str = "INSERT INTO chat_message_provider_content (message_id, backend, blocks) VALUES ($1, $2, $3) \
-     ON CONFLICT (message_id) DO UPDATE SET backend = EXCLUDED.backend, blocks = EXCLUDED.blocks";
+/// Upsert of one message's provider blocks (KYO-969); `$2` is the encrypted
+/// envelope. Shared by every write path so they cannot drift.
+pub const PROVIDER_CONTENT_UPSERT_SQL: &str = "INSERT INTO chat_message_provider_content (message_id, blocks) VALUES ($1, $2) \
+     ON CONFLICT (message_id) DO UPDATE SET blocks = EXCLUDED.blocks";
 
 /// Removes one message's stored provider blocks; `$1` is the message id.
 pub const PROVIDER_CONTENT_DELETE_SQL: &str = "DELETE FROM chat_message_provider_content WHERE message_id = $1";
 
-/// The two columns every agent-history query selects so no loader can forget the
+/// The column every agent-history query selects so no loader can forget the
 /// stored provider blocks. Expands to a string literal for `concat!`.
 macro_rules! provider_content_columns {
     () => {
-        "(SELECT p.backend FROM chat_message_provider_content p WHERE p.message_id = chat_messages.message_id) AS provider_backend, \
-         (SELECT p.blocks FROM chat_message_provider_content p WHERE p.message_id = chat_messages.message_id) AS provider_content"
+        "(SELECT p.blocks FROM chat_message_provider_content p WHERE p.message_id = chat_messages.message_id) AS provider_content"
     };
 }
 pub(crate) use provider_content_columns;
@@ -2312,54 +2278,27 @@ struct AgentMessageRow {
     sent_by_user_id: Option<String>,
     current_time_user_tz: Option<String>,
     message_source: Option<String>,
-    provider_backend: Option<String>,
     provider_content: Option<serde_json::Value>,
 }
 
-/// Decrypt a message's stored provider blocks. A row that cannot be read or is
-/// not a JSON array yields `(None, None)`: the message then replays as its text,
-/// which is always valid, rather than risking a partial or damaged block list.
+/// Decrypt a message's stored provider blocks (KYO-969). `None` when the message
+/// has none; a stored row that cannot be decrypted or is not an array of blocks is
+/// an error, not a silent change of what the model sees.
 pub fn restore_provider_content(
     message_id: &str,
-    backend: Option<String>,
     stored: Option<&serde_json::Value>,
     encryption_key: &[u8; 32],
-) -> (Option<String>, Option<serde_json::Value>) {
-    let (Some(backend), Some(stored)) = (backend, stored) else {
-        return (None, None);
-    };
-    match encryption::restore_json_field(stored, encryption_key) {
-        Ok(blocks) if blocks.as_array().is_some_and(|array| !array.is_empty()) => (Some(backend), Some(blocks)),
-        Ok(_) => {
-            tracing::warn!(%message_id, "Ignoring stored provider content that is not a non-empty array");
-            (None, None)
-        }
-        Err(error) => {
-            tracing::warn!(%message_id, "Ignoring unreadable stored provider content: {error}");
-            (None, None)
-        }
+) -> kyomi_core::Result<Option<serde_json::Value>> {
+    let Some(stored) = stored else { return Ok(None) };
+    let blocks = encryption::restore_json_field(stored, encryption_key).map_err(|error| {
+        kyomi_core::Error::Internal(format!("stored provider content of message {message_id} is unreadable: {error}"))
+    })?;
+    if blocks.as_array().is_none() {
+        return Err(kyomi_core::Error::Internal(format!(
+            "stored provider content of message {message_id} is not an array of blocks"
+        )));
     }
-}
-
-/// Store the provider's verbatim content blocks for a message (KYO-969), so a
-/// later turn can send them back unchanged. Idempotent per message. The caller
-/// decides whether the blocks are eligible (backend, size).
-pub async fn store_provider_content(
-    db: &DbPool,
-    encryption_key: &[u8; 32],
-    message_id: &str,
-    content: &ProviderContent,
-) -> kyomi_core::Result<()> {
-    let protected = encryption::protect_json_field(&content.blocks, encryption_key)?;
-    kyomi_core::db_execute!(
-        db,
-        PROVIDER_CONTENT_UPSERT_SQL,
-        message_id,
-        content.backend.as_str(),
-        &protected as &serde_json::Value
-    )
-    .map_err(|e| kyomi_core::Error::Internal(format!("failed to store provider content: {e}")))?;
-    Ok(())
+    Ok(Some(blocks))
 }
 
 /// Get ALL messages for agent context restoration (including tool calls and tool results).
@@ -2437,9 +2376,7 @@ pub async fn get_agent_messages(
             continue;
         }
 
-        let (provider_backend, provider_content) = restore_provider_content(
-            &row.message_id, row.provider_backend, row.provider_content.as_ref(), encryption_key,
-        );
+        let provider_content = restore_provider_content(&row.message_id, row.provider_content.as_ref(), encryption_key)?;
         result.push(AgentMessage {
             message_id: row.message_id,
             role: row.role,
@@ -2450,7 +2387,6 @@ pub async fn get_agent_messages(
             sent_by_user_id: row.sent_by_user_id,
             current_time_user_tz: row.current_time_user_tz,
             message_source: row.message_source,
-            provider_backend,
             provider_content,
         });
     }
@@ -2839,7 +2775,7 @@ pub struct PlaceholderResult<'a> {
     pub tool_calls: Option<&'a serde_json::Value>,
     /// The provider's verbatim blocks for the text, written in the same
     /// transaction (KYO-969).
-    pub provider_content: Option<&'a ProviderContent>,
+    pub provider_content: Option<&'a serde_json::Value>,
 }
 
 pub async fn finalize_assistant_placeholder(
@@ -2851,7 +2787,7 @@ pub async fn finalize_assistant_placeholder(
     let PlaceholderResult { content, tool_call_id, tool_name, tool_calls, provider_content } = *result;
     let encrypted_content = encryption::encrypt(content, encryption_key)?;
     let protected_blocks = provider_content
-        .map(|blocks| encryption::protect_json_field(&blocks.blocks, encryption_key))
+        .map(|blocks| encryption::protect_json_field(blocks, encryption_key))
         .transpose()?;
     macro_rules! finalize_in_transaction {
         ($pool:expr) => {{
@@ -2873,10 +2809,9 @@ pub async fn finalize_assistant_placeholder(
             .rows_affected();
             // The blocks belong to the text just written: same transaction, and
             // only when that text was (KYO-969).
-            if let (true, Some(blocks), Some(protected)) = (rows > 0, provider_content, &protected_blocks) {
+            if let (true, Some(protected)) = (rows > 0, &protected_blocks) {
                 sqlx::query(PROVIDER_CONTENT_UPSERT_SQL)
                     .bind(message_id)
-                    .bind(blocks.backend.as_str())
                     .bind(protected)
                     .execute(&mut *tx)
                     .await?;

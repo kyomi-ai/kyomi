@@ -6,10 +6,10 @@
 use super::tests::{agent_message, claim_durable_turn, dispatch_chat_turn};
 use super::*;
 
-/// Replies to the first call with a captured provider response and to later
-/// calls with fixed text, recording every request's messages.
+/// Replies with captured provider responses in order, then with fixed text,
+/// recording every request's messages.
 struct CapturedThenText {
-    first: std::sync::Mutex<Option<crate::types::LLMResponse>>,
+    script: std::sync::Mutex<std::collections::VecDeque<crate::types::LLMResponse>>,
     seen: Arc<std::sync::Mutex<Vec<Vec<Message>>>>,
 }
 
@@ -27,7 +27,7 @@ impl crate::provider::LLMProvider for CapturedThenText {
         _user_names: &std::collections::HashMap<String, String>,
     ) -> kyomi_core::Result<crate::types::LLMResponse> {
         self.seen.lock().unwrap().push(messages.to_vec());
-        if let Some(response) = self.first.lock().unwrap().take() {
+        if let Some(response) = self.script.lock().unwrap().pop_front() {
             return Ok(response);
         }
         Ok(crate::types::LLMResponse {
@@ -44,11 +44,18 @@ impl crate::provider::LLMProvider for CapturedThenText {
 
 fn anthropic_server_tool_config() -> crate::agent::AgentConfig {
     crate::agent::AgentConfig {
-        server_tools: vec![crate::web::server_tools::ServerTool {
-            kind: kyomi_core::web_tools::WebToolKind::Search,
-            backend: kyomi_core::web_tools::WebBackendKind::Anthropic,
-            entry: serde_json::json!({"type": "web_search_20250305", "name": "web_search", "max_uses": 5}),
-        }],
+        server_tools: vec![
+            crate::web::server_tools::ServerTool {
+                kind: kyomi_core::web_tools::WebToolKind::Search,
+                backend: kyomi_core::web_tools::WebBackendKind::Anthropic,
+                entry: serde_json::json!({"type": "web_search_20250305", "name": "web_search", "max_uses": 5}),
+            },
+            crate::web::server_tools::ServerTool {
+                kind: kyomi_core::web_tools::WebToolKind::Fetch,
+                backend: kyomi_core::web_tools::WebBackendKind::Anthropic,
+                entry: serde_json::json!({"type": "web_fetch_20250910", "name": "web_fetch", "max_uses": 5}),
+            },
+        ],
         ..Default::default()
     }
 }
@@ -77,36 +84,52 @@ fn captured_search_message() -> serde_json::Value {
     serde_json::from_str(include_str!("../web/fixtures/anthropic_search_message.json")).expect("fixture")
 }
 
-/// KYO-969: a later user turn sends the provider's stored server_tool_use /
-/// web_search_tool_result blocks back with their encrypted fields unchanged,
-/// through the production durable path (claim, fenced write, claim again).
 struct TwoTurns {
+    db: kyomi_core::DbPool,
+    session_id: String,
     seen: Arc<std::sync::Mutex<Vec<Vec<Message>>>>,
     captured: serde_json::Value,
-    second: Result<String, kyomi_core::Error>,
+    first: Result<String, kyomi_core::Error>,
+    /// `None` when turn one failed and no second turn was run.
+    second: Option<Result<String, kyomi_core::Error>>,
 }
 
 /// Turn one searches (live capture) and is stored; turn two is a new durable run
 /// that reads history only from the database.
 async fn run_two_turns() -> TwoTurns {
+    let captured = captured_search_message();
+    let live = crate::anthropic::AnthropicClient::parse_response("claude", &captured).expect("parse capture");
+    let mut turns = run_turns(vec![live]).await;
+    turns.captured = captured;
+    turns
+}
+
+/// Turn one is answered by `script` (provider responses, in order); if it
+/// succeeds, turn two is a new durable run that reads history only from the
+/// database.
+async fn run_turns(script: Vec<crate::types::LLMResponse>) -> TwoTurns {
     let db = crate::test_support::test_pool().await;
     crate::test_support::seed_user_and_workspace(&db).await;
     let key = Arc::new([7u8; 32]);
     let session_id = uuid::Uuid::new_v4().to_string();
-    let captured = captured_search_message();
-    let live = crate::anthropic::AnthropicClient::parse_response("claude", &captured).expect("parse capture");
     let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
 
     let (user, assistant) = claim_durable_turn(&db, &key, &session_id, chrono::Utc::now().timestamp_millis(), 30_000).await;
     let mut first = adapter_with_server_tools(&db, &session_id, &key,
-        CapturedThenText { first: std::sync::Mutex::new(Some(live)), seen: seen.clone() });
-    let answer = first.chat(ChatParams {
+        CapturedThenText { script: std::sync::Mutex::new(script.into()), seen: seen.clone() });
+    let first = first.chat(ChatParams {
         message: "what is new?", cancel_token: CancellationToken::new(), current_time_user_tz: None,
         message_source: Some("web"), user_id: Some("user-a"), user_message_persistence: &user,
         assistant_message_persistence: &assistant,
-    }).await.expect("turn one");
+    }).await;
     let run = assistant.durable_run().expect("durable");
     let store = kyomi_auth::conversation_events::ConversationStore::new(&db, &key, "user-a", "ws-1");
+    let answer = match &first {
+        Ok(answer) => answer.clone(),
+        Err(_) => {
+            return TwoTurns { db, session_id, seen, captured: serde_json::Value::Null, first, second: None };
+        }
+    };
     store.finish(&run.conversation_id, &run.run_id, &run.lease, chrono::Utc::now().timestamp_millis(),
         agent_runtime::RunState::Completed, &answer).await.expect("finish turn one");
 
@@ -125,13 +148,13 @@ async fn run_two_turns() -> TwoTurns {
         run: DurableRun { conversation_id: run.conversation_id.clone(), run_id, lease: claim.snapshot.lease.expect("lease"), context: Arc::new(claim.context) },
     };
     let mut second = adapter_with_server_tools(&db, &session_id, &key,
-        CapturedThenText { first: std::sync::Mutex::new(None), seen: seen.clone() });
+        CapturedThenText { script: std::sync::Mutex::new(Default::default()), seen: seen.clone() });
     let second = second.chat(ChatParams {
         message: "and who wrote it?", cancel_token: CancellationToken::new(), current_time_user_tz: None,
         message_source: Some("web"), user_id: Some("user-a"), user_message_persistence: &user2,
         assistant_message_persistence: &assistant2,
     }).await;
-    TwoTurns { seen, captured, second }
+    TwoTurns { db, session_id, seen, captured: serde_json::Value::Null, first: Ok(answer), second: Some(second) }
 }
 
 /// KYO-969: a later user turn sends the provider's stored server_tool_use /
@@ -140,7 +163,7 @@ async fn run_two_turns() -> TwoTurns {
 #[tokio::test]
 async fn a_later_user_turn_resends_the_stored_server_blocks_verbatim() {
     let turns = run_two_turns().await;
-    turns.second.as_ref().expect("turn two");
+    turns.second.as_ref().expect("turn two ran").as_ref().expect("turn two");
     let blocks = turns.captured["content"].as_array().unwrap().clone();
     let request = turns.seen.lock().unwrap().last().cloned().expect("turn two request");
     let replayed = request.iter()
@@ -167,7 +190,7 @@ async fn a_provider_executed_search_is_recorded_as_a_source_card_event_and_repla
     let live = crate::anthropic::AnthropicClient::parse_response("claude", &captured).expect("parse capture");
     let (user, assistant) = claim_durable_turn(&db, &key, &session_id, chrono::Utc::now().timestamp_millis(), 30_000).await;
     let mut adapter = adapter_with_server_tools(&db, &session_id, &key,
-        CapturedThenText { first: std::sync::Mutex::new(Some(live)), seen: Arc::new(std::sync::Mutex::new(Vec::new())) });
+        CapturedThenText { script: std::sync::Mutex::new(vec![live].into()), seen: Arc::new(std::sync::Mutex::new(Vec::new())) });
     let answer = adapter.chat(ChatParams {
         message: "what is new?", cancel_token: CancellationToken::new(), current_time_user_tz: None,
         message_source: Some("web"), user_id: Some("user-a"), user_message_persistence: &user,
@@ -220,17 +243,14 @@ async fn blocks_stored_through_the_legacy_insert_and_placeholder_paths_reload_to
 }
 
 #[test]
-fn stored_blocks_are_replayed_only_for_the_anthropic_format_and_when_present() {
+fn a_stored_row_is_attached_exactly_and_a_message_without_one_has_none() {
     let blocks = captured_search_message()["content"].clone();
-    let row = |backend: Option<&str>, content: Option<serde_json::Value>| chat_service::AgentMessage {
-        provider_backend: backend.map(str::to_string),
+    let row = |content: Option<serde_json::Value>| chat_service::AgentMessage {
         provider_content: content,
         ..agent_message("m", "assistant", "text")
     };
-    assert!(db_message_to_agent_message(&row(Some("anthropic"), Some(blocks.clone()))).provider_content.is_some());
-    assert!(db_message_to_agent_message(&row(Some("gemini"), Some(blocks.clone()))).provider_content.is_none(), "another format replays text");
-    assert!(db_message_to_agent_message(&row(None, None)).provider_content.is_none(), "old sessions replay text");
-    assert!(db_message_to_agent_message(&row(Some("anthropic"), Some(serde_json::json!({"not": "an array"})))).provider_content.is_none());
+    assert_eq!(db_message_to_agent_message(&row(Some(blocks.clone()))).provider_content.as_ref().map(|b| serde_json::Value::Array(b.clone())), Some(blocks));
+    assert!(db_message_to_agent_message(&row(None)).provider_content.is_none(), "sessions older than this change have nothing to replay");
 }
 
 #[tokio::test]
@@ -295,7 +315,7 @@ async fn a_failed_run_does_not_keep_blocks_for_the_replaced_text() {
     let live = crate::anthropic::AnthropicClient::parse_response("claude", &captured_search_message()).expect("parse");
     let (user, assistant) = claim_durable_turn(&db, &key, &session_id, chrono::Utc::now().timestamp_millis(), 30_000).await;
     let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let mut adapter = adapter_with_server_tools(&db, &session_id, &key, CapturedThenText { first: std::sync::Mutex::new(Some(live)), seen });
+    let mut adapter = adapter_with_server_tools(&db, &session_id, &key, CapturedThenText { script: std::sync::Mutex::new(vec![live].into()), seen });
     adapter.chat(ChatParams {
         message: "what is new?", cancel_token: CancellationToken::new(), current_time_user_tz: None,
         message_source: Some("web"), user_id: Some("user-a"), user_message_persistence: &user,
@@ -347,4 +367,87 @@ async fn the_legacy_error_text_write_drops_blocks_but_completion_keeps_them() {
     assert_eq!(stored_rows(&db, &id).await, 1, "completion with the same text keeps the blocks");
     chat_service::update_message(&db, &key, &id, Some("it failed"), None, Some(chat_service::MessageStatus::Error)).await.unwrap();
     assert_eq!(stored_rows(&db, &id).await, 0, "an error notice replaces the text, so the blocks go");
+}
+
+fn live_response(raw: &str) -> crate::types::LLMResponse {
+    let value: serde_json::Value = serde_json::from_str(raw).expect("fixture");
+    crate::anthropic::AnthropicClient::parse_response("claude", &value).expect("parse capture")
+}
+
+fn live_pause_chain() -> (crate::types::LLMResponse, crate::types::LLMResponse) {
+    (
+        live_response(include_str!("../web/fixtures/anthropic_pause_turn_message.json")),
+        live_response(include_str!("../web/fixtures/anthropic_pause_turn_continuation_message.json")),
+    )
+}
+
+/// The assistant blocks of a request, in order, as one list.
+fn replayed_assistant_blocks(request: &[Message]) -> Vec<serde_json::Value> {
+    request.iter()
+        .filter(|m| m.role == MessageRole::Assistant)
+        .filter_map(|m| m.provider_content.clone())
+        .flatten()
+        .collect()
+}
+
+/// A paused turn and its continuation (live captures; the provider accepts the two
+/// together, 200 on 2026-11-17) are stored as the provider returned them and sent
+/// back, in order, by a later user turn.
+#[tokio::test]
+async fn a_normal_pause_chain_replays_through_a_later_user_turn() {
+    let (paused, continuation) = live_pause_chain();
+    let expected: Vec<serde_json::Value> = paused.raw_response["content"].as_array().unwrap().iter()
+        .chain(continuation.raw_response["content"].as_array().unwrap())
+        .cloned()
+        .collect();
+    let turns = run_turns(vec![paused, continuation]).await;
+    turns.first.as_ref().expect("turn one finishes");
+    turns.second.as_ref().expect("turn two ran").as_ref().expect("turn two");
+    let request = turns.seen.lock().unwrap().last().cloned().expect("turn two request");
+    assert_eq!(replayed_assistant_blocks(&request), expected, "paused blocks then the continuation's, exactly as received");
+}
+
+/// A bare pause message (blocks only) is never dropped: its blocks are stored
+/// with the next row, in order. (Shell derived from the live capture by taking
+/// the text out of the paused reply.)
+#[tokio::test]
+async fn a_bare_pause_message_is_stored_with_the_next_row_and_replayed_in_order() {
+    let (mut paused, continuation) = live_pause_chain();
+    let mut raw = paused.raw_response.clone();
+    raw["content"].as_array_mut().unwrap().retain(|block| block["type"] != "text");
+    paused.raw_response = raw;
+    paused.content = String::new();
+    let expected: Vec<serde_json::Value> = paused.raw_response["content"].as_array().unwrap().iter()
+        .chain(continuation.raw_response["content"].as_array().unwrap())
+        .cloned()
+        .collect();
+    let turns = run_turns(vec![paused, continuation]).await;
+    turns.second.as_ref().expect("turn two ran").as_ref().expect("turn two");
+    let request = turns.seen.lock().unwrap().last().cloned().expect("turn two request");
+    assert_eq!(replayed_assistant_blocks(&request), expected, "shell blocks first, then the continuation's");
+    let assistant_rows = request.iter().filter(|m| m.role == MessageRole::Assistant).count();
+    assert_eq!(assistant_rows, 1, "one stored row carries the whole logical answer");
+}
+
+/// A turn the provider keeps pausing past the bound fails like any failed run and
+/// leaves nothing of its paused chain stored: no blocks, no partial text row.
+#[tokio::test]
+async fn a_run_that_hits_the_pause_bound_leaves_no_stored_rows_from_the_run() {
+    let (paused, _) = live_pause_chain();
+    let script = vec![paused; 20];
+    let turns = run_turns(script).await;
+    let error = turns.first.as_ref().expect_err("the run fails");
+    assert!(error.to_string().contains("Web research did not finish"), "{error}");
+    assert!(turns.second.is_none());
+    assert_eq!(
+        kyomi_core::db_fetch_scalar!(&turns.db, i64, "SELECT COUNT(*) FROM chat_message_provider_content").unwrap(),
+        0,
+        "no blocks stored"
+    );
+    let key = [7u8; 32];
+    let history = chat_service::get_agent_messages(&turns.db, &key, &turns.session_id, None).await.unwrap();
+    assert!(
+        history.iter().all(|m| m.role != "assistant" || !m.content.contains("I'll fetch each URL")),
+        "no partial text row from the paused chain: {:?}", history.iter().map(|m| (m.role.clone(), m.content.chars().take(30).collect::<String>())).collect::<Vec<_>>()
+    );
 }

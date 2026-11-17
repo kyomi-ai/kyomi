@@ -792,16 +792,6 @@ fn should_persist_new_message(msg: &Message, caller_persisted_id: Option<&str>) 
     }
 }
 
-/// A `pause_turn` shell: an assistant message that is only server-tool blocks
-/// (no text, no tool calls). Nothing to store, and an empty assistant row in
-/// history is rejected by the provider on every later turn.
-fn is_empty_pause_shell(msg: &Message) -> bool {
-    msg.role == MessageRole::Assistant
-        && msg.content.is_empty()
-        && msg.tool_calls.as_ref().is_none_or(|t| t.is_empty())
-        && msg.provider_content.is_some()
-}
-
 /// Persist one newly-produced agent message to the DB, applying the same
 /// skip / UPDATE-vs-INSERT rules every caller of it must use (KYO-493 phase
 /// 3) — shared by `persist_after_chat`'s tail pass and
@@ -845,13 +835,6 @@ async fn persist_one_new_message(
     // assistant/tool message, and — critically — any AdapterPersists row,
     // e.g. Slack's caller-chosen id) is still persisted here.
     if !should_persist_new_message(msg, caller_persisted_user_id) {
-        return Ok(());
-    }
-
-    // A `pause_turn` shell (server-tool blocks only, no text and no tool calls)
-    // has nothing to store; persisting it would put an empty assistant row in
-    // history that the provider rejects on every later turn (KYO-969).
-    if is_empty_pause_shell(msg) {
         return Ok(());
     }
 
@@ -952,21 +935,14 @@ async fn persist_one_new_message(
     Ok(())
 }
 
-/// The provider format of the blocks this module stores. Only Anthropic's server
-/// tools produce verbatim blocks that must be replayed; OpenRouter's run over
-/// Chat Completions and have nothing to replay.
-fn replayable_backend() -> String {
-    crate::provider::ProviderKind::Anthropic.to_string()
-}
-
 /// The blocks to store for this message: the provider's own content array, kept
 /// exactly as received, for an assistant message that has one.
-fn storable_provider_content(msg: &Message) -> Option<chat_service::ProviderContent> {
+fn storable_provider_content(msg: &Message) -> Option<serde_json::Value> {
     if msg.role != MessageRole::Assistant {
         return None;
     }
     let blocks = msg.provider_content.as_ref().filter(|blocks| !blocks.is_empty())?;
-    Some(chat_service::ProviderContent { backend: replayable_backend(), blocks: serde_json::Value::Array(blocks.clone()) })
+    Some(serde_json::Value::Array(blocks.clone()))
 }
 
 /// Drop the DB row already covered by `caller_persisted_id`
@@ -1048,10 +1024,8 @@ fn db_message_to_agent_message(msg: &chat_service::AgentMessage) -> Message {
                 Message::assistant(&msg.content)
             };
             // KYO-969: the provider's own blocks for a server-tool turn, replayed
-            // unchanged. Any other backend, or no stored row, replays the text.
-            let blocks = (msg.provider_backend.as_deref() == Some(replayable_backend().as_str()))
-                .then(|| msg.provider_content.as_ref().and_then(|value| value.as_array().cloned()))
-                .flatten();
+            // exactly as stored; a message without a stored row has none.
+            let blocks = msg.provider_content.as_ref().and_then(|value| value.as_array().cloned());
             message.with_provider_content(blocks)
         }
         "tool" => Message::tool_result(
@@ -1090,7 +1064,6 @@ mod tests {
             sent_by_user_id: None,
             current_time_user_tz: None,
             message_source: None,
-            provider_backend: None,
             provider_content: None,
         };
         let result = db_message_to_agent_message(&msg);
@@ -1110,7 +1083,6 @@ mod tests {
             sent_by_user_id: None,
             current_time_user_tz: None,
             message_source: None,
-            provider_backend: None,
             provider_content: None,
         };
         let result = db_message_to_agent_message(&msg);
@@ -1136,7 +1108,6 @@ mod tests {
             sent_by_user_id: None,
             current_time_user_tz: None,
             message_source: None,
-            provider_backend: None,
             provider_content: None,
         };
         let result = db_message_to_agent_message(&msg);
@@ -1158,7 +1129,6 @@ mod tests {
             sent_by_user_id: None,
             current_time_user_tz: None,
             message_source: None,
-            provider_backend: None,
             provider_content: None,
         };
         let result = db_message_to_agent_message(&msg);
@@ -1179,7 +1149,6 @@ mod tests {
             sent_by_user_id: None,
             current_time_user_tz: None,
             message_source: None,
-            provider_backend: None,
             provider_content: None,
         };
         let result = db_message_to_agent_message(&msg);
@@ -1198,7 +1167,6 @@ mod tests {
             sent_by_user_id: None,
             current_time_user_tz: None,
             message_source: None,
-            provider_backend: None,
             provider_content: None,
         };
         let result = db_message_to_agent_message(&msg);
@@ -1222,7 +1190,6 @@ mod tests {
             sent_by_user_id: None,
             current_time_user_tz: None,
             message_source: None,
-            provider_backend: None,
             provider_content: None,
         };
         let result = db_message_to_agent_message(&msg);
@@ -1248,7 +1215,6 @@ mod tests {
             sent_by_user_id: None,
             current_time_user_tz: None,
             message_source: None,
-            provider_backend: None,
             provider_content: None,
         };
         let result = db_message_to_agent_message(&msg);
@@ -1273,7 +1239,6 @@ mod tests {
             sent_by_user_id: None,
             current_time_user_tz: None,
             message_source: None,
-            provider_backend: None,
             provider_content: None,
         };
         let result = db_message_to_agent_message(&msg);
@@ -1299,7 +1264,6 @@ mod tests {
             sent_by_user_id: None,
             current_time_user_tz: None,
             message_source: None,
-            provider_backend: None,
             provider_content: None,
         };
         let result = db_message_to_agent_message(&msg);
@@ -1335,7 +1299,6 @@ mod tests {
             sent_by_user_id: None,
             current_time_user_tz: Some("2026-08-23T09:00:00+00:00".into()),
             message_source: Some("web".into()),
-            provider_backend: None,
             provider_content: None,
         };
         let result = db_message_to_agent_message(&msg);
@@ -1366,7 +1329,6 @@ mod tests {
             sent_by_user_id: None,
             current_time_user_tz: Some("2026-08-23T09:00:00+00:00".into()),
             message_source: None,
-            provider_backend: None,
             provider_content: None,
         };
         let result = db_message_to_agent_message(&msg);
@@ -1393,7 +1355,6 @@ mod tests {
             sent_by_user_id: None,
             current_time_user_tz: None,
             message_source: Some("slack".into()),
-            provider_backend: None,
             provider_content: None,
         };
         let result = db_message_to_agent_message(&msg);
@@ -1420,7 +1381,6 @@ mod tests {
             sent_by_user_id: None,
             current_time_user_tz: None,
             message_source: None,
-            provider_backend: None,
             provider_content: None,
         };
         let result = db_message_to_agent_message(&msg);
@@ -1439,7 +1399,6 @@ mod tests {
             sent_by_user_id: Some("user-abc-12345678".into()),
             current_time_user_tz: None,
             message_source: None,
-            provider_backend: None,
             provider_content: None,
         };
         let result = db_message_to_agent_message(&msg);
@@ -1459,7 +1418,6 @@ mod tests {
             sent_by_user_id: None,
             current_time_user_tz: None,
             message_source: None,
-            provider_backend: None,
             provider_content: None,
         };
         let result = db_message_to_agent_message(&msg);
@@ -1483,7 +1441,6 @@ mod tests {
             sent_by_user_id: None,
             current_time_user_tz: None,
             message_source: None,
-            provider_backend: None,
             provider_content: None,
         };
         let result = db_message_to_agent_message(&msg);
@@ -1594,7 +1551,6 @@ mod tests {
             sent_by_user_id: None,
             current_time_user_tz: None,
             message_source: None,
-            provider_backend: None,
             provider_content: None,
         };
         let result = db_message_to_agent_message(&msg);
@@ -1615,7 +1571,6 @@ mod tests {
             sent_by_user_id: None,
             current_time_user_tz: None,
             message_source: None,
-            provider_backend: None,
             provider_content: None,
         };
         let result = db_message_to_agent_message(&msg);
@@ -1746,7 +1701,6 @@ mod tests {
             sent_by_user_id: None,
             current_time_user_tz: None,
             message_source: None,
-            provider_backend: None,
             provider_content: None,
         }
     }
@@ -4281,18 +4235,5 @@ mod tests {
         assert_eq!(outcomes,vec![agent_runtime::DomainOutcome::Rejected,agent_runtime::DomainOutcome::Rejected,agent_runtime::DomainOutcome::Rejected,agent_runtime::DomainOutcome::Succeeded]);
         assert_eq!(calls.len(),5);
         assert!(calls[3].messages.iter().filter(|message| message.role == crate::types::MessageRole::Tool).all(|message| message.content.starts_with("Error: Workspace admin access required")));
-    }
-
-
-    #[test]
-    fn an_empty_pause_shell_is_not_persisted_but_real_assistant_rows_are() {
-        let shell = Message::assistant("").with_provider_content(Some(vec![serde_json::json!({"type": "server_tool_use"})]));
-        assert!(is_empty_pause_shell(&shell));
-        let with_text = Message::assistant("partial").with_provider_content(Some(vec![serde_json::json!({"type": "server_tool_use"})]));
-        assert!(!is_empty_pause_shell(&with_text));
-        assert!(!is_empty_pause_shell(&Message::assistant("")), "an ordinary empty message is untouched here");
-        let with_calls = Message::assistant_with_tool_calls("", vec![ToolCall { id: "t".into(), name: "n".into(), arguments: serde_json::json!({}), arguments_error: None }])
-            .with_provider_content(Some(vec![]));
-        assert!(!is_empty_pause_shell(&with_calls));
     }
 }
