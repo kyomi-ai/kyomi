@@ -3185,38 +3185,33 @@ pub async fn add_assistant_message_with_thinking_details(
         status: MessageStatus::Complete.as_str(),
     };
 
-    macro_rules! insert_in_transaction {
-        ($pool:expr) => {{
-            let mut tx = $pool.begin().await?;
-            insert_message_row!(&mut *tx, row)?;
-            if let Some(source) = copy_details_from {
-                let rows: Vec<(String, String)> = sqlx::query_as(
-                    "SELECT event_id, full_text FROM thinking_event_details WHERE message_id = $1",
+    let result = kyomi_core::db_with_pool!(db, |pool| async {
+        let mut tx = pool.begin().await?;
+        insert_message_row!(&mut *tx, row)?;
+        if let Some(source) = copy_details_from {
+            let rows: Vec<(String, String)> = sqlx::query_as(
+                "SELECT event_id, full_text FROM thinking_event_details WHERE message_id = $1",
+            )
+            .bind(source)
+            .fetch_all(&mut *tx)
+            .await?;
+            for (event_id, full_text) in rows {
+                sqlx::query(
+                    "INSERT INTO thinking_event_details (id, message_id, event_id, full_text) \
+                     VALUES ($1, $2, $3, $4)",
                 )
-                .bind(source)
-                .fetch_all(&mut *tx)
+                .bind(uuid::Uuid::new_v4().to_string())
+                .bind(message_id)
+                .bind(event_id)
+                .bind(full_text)
+                .execute(&mut *tx)
                 .await?;
-                for (event_id, full_text) in rows {
-                    sqlx::query(
-                        "INSERT INTO thinking_event_details (id, message_id, event_id, full_text) \
-                         VALUES ($1, $2, $3, $4)",
-                    )
-                    .bind(uuid::Uuid::new_v4().to_string())
-                    .bind(message_id)
-                    .bind(event_id)
-                    .bind(full_text)
-                    .execute(&mut *tx)
-                    .await?;
-                }
             }
-            tx.commit().await?;
-            Ok::<(), sqlx::Error>(())
-        }};
+        }
+        tx.commit().await?;
+        Ok::<(), sqlx::Error>(())
     }
-    let result = match db {
-        DbPool::Postgres(pool) => insert_in_transaction!(pool),
-        DbPool::Sqlite(pool) => insert_in_transaction!(pool),
-    };
+    .await);
     result.map_err(|e| {
         kyomi_core::Error::Internal(format!("failed to add assistant message with thinking details: {e}"))
     })?;

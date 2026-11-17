@@ -180,12 +180,21 @@ async fn load_thinking_trace(
     let Some(watch_id) = exec.watch_id else {
         return Ok(empty());
     };
-    let response = get_thinking_events(watch_id, exec.id).await.map_err(|e| {
-        leptos::logging::error!("Failed to load thinking events for execution {}: {e}", exec.id);
+    resolve_thinking_trace(exec.id, get_thinking_events(watch_id, exec.id).await)
+}
+
+/// Turn the server fn's result into a trace. A failure — transport or
+/// malformed data — is logged and returned, never mapped to an empty trace.
+fn resolve_thinking_trace(
+    execution_id: i32,
+    response: Result<ThinkingEventsResponse, ServerFnError>,
+) -> Result<LoadedThinkingTrace, String> {
+    let response = response.map_err(|e| {
+        leptos::logging::error!("Failed to load thinking events for execution {execution_id}: {e}");
         e.to_string()
     })?;
     parse_thinking_trace(response).map_err(|e| {
-        leptos::logging::error!("Failed to parse thinking events for execution {}: {e}", exec.id);
+        leptos::logging::error!("Failed to parse thinking events for execution {execution_id}: {e}");
         e
     })
 }
@@ -550,6 +559,12 @@ mod thinking_trace_tests {
         .expect("well-formed events parse");
         assert_eq!(trace.message_id, "msg-1");
         assert_eq!(trace.events.len(), 2);
+    }
+
+    #[test]
+    fn a_failed_load_is_an_error_not_an_empty_trace() {
+        let result = resolve_thinking_trace(7, Err(ServerFnError::new("boom")));
+        assert!(result.is_err(), "a server error must not become an empty trace");
     }
 
     #[test]

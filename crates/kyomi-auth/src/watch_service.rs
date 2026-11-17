@@ -2083,12 +2083,13 @@ pub async fn bulk_mark_alerts_unread(
 
 // ─── Thinking trace of an execution ──────────────────────────────────────────
 
-/// The thinking events saved on a watch execution session's assistant
-/// message, with the id of that message (KYO-976). The id is what
-/// `get_thinking_event_detail` needs to fetch an event's full reasoning text.
+/// Thinking events of an execution with the id of the assistant message they
+/// are saved on (KYO-976) — the id `get_thinking_event_detail` needs to fetch
+/// full reasoning texts. `message_id` is `None` only for old executions whose
+/// events were stored on `execution_trace`: they have no message row.
 #[derive(Debug, Clone, PartialEq)]
-pub struct SessionThinkingTrace {
-    pub message_id: String,
+pub struct ExecutionThinkingEvents {
+    pub message_id: Option<String>,
     pub events: Vec<serde_json::Value>,
 }
 
@@ -2102,36 +2103,29 @@ pub async fn load_session_thinking_trace(
     db: &DbPool,
     encryption_key: &[u8; 32],
     session_id: &str,
-) -> Result<Option<SessionThinkingTrace>> {
+) -> Result<Option<ExecutionThinkingEvents>> {
     let messages = chat_service::get_session_messages(db, encryption_key, session_id, 1000).await?;
     Ok(messages
         .into_iter()
         .find(|m| m.message_type == "assistant" && !m.thinking_events.is_empty())
-        .map(|m| SessionThinkingTrace {
-            message_id: m.message_id,
+        .map(|m| ExecutionThinkingEvents {
+            message_id: Some(m.message_id),
             events: m.thinking_events,
         }))
 }
 
-/// Thinking events of an execution for the log viewer. `message_id` is `None`
-/// only for old executions whose events were stored on `execution_trace`:
-/// they have no message row and so no full-text details.
-#[derive(Debug, Clone, PartialEq)]
-pub struct ExecutionThinkingEvents {
-    pub message_id: Option<String>,
-    pub events: Vec<serde_json::Value>,
-}
-
 /// Events that old executions stored on `execution_trace` (they have no
-/// message row, so no full texts). Empty when there are none.
-fn legacy_trace_events(execution: &kyomi_core::models::WatchExecution) -> Vec<serde_json::Value> {
+/// message row, so no full texts). `Some` whenever `events` is an array, even
+/// an empty one.
+fn legacy_trace_events(
+    execution: &kyomi_core::models::WatchExecution,
+) -> Option<Vec<serde_json::Value>> {
     execution
         .execution_trace
         .as_ref()
         .and_then(|t| t.get("events"))
         .and_then(|e| e.as_array())
         .cloned()
-        .unwrap_or_default()
 }
 
 /// Load the thinking events of `execution` (already authorised by the
@@ -2144,13 +2138,10 @@ pub async fn get_execution_thinking_events(
     if let Some(session_id) = &execution.session_id
         && let Some(trace) = load_session_thinking_trace(db, encryption_key, session_id).await?
     {
-        return Ok(ExecutionThinkingEvents {
-            message_id: Some(trace.message_id),
-            events: trace.events,
-        });
+        return Ok(trace);
     }
 
-    let events = legacy_trace_events(execution);
+    let events = legacy_trace_events(execution).unwrap_or_default();
     Ok(ExecutionThinkingEvents { message_id: None, events })
 }
 
@@ -2234,7 +2225,7 @@ pub async fn create_chat_session_from_alert(
     // user's execution. If this session_id is ever sourced from anywhere
     // other than the gated `execution` row, it must get its own ownership
     // check — do not assume get_session_messages is safe on its own.
-    let mut events: Vec<serde_json::Value> = Vec::new();
+    let mut thinking_events: Option<serde_json::Value> = None;
     // The source assistant message, whose full-text details are copied to the
     // new message in step 8 so "more" keeps working in the continued chat.
     let mut source_message_id: Option<String> = None;
@@ -2242,8 +2233,8 @@ pub async fn create_chat_session_from_alert(
     if let Some(ref session_id) = execution.session_id {
         match load_session_thinking_trace(db, encryption_key, session_id).await {
             Ok(Some(trace)) => {
-                events = trace.events;
-                source_message_id = Some(trace.message_id);
+                thinking_events = Some(serde_json::Value::Array(trace.events));
+                source_message_id = trace.message_id;
             }
             Ok(None) => {}
             Err(e) => {
@@ -2253,11 +2244,11 @@ pub async fn create_chat_session_from_alert(
     }
 
     // Fallback for old executions that stored events in execution_trace.
-    if events.is_empty() {
-        events = legacy_trace_events(&execution);
+    if thinking_events.is_none()
+        && let Some(events) = legacy_trace_events(&execution)
+    {
+        thinking_events = Some(serde_json::Value::Array(events));
     }
-    let thinking_events =
-        (!events.is_empty()).then_some(serde_json::Value::Array(events));
 
     // 5. Load agent_state from the execution trace.
     let mut agent_state: Option<serde_json::Value> = None;
@@ -3889,11 +3880,11 @@ mod privacy_tests {
             .await
             .expect("load new session trace")
             .expect("new session has a trace");
-        assert_ne!(trace.message_id, source_message_id, "a new assistant message");
+        assert_ne!(trace.message_id.as_deref(), Some(source_message_id.as_str()), "a new assistant message");
         assert_eq!(trace.events.len(), 2);
 
         let full = chat_service::get_thinking_event_detail(
-            &pool, key, &trace.message_id, &event_id, "user-a", "ws-1",
+            &pool, key, trace.message_id.as_deref().expect("message id"), &event_id, "user-a", "ws-1",
         )
         .await
         .expect("detail lookup")
@@ -4027,6 +4018,45 @@ mod privacy_tests {
         .await
         .expect("count assistant messages");
         assert_eq!(stray.0, 0, "no assistant message may survive a failed detail copy");
+    }
+
+    /// An old execution whose `execution_trace.events` is an empty array keeps
+    /// the exact main behaviour: the new message is saved with an empty
+    /// `thinking_events` list.
+    #[tokio::test]
+    async fn continue_in_chat_keeps_an_empty_legacy_events_array() {
+        let pool = test_pool().await;
+        seed_two_users_one_workspace(sqlite_pool(&pool), "a@test.local", "b@test.local").await;
+        let watch = create_test_watch(&pool, "user-a", "Old Watch").await;
+        let execution_id = insert_triggered_alert_with_content(
+            &pool, &watch.watch_id, "user-a", "old answer", "old prompt", "Old Alert",
+        )
+        .await;
+        let trace = serde_json::json!({
+            "watch_prompt": "old prompt", "alert_title": "Old Alert", "events": [],
+        });
+        sqlx::query("UPDATE watch_executions SET execution_trace = $1 WHERE id = $2")
+            .bind(trace.to_string())
+            .bind(execution_id)
+            .execute(sqlite_pool(&pool))
+            .await
+            .expect("store legacy events");
+        let key = &[0u8; 32];
+
+        let session = create_chat_session_from_alert(&pool, key, "user-a", "ws-1", execution_id)
+            .await
+            .expect("continue in chat");
+
+        let messages = chat_service::get_session_messages(&pool, key, &session, 10)
+            .await
+            .expect("messages");
+        let assistant = messages.iter().find(|m| m.message_type == "assistant").expect("assistant");
+        assert_eq!(
+            assistant.metadata.get("thinking_events"),
+            Some(&serde_json::json!([])),
+            "{:?}",
+            assistant.metadata
+        );
     }
 
     // ── Alert mutation IDOR guards (KYO-204) ─────────────────────────────
