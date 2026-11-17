@@ -341,6 +341,7 @@ impl ConversationStore<'_> {
                 if message.role == "assistant"
                     && message.content.trim().is_empty()
                     && message.tool_calls.is_none()
+                    && message.provider_content.is_none()
                 {
                     continue;
                 }
@@ -678,7 +679,7 @@ impl ConversationStore<'_> {
             let existing:Option<(String,i64)>=sqlx::query_as("SELECT event_id,sequence FROM conversation_events WHERE session_id=$1 AND idempotency_key=$2").bind(conversation.as_str()).bind(command.idempotency_key.as_str()).fetch_optional(&mut *tx).await?;
             if let Some((event_id, sequence)) = existing {
                 if let Some(prior) = &prior {
-                    let stored_blocks: Option<serde_json::Value> = sqlx::query_scalar("SELECT blocks FROM chat_message_provider_content WHERE message_id=$1")
+                    let stored_blocks: Option<serde_json::Value> = sqlx::query_scalar(crate::chat_service::PROVIDER_CONTENT_SELECT_SQL)
                         .bind(&message.message_id).fetch_optional(&mut *tx).await?;
                     let stored_blocks = stored_blocks.as_ref().map(|value| encryption::restore_json_field(value, self.key)).transpose()?;
                     if encryption::decrypt(&prior.content, self.key)? != message.content

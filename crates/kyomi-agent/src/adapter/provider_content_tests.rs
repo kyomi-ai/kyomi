@@ -10,6 +10,8 @@ use super::*;
 /// recording every request's messages.
 struct CapturedThenText {
     script: std::sync::Mutex<std::collections::VecDeque<crate::types::LLMResponse>>,
+    /// Fail instead of answering with text once the script is used up.
+    fail_when_exhausted: bool,
     seen: Arc<std::sync::Mutex<Vec<Vec<Message>>>>,
 }
 
@@ -29,6 +31,9 @@ impl crate::provider::LLMProvider for CapturedThenText {
         self.seen.lock().unwrap().push(messages.to_vec());
         if let Some(response) = self.script.lock().unwrap().pop_front() {
             return Ok(response);
+        }
+        if self.fail_when_exhausted {
+            return Err(kyomi_core::Error::ServiceUnavailable("provider down".into()));
         }
         Ok(crate::types::LLMResponse {
             raw_response: serde_json::Value::Null,
@@ -99,7 +104,7 @@ struct TwoTurns {
 async fn run_two_turns() -> TwoTurns {
     let captured = captured_search_message();
     let live = crate::anthropic::AnthropicClient::parse_response("claude", &captured).expect("parse capture");
-    let mut turns = run_turns(vec![live]).await;
+    let mut turns = run_turns(vec![live], false).await;
     turns.captured = captured;
     turns
 }
@@ -107,7 +112,7 @@ async fn run_two_turns() -> TwoTurns {
 /// Turn one is answered by `script` (provider responses, in order); if it
 /// succeeds, turn two is a new durable run that reads history only from the
 /// database.
-async fn run_turns(script: Vec<crate::types::LLMResponse>) -> TwoTurns {
+async fn run_turns(script: Vec<crate::types::LLMResponse>, fail_when_exhausted: bool) -> TwoTurns {
     let db = crate::test_support::test_pool().await;
     crate::test_support::seed_user_and_workspace(&db).await;
     let key = Arc::new([7u8; 32]);
@@ -116,7 +121,7 @@ async fn run_turns(script: Vec<crate::types::LLMResponse>) -> TwoTurns {
 
     let (user, assistant) = claim_durable_turn(&db, &key, &session_id, chrono::Utc::now().timestamp_millis(), 30_000).await;
     let mut first = adapter_with_server_tools(&db, &session_id, &key,
-        CapturedThenText { script: std::sync::Mutex::new(script.into()), seen: seen.clone() });
+        CapturedThenText { script: std::sync::Mutex::new(script.into()), fail_when_exhausted, seen: seen.clone() });
     let first = first.chat(ChatParams {
         message: "what is new?", cancel_token: CancellationToken::new(), current_time_user_tz: None,
         message_source: Some("web"), user_id: Some("user-a"), user_message_persistence: &user,
@@ -148,7 +153,7 @@ async fn run_turns(script: Vec<crate::types::LLMResponse>) -> TwoTurns {
         run: DurableRun { conversation_id: run.conversation_id.clone(), run_id, lease: claim.snapshot.lease.expect("lease"), context: Arc::new(claim.context) },
     };
     let mut second = adapter_with_server_tools(&db, &session_id, &key,
-        CapturedThenText { script: std::sync::Mutex::new(Default::default()), seen: seen.clone() });
+        CapturedThenText { script: std::sync::Mutex::new(Default::default()), fail_when_exhausted: false, seen: seen.clone() });
     let second = second.chat(ChatParams {
         message: "and who wrote it?", cancel_token: CancellationToken::new(), current_time_user_tz: None,
         message_source: Some("web"), user_id: Some("user-a"), user_message_persistence: &user2,
@@ -190,7 +195,7 @@ async fn a_provider_executed_search_is_recorded_as_a_source_card_event_and_repla
     let live = crate::anthropic::AnthropicClient::parse_response("claude", &captured).expect("parse capture");
     let (user, assistant) = claim_durable_turn(&db, &key, &session_id, chrono::Utc::now().timestamp_millis(), 30_000).await;
     let mut adapter = adapter_with_server_tools(&db, &session_id, &key,
-        CapturedThenText { script: std::sync::Mutex::new(vec![live].into()), seen: Arc::new(std::sync::Mutex::new(Vec::new())) });
+        CapturedThenText { script: std::sync::Mutex::new(vec![live].into()), fail_when_exhausted: false, seen: Arc::new(std::sync::Mutex::new(Vec::new())) });
     let answer = adapter.chat(ChatParams {
         message: "what is new?", cancel_token: CancellationToken::new(), current_time_user_tz: None,
         message_source: Some("web"), user_id: Some("user-a"), user_message_persistence: &user,
@@ -315,7 +320,7 @@ async fn a_failed_run_does_not_keep_blocks_for_the_replaced_text() {
     let live = crate::anthropic::AnthropicClient::parse_response("claude", &captured_search_message()).expect("parse");
     let (user, assistant) = claim_durable_turn(&db, &key, &session_id, chrono::Utc::now().timestamp_millis(), 30_000).await;
     let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let mut adapter = adapter_with_server_tools(&db, &session_id, &key, CapturedThenText { script: std::sync::Mutex::new(vec![live].into()), seen });
+    let mut adapter = adapter_with_server_tools(&db, &session_id, &key, CapturedThenText { script: std::sync::Mutex::new(vec![live].into()), fail_when_exhausted: false, seen });
     adapter.chat(ChatParams {
         message: "what is new?", cancel_token: CancellationToken::new(), current_time_user_tz: None,
         message_source: Some("web"), user_id: Some("user-a"), user_message_persistence: &user,
@@ -400,7 +405,7 @@ async fn a_normal_pause_chain_replays_through_a_later_user_turn() {
         .chain(continuation.raw_response["content"].as_array().unwrap())
         .cloned()
         .collect();
-    let turns = run_turns(vec![paused, continuation]).await;
+    let turns = run_turns(vec![paused, continuation], false).await;
     turns.first.as_ref().expect("turn one finishes");
     turns.second.as_ref().expect("turn two ran").as_ref().expect("turn two");
     let request = turns.seen.lock().unwrap().last().cloned().expect("turn two request");
@@ -421,7 +426,7 @@ async fn a_bare_pause_message_is_stored_with_the_next_row_and_replayed_in_order(
         .chain(continuation.raw_response["content"].as_array().unwrap())
         .cloned()
         .collect();
-    let turns = run_turns(vec![paused, continuation]).await;
+    let turns = run_turns(vec![paused, continuation], false).await;
     turns.second.as_ref().expect("turn two ran").as_ref().expect("turn two");
     let request = turns.seen.lock().unwrap().last().cloned().expect("turn two request");
     assert_eq!(replayed_assistant_blocks(&request), expected, "shell blocks first, then the continuation's");
@@ -435,7 +440,7 @@ async fn a_bare_pause_message_is_stored_with_the_next_row_and_replayed_in_order(
 async fn a_run_that_hits_the_pause_bound_leaves_no_stored_rows_from_the_run() {
     let (paused, _) = live_pause_chain();
     let script = vec![paused; 20];
-    let turns = run_turns(script).await;
+    let turns = run_turns(script, false).await;
     let error = turns.first.as_ref().expect_err("the run fails");
     assert!(error.to_string().contains("Web research did not finish"), "{error}");
     assert!(turns.second.is_none());
@@ -450,4 +455,22 @@ async fn a_run_that_hits_the_pause_bound_leaves_no_stored_rows_from_the_run() {
         history.iter().all(|m| m.role != "assistant" || !m.content.contains("I'll fetch each URL")),
         "no partial text row from the paused chain: {:?}", history.iter().map(|m| (m.role.clone(), m.content.chars().take(30).collect::<String>())).collect::<Vec<_>>()
     );
+}
+
+/// A provider error inside a paused chain: the run fails and nothing of the chain
+/// (a text-bearing paused row, its blocks) is stored.
+#[tokio::test]
+async fn a_provider_error_inside_a_pause_chain_leaves_no_stored_rows_from_the_run() {
+    let (paused, _) = live_pause_chain();
+    let turns = run_turns(vec![paused.clone(), paused], true).await;
+    let error = turns.first.as_ref().expect_err("the run fails");
+    assert!(error.to_string().contains("provider down"), "{error}");
+    assert_eq!(
+        kyomi_core::db_fetch_scalar!(&turns.db, i64, "SELECT COUNT(*) FROM chat_message_provider_content").unwrap(),
+        0,
+        "no blocks stored"
+    );
+    let key = [7u8; 32];
+    let history = chat_service::get_agent_messages(&turns.db, &key, &turns.session_id, None).await.unwrap();
+    assert!(history.iter().all(|m| m.role != "assistant" || !m.content.contains("I'll fetch each URL")), "no partial text row");
 }

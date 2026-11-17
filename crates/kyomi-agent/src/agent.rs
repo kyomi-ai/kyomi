@@ -495,11 +495,16 @@ pub struct CustomAgent {
     web_usage: HashMap<kyomi_core::web_tools::WebToolKind, u32>,
     /// One record per metered provider web call in this run (also logged).
     web_call_log: Vec<crate::web::WebCallRecord>,
-    /// The provider tools this turn sends, decided once when the turn's first
-    /// request is built (privacy, monthly budget and per-turn allowance are checked
-    /// then and never mid-turn): every request of the turn, a `pause_turn`
-    /// continuation included, carries the same tools.
-    turn_server_tools: tokio::sync::OnceCell<Vec<serde_json::Value>>,
+    /// Which of the configured provider tools this turn may use (indices into
+    /// `config.server_tools`), decided once when the turn's first request is built:
+    /// the monthly budget is checked then and not mid-turn.
+    turn_server_tools: tokio::sync::OnceCell<Vec<usize>>,
+    /// The provider tools the most recent request carried: a `pause_turn`
+    /// continuation resends exactly these.
+    last_server_tools: std::sync::Mutex<Vec<serde_json::Value>>,
+    /// Where the open chain of `pause_turn` messages starts in the state (`None`
+    /// outside a chain).
+    pause_chain_start: Option<usize>,
 }
 
 impl CustomAgent {
@@ -524,6 +529,8 @@ impl CustomAgent {
             web_usage: HashMap::new(),
             web_call_log: Vec::new(),
             turn_server_tools: tokio::sync::OnceCell::new(),
+            last_server_tools: std::sync::Mutex::new(Vec::new()),
+            pause_chain_start: None,
         }
     }
 
@@ -606,6 +613,28 @@ impl CustomAgent {
         message_source: Option<&str>,
         user_id: Option<&str>,
     ) -> kyomi_core::Result<String> {
+        self.pause_chain_start = None;
+        self.web_sources.clear();
+        let result = self.run_chat(user_message, cancel_token, current_time_user_tz, message_source, user_id).await;
+        // A failed run keeps none of an open `pause_turn` chain (blocks that end in a
+        // call without its result are rejected by the provider on every later turn);
+        // everything else the run recorded stays, as for any failed run.
+        if result.is_err()
+            && let Some(start) = self.pause_chain_start.take()
+        {
+            self.state.messages.truncate(start);
+        }
+        result
+    }
+
+    async fn run_chat(
+        &mut self,
+        user_message: &str,
+        cancel_token: CancellationToken,
+        current_time_user_tz: Option<&str>,
+        message_source: Option<&str>,
+        user_id: Option<&str>,
+    ) -> kyomi_core::Result<String> {
         // Build metadata prefix.
         let metadata_prefix = build_metadata_prefix(current_time_user_tz, message_source);
 
@@ -654,8 +683,6 @@ impl CustomAgent {
         // wrap-up call), for the exhaustion `info!`.
         let mut iterations_used: u32 = 0;
         let mut pause_continuations: u32 = 0;
-        // Where this turn's chain of `pause_turn` messages starts in the state.
-        let mut pause_chain_start: Option<usize> = None;
         // Which condition ended the loop. Overwritten if a non-iteration
         // guard fires; left at `Iterations` if the loop runs to completion.
         let mut stop_reason = StopReason::Iterations;
@@ -711,9 +738,7 @@ impl CustomAgent {
             let mut llm_messages = self.build_llm_context();
             // A `pause_turn` continuation must end with the paused assistant message
             // exactly as received: nothing may follow it.
-            let pausing = self.state.messages.last().is_some_and(|m| {
-                m.role == crate::types::MessageRole::Assistant && m.provider_content.is_some() && m.tool_calls.is_none()
-            });
+            let pausing = self.pause_chain_start.is_some();
             if !pausing {
                 llm_messages.extend(chartml_retry_messages.iter().cloned());
                 // Budget notice last: maximum recency, immediately before the call.
@@ -806,21 +831,18 @@ impl CustomAgent {
             // like any other failed run: nothing of its paused chain is kept.
             if response.tool_calls.is_none() && response.finish_reason == "pause_turn" {
                 if pause_continuations >= MAX_PAUSE_CONTINUATIONS {
-                    if let Some(start) = pause_chain_start.take() {
-                        self.state.messages.truncate(start);
-                    }
                     return Err(kyomi_core::Error::Internal(format!(
                         "Web research did not finish: the provider paused it {MAX_PAUSE_CONTINUATIONS} times. Try a narrower question."
                     )));
                 }
                 pause_continuations += 1;
-                pause_chain_start.get_or_insert(self.state.messages.len());
+                self.pause_chain_start.get_or_insert(self.state.messages.len());
                 self.push_assistant(
                     Message::assistant(&response.content).with_provider_content(server_activity.provider_content.clone()),
                 );
                 continue;
             }
-            pause_chain_start = None;
+            self.pause_chain_start = None;
 
             // No tool calls -- this is the final response.
             if response.tool_calls.is_none() {
@@ -846,7 +868,11 @@ impl CustomAgent {
                     )
                     .await;
                     // Store as ephemeral retry context — NOT in self.state.messages.
-                    chartml_retry_messages.push(Message::assistant(content));
+                    // The failed answer keeps its provider blocks: a chain's open call is
+                    // only resolved by them.
+                    chartml_retry_messages.push(
+                        Message::assistant(content).with_provider_content(server_activity.provider_content.clone()),
+                    );
                     chartml_retry_messages.push(Message::user(format!(
                         "\u{1f916} SYSTEM: Automatic ChartML validation failed. The user has NOT seen your response yet. \
                          Please fix the following errors and then repeat your FULL response:\n\n{error_msg}"
@@ -1107,6 +1133,13 @@ impl CustomAgent {
             warn!(error = %e, "Failed to update ChartML validation retry_succeeded");
         }
 
+        // A run that ends inside a `pause_turn` chain did not finish its research.
+        if self.pause_chain_start.is_some() {
+            return Err(kyomi_core::Error::Internal(
+                "Web research did not finish before the request's limits were reached. Try a narrower question.".into(),
+            ));
+        }
+
         // Cancellation is checked before every other LLM call in this loop;
         // the wrap-up call is no exception.
         if cancel_token.is_cancelled() {
@@ -1247,44 +1280,63 @@ impl CustomAgent {
 
     /// The request options for the next LLM call.
     ///
-    /// Provider-executed web tools: which of them the turn may use (the monthly
-    /// budget and the per-turn allowance) is decided once, when the turn's first
-    /// request is built, and every request of the turn carries the same tools, so a
-    /// `pause_turn` continuation always has the tool it needs (the provider rejects
-    /// one without it). `max_uses` is the per-turn allowance. The one check made
-    /// on every request is privacy: a session holding restricted personal data may
-    /// not send queries to a third party (the same rule the native tools enforce)
-    /// and a tool call can make a session restricted mid-turn; an unknown state
-    /// fails closed. Leaving the tools out (rather than failing) lets the
-    /// conversation continue. `allow_server_tools = false` (the forced wrap-up
-    /// call) sends none. The history is sent exactly as stored, stored server-tool
-    /// blocks included, whichever tools are offered.
+    /// Provider-executed web tools. A `pause_turn` continuation resends exactly the
+    /// tools of the request it continues (the provider rejects a continuation
+    /// without its tool). Any other request offers the tools the turn may use, each
+    /// with the per-turn allowance still left as `max_uses`: the monthly budget is
+    /// checked once, when the turn's first request is built, never mid-turn. A tool
+    /// whose allowance is used up is left out of a request that is not a
+    /// continuation. A session holding restricted personal data may not send queries
+    /// to a third party (the same rule the native tools enforce) and a tool call can
+    /// make a session restricted mid-turn, so privacy is checked on every such
+    /// request; an unknown state fails closed. `allow_server_tools = false` (the
+    /// forced wrap-up call) sends none. The history is sent exactly as stored,
+    /// stored server-tool blocks included, whichever tools are offered.
     async fn call_options(&self, allow_server_tools: bool) -> crate::provider::RequestOptions {
         let mut options = self.config.request_options();
         if allow_server_tools {
-            let turn_tools = self.turn_server_tools.get_or_init(|| self.turn_start_server_tools()).await;
-            if !turn_tools.is_empty() {
-                if self.session_restricted().await {
-                    warn!("provider web tools withheld from this request: the session holds restricted personal data");
-                } else {
-                    options.server_tools = turn_tools.clone();
-                }
-            }
+            options.server_tools = if self.pause_chain_start.is_some() {
+                self.last_server_tools.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
+            } else {
+                self.turn_request_server_tools().await
+            };
         }
+        *self.last_server_tools.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = options.server_tools.clone();
         options
     }
 
-    /// The options of a request within the current turn (the turn's tools are
-    /// already decided once its first request was built).
-    #[cfg(test)]
-    async fn request_options_for_call(&self) -> crate::provider::RequestOptions {
-        self.call_options(true).await
+    /// The provider tools a non-continuation request of this turn carries.
+    async fn turn_request_server_tools(&self) -> Vec<serde_json::Value> {
+        let allowed = self.turn_server_tools.get_or_init(|| self.turn_start_server_tools()).await;
+        if allowed.is_empty() {
+            return Vec::new();
+        }
+        if self.session_restricted().await {
+            warn!("provider web tools withheld from this request: the session holds restricted personal data");
+            return Vec::new();
+        }
+        let caps = &self.tool_context.config.web_tools.caps;
+        allowed
+            .iter()
+            .filter_map(|&index| {
+                let tool = &self.config.server_tools[index];
+                let per_turn = match tool.kind {
+                    kyomi_core::web_tools::WebToolKind::Search => caps.per_turn_search,
+                    kyomi_core::web_tools::WebToolKind::Fetch => caps.per_turn_fetch,
+                };
+                let remaining = per_turn.saturating_sub(self.web_usage.get(&tool.kind).copied().unwrap_or(0));
+                (remaining > 0).then(|| tool.with_max_uses(remaining))
+            })
+            .collect()
     }
 
-    /// The options of the first request of a new turn.
+    /// The options of a request of the current turn, or (`new_turn`) of the first
+    /// request of a new one.
     #[cfg(test)]
-    async fn request_options_for_new_turn(&mut self) -> crate::provider::RequestOptions {
-        self.turn_server_tools = tokio::sync::OnceCell::new();
+    async fn request_options_for_call(&mut self, new_turn: bool) -> crate::provider::RequestOptions {
+        if new_turn {
+            self.turn_server_tools = tokio::sync::OnceCell::new();
+        }
         self.call_options(true).await
     }
 
@@ -1301,23 +1353,19 @@ impl CustomAgent {
         }
     }
 
-    /// The provider tools this turn may use, decided at the start of the turn: the
-    /// monthly budget and the per-turn allowance (as `max_uses`). Each tool left out
-    /// is logged once.
-    async fn turn_start_server_tools(&self) -> Vec<serde_json::Value> {
-        if self.config.server_tools.is_empty() {
-            return Vec::new();
-        }
+    /// The configured provider tools this turn may use (indices into
+    /// `config.server_tools`), decided at the start of the turn: the monthly budget
+    /// and the per-turn allowance. Each tool left out is logged once.
+    async fn turn_start_server_tools(&self) -> Vec<usize> {
         let ctx = &self.tool_context;
         let caps = &ctx.config.web_tools.caps;
-        let mut admitted = Vec::new();
-        for tool in &self.config.server_tools {
+        let mut allowed = Vec::new();
+        for (index, tool) in self.config.server_tools.iter().enumerate() {
             let per_turn = match tool.kind {
                 kyomi_core::web_tools::WebToolKind::Search => caps.per_turn_search,
                 kyomi_core::web_tools::WebToolKind::Fetch => caps.per_turn_fetch,
             };
-            let used = self.web_usage.get(&tool.kind).copied().unwrap_or(0);
-            let remaining = per_turn.saturating_sub(used);
+            let remaining = per_turn.saturating_sub(self.web_usage.get(&tool.kind).copied().unwrap_or(0));
             let refusal = if remaining == 0 {
                 Some(crate::web::caps::CapRefusal::PerTurn.to_string())
             } else {
@@ -1328,11 +1376,11 @@ impl CustomAgent {
                 }
             };
             match refusal {
-                None => admitted.push(tool.with_max_uses(remaining)),
+                None => allowed.push(index),
                 Some(reason) => warn!(tool = tool.kind.tool_name(), reason = %reason, "provider web tool withheld from this turn"),
             }
         }
-        admitted
+        allowed
     }
 
     /// Append an assistant message to the state. A bare `pause_turn` message (blocks
@@ -3757,11 +3805,11 @@ Second chart:\n{CHARTML_STRIPPED_NOTE}\nDone."
     #[tokio::test]
     async fn spent_budget_withholds_the_server_tool_from_the_request() {
         let (mut agent, _calls) = scripted_agent_with_config(server_tool_agent_config(), vec![], Reply::Text("x".into())).await;
-        assert_eq!(agent.request_options_for_new_turn().await.server_tools.len(), 1);
+        assert_eq!(agent.request_options_for_call(true).await.server_tools.len(), 1);
         let ctx = &agent.tool_context;
         let cap = ctx.config.web_tools.caps.workspace_monthly;
         crate::web::caps::add_usage(&ctx.kv, &ctx.workspace_id, kyomi_core::web_tools::WebToolKind::Search, cap).await.unwrap();
-        assert!(agent.request_options_for_new_turn().await.server_tools.is_empty(), "spent at the start of the turn: withheld");
+        assert!(agent.request_options_for_call(true).await.server_tools.is_empty(), "spent at the start of the turn: withheld");
     }
 
     #[tokio::test]
@@ -3854,6 +3902,33 @@ Second chart:\n{CHARTML_STRIPPED_NOTE}\nDone."
         );
     }
 
+    /// Whatever ends a run inside a `pause_turn` chain (a provider error, the
+    /// iteration limit), the run fails and keeps none of the paused chain.
+    #[tokio::test]
+    async fn any_failure_inside_a_pause_chain_keeps_none_of_the_chain() {
+        // A provider error after two pauses.
+        let (mut agent, _calls) = scripted_agent_with_config(
+            fetch_agent_config(),
+            vec![Reply::Response(live_pause_response()), Reply::Response(live_pause_response()), Reply::Failure("provider down".into())],
+            Reply::Text("unused".into()),
+        )
+        .await;
+        let error = agent.chat("go", CancellationToken::new(), None, None, None).await.expect_err("fails");
+        assert!(error.to_string().contains("provider down"), "{error}");
+        assert!(agent.state().messages.iter().all(|m| m.role != crate::types::MessageRole::Assistant), "error: nothing of the chain kept");
+
+        // The iteration limit reached while still paused.
+        let (mut agent, _calls) = scripted_agent_with_config(
+            AgentConfig { max_iterations: 3, ..fetch_agent_config() },
+            vec![],
+            Reply::Response(live_pause_response()),
+        )
+        .await;
+        let error = agent.chat("go", CancellationToken::new(), None, None, None).await.expect_err("fails");
+        assert!(error.to_string().contains("Web research did not finish"), "{error}");
+        assert!(agent.state().messages.iter().all(|m| m.role != crate::types::MessageRole::Assistant), "limit: nothing of the chain kept");
+    }
+
     #[tokio::test]
     async fn a_pause_continuation_carries_the_same_tools_even_after_the_allowance_is_used() {
         let (mut agent, calls) = scripted_agent_with_config(
@@ -3942,28 +4017,34 @@ Second chart:\n{CHARTML_STRIPPED_NOTE}\nDone."
     }
 
     #[tokio::test]
-    async fn the_turns_tools_and_allowance_are_decided_once_at_the_start_of_the_turn() {
+    async fn the_per_turn_allowance_is_spent_across_requests_but_a_continuation_resends_its_tools() {
         let (mut agent, _calls) = scripted_agent_with_config(server_tool_agent_config(), vec![], Reply::Text("x".into())).await;
-        let first = agent.request_options_for_new_turn().await;
+        let first = agent.request_options_for_call(true).await;
         assert_eq!(first.server_tools[0]["max_uses"], 5);
-        // Usage reported mid-turn does not change what the rest of the turn sends
-        // (a `pause_turn` continuation without its tool is rejected by the provider).
+        agent.web_usage.insert(kyomi_core::web_tools::WebToolKind::Search, 3);
+        assert_eq!(agent.request_options_for_call(false).await.server_tools[0]["max_uses"], 2, "only what is left");
+        // A `pause_turn` continuation resends the tools of the request it continues,
+        // whatever the allowance now says (the provider rejects one without them).
+        agent.pause_chain_start = Some(0);
         agent.web_usage.insert(kyomi_core::web_tools::WebToolKind::Search, 5);
-        assert_eq!(agent.request_options_for_call().await.server_tools, first.server_tools, "same tools within the turn");
-        // The next turn starts from what its first request finds: the allowance is spent.
-        assert!(agent.request_options_for_new_turn().await.server_tools.is_empty());
+        let continuation = agent.request_options_for_call(false).await;
+        assert_eq!(continuation.server_tools[0]["max_uses"], 2, "same tools as the request being continued");
+        agent.pause_chain_start = None;
+        assert!(agent.request_options_for_call(false).await.server_tools.is_empty(), "spent: left out of an ordinary request");
+        // The next turn finds the allowance spent at its start.
+        assert!(agent.request_options_for_call(true).await.server_tools.is_empty());
     }
 
     #[tokio::test]
     async fn restricted_personal_data_sessions_never_get_provider_web_tools() {
         let (mut agent, _calls) = scripted_agent_with_config(server_tool_agent_config(), vec![], Reply::Text("x".into())).await;
-        assert_eq!(agent.request_options_for_call().await.server_tools.len(), 1);
+        assert_eq!(agent.request_options_for_call(false).await.server_tools.len(), 1);
         crate::test_support::seed_user_and_workspace(&agent.tool_context.db).await;
         kyomi_core::db_execute!(&agent.tool_context.db, "INSERT INTO chat_sessions (session_id,user_id,workspace_id) VALUES ('s-web','user-a','ws-1')").unwrap();
         agent.tool_context.session_id = Some("s-web".into());
-        assert_eq!(agent.request_options_for_call().await.server_tools.len(), 1, "unrestricted session");
+        assert_eq!(agent.request_options_for_call(false).await.server_tools.len(), 1, "unrestricted session");
         kyomi_core::db_execute!(&agent.tool_context.db, "UPDATE chat_sessions SET personal_data_owner_id='user-a' WHERE session_id='s-web'").unwrap();
-        assert!(agent.request_options_for_call().await.server_tools.is_empty(), "restricted session is withheld");
+        assert!(agent.request_options_for_call(false).await.server_tools.is_empty(), "restricted session is withheld");
     }
 
     #[tokio::test]

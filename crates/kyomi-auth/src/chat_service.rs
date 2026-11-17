@@ -1116,7 +1116,8 @@ fn decode_session_messages(rows: Vec<MessageWithSenderRow>, encryption_key: &[u8
 /// reader could see the wrong status) that this alternative would
 /// otherwise require.
 ///
-/// Returns the message_id.
+/// Returns the message_id. A thin wrapper over [`insert_message`] for callers
+/// that pass the fields one by one.
 #[allow(clippy::too_many_arguments)]
 pub async fn add_message(
     db: &DbPool,
@@ -2251,11 +2252,14 @@ pub struct AgentMessage {
 
 /// Upsert of one message's provider blocks (KYO-969); `$2` is the encrypted
 /// envelope. Shared by every write path so they cannot drift.
-pub const PROVIDER_CONTENT_UPSERT_SQL: &str = "INSERT INTO chat_message_provider_content (message_id, blocks) VALUES ($1, $2) \
+pub(crate) const PROVIDER_CONTENT_UPSERT_SQL: &str = "INSERT INTO chat_message_provider_content (message_id, blocks) VALUES ($1, $2) \
      ON CONFLICT (message_id) DO UPDATE SET blocks = EXCLUDED.blocks";
 
+/// Reads one message's stored (encrypted) provider blocks; `$1` is the message id.
+pub(crate) const PROVIDER_CONTENT_SELECT_SQL: &str = "SELECT blocks FROM chat_message_provider_content WHERE message_id = $1";
+
 /// Removes one message's stored provider blocks; `$1` is the message id.
-pub const PROVIDER_CONTENT_DELETE_SQL: &str = "DELETE FROM chat_message_provider_content WHERE message_id = $1";
+pub(crate) const PROVIDER_CONTENT_DELETE_SQL: &str = "DELETE FROM chat_message_provider_content WHERE message_id = $1";
 
 /// The column every agent-history query selects so no loader can forget the
 /// stored provider blocks. Expands to a string literal for `concat!`.
@@ -2284,7 +2288,7 @@ struct AgentMessageRow {
 /// Decrypt a message's stored provider blocks (KYO-969). `None` when the message
 /// has none; a stored row that cannot be decrypted or is not an array of blocks is
 /// an error, not a silent change of what the model sees.
-pub fn restore_provider_content(
+pub(crate) fn restore_provider_content(
     message_id: &str,
     stored: Option<&serde_json::Value>,
     encryption_key: &[u8; 32],
@@ -2371,12 +2375,14 @@ pub async fn get_agent_messages(
             }
         };
 
-        // Skip empty assistant placeholders (no content AND no tool_calls).
-        if row.role == "assistant" && content.trim().is_empty() && row.tool_calls.is_none() {
+        let provider_content = restore_provider_content(&row.message_id, row.provider_content.as_ref(), encryption_key)?;
+
+        // Skip empty assistant placeholders (no content, no tool_calls, no stored
+        // provider blocks): a row that carries blocks is part of the history.
+        if row.role == "assistant" && content.trim().is_empty() && row.tool_calls.is_none() && provider_content.is_none() {
             continue;
         }
 
-        let provider_content = restore_provider_content(&row.message_id, row.provider_content.as_ref(), encryption_key)?;
         result.push(AgentMessage {
             message_id: row.message_id,
             role: row.role,

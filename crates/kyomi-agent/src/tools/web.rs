@@ -457,6 +457,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_provider_fetch_payload_has_the_shape_of_the_real_fetch_payload() {
+        let tool = WebFetchTool::new(Arc::new(FakeFetch), caps());
+        let real = parse(&tool.execute(json!({"url": "https://example.com"}), &ctx().await).await.unwrap());
+        let sources = vec![WebSource {
+            title: "Page".into(),
+            url: "https://example.com/".into(),
+            snippet: String::new(),
+            score: None,
+            published: None,
+        }];
+        let shown = parse(&display_output(kyomi_core::web_tools::WebToolKind::Fetch, "https://example.com", &sources));
+        for key in shown.as_object().unwrap().keys() {
+            assert!(real.get(key).is_some(), "the real fetch payload has `{key}`");
+        }
+        assert_eq!(shown["tool"], real["tool"]);
+        assert_eq!(shown["available"], real["available"]);
+        assert_eq!(shown["url"], "https://example.com/");
+    }
+
+    #[tokio::test]
     async fn titles_urls_and_dates_from_the_web_never_reach_the_model_unscreened() {
         let provider = Arc::new(FakeSearch {
             seen: Mutex::default(),

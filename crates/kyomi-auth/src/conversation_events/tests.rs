@@ -1748,6 +1748,22 @@ async fn lifecycle_review_regressions(db: &DbPool) {
         .fenced_message(&conversation, &receipt.run_id, &lease, 1103, &with_blocks)
         .await
         .unwrap();
+    // A row with no text but stored blocks is history, not an empty placeholder.
+    let only_blocks = MessageWrite {
+        message_id: uuid::Uuid::new_v4().to_string(),
+        role: "assistant".into(),
+        content: String::new(),
+        tool_call_id: None,
+        name: None,
+        tool_calls: None,
+        provider_content: Some(blocks.clone()),
+    };
+    store.fenced_message(&conversation, &receipt.run_id, &lease, 1104, &only_blocks).await.unwrap();
+    let history_with_empty = crate::chat_service::get_agent_messages(db, &KEY, &sid, None).await.unwrap();
+    assert!(
+        history_with_empty.iter().any(|item| item.message_id == only_blocks.message_id && item.provider_content.as_ref() == Some(&blocks)),
+        "get_agent_messages keeps a blocks-only row"
+    );
     // A retried write of the same message is a duplicate; with different blocks it
     // is a conflict, like any other differing field.
     assert!(
@@ -2071,6 +2087,10 @@ async fn lifecycle_review_regressions(db: &DbPool) {
     // KYO-969: the run-claim query loads the stored provider blocks too.
     let claimed_with_blocks = restored.context.messages.iter().find(|item| item.message_id == with_blocks.message_id).unwrap();
     assert_eq!(claimed_with_blocks.provider_content.as_ref(), Some(&blocks));
+    assert!(
+        restored.context.messages.iter().any(|item| item.message_id == only_blocks.message_id),
+        "the claim loader keeps a blocks-only row too"
+    );
     assert_eq!(
         restored
             .context
