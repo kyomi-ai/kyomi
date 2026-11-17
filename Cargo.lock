@@ -6425,6 +6425,7 @@ dependencies = [
  "kyomi-datasource-server",
  "kyomi-embed",
  "kyomi-knowledge",
+ "kyomi-mcp-client",
  "kyomi-test-db",
  "kyomi-test-tracing",
  "kyomi-types",
@@ -6445,6 +6446,7 @@ dependencies = [
  "typst",
  "typst-as-lib",
  "typst-pdf",
+ "url",
  "uuid",
  "web-push-native",
  "wiremock",
@@ -6843,6 +6845,7 @@ dependencies = [
  "chrono",
  "serde",
  "serde_json",
+ "unicode-general-category",
 ]
 
 [[package]]

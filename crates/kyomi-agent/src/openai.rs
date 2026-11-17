@@ -224,8 +224,12 @@ impl OpenAIProvider {
 
         // Omit tools field entirely if empty — some OpenAI-compatible APIs
         // error on an empty tools array.
-        if !tools.is_empty() {
-            body["tools"] = json!(Self::convert_tools_to_openai(tools));
+        if !tools.is_empty() || !options.server_tools.is_empty() {
+            // Provider-executed server tools (OpenRouter `openrouter:web_*`) ride
+            // in the same `tools` array as the function tools (KYO-969).
+            let mut all = Self::convert_tools_to_openai(tools);
+            all.extend(options.server_tools.iter().cloned());
+            body["tools"] = json!(all);
         }
 
         if let Some(temp) = options.temperature {
@@ -1549,5 +1553,20 @@ mod tests {
         assert_eq!(body["temperature"], json!(0.1f32));
         let body = body_with(&RequestOptions::new(1024).with_temperature(None));
         assert!(body.get("temperature").is_none());
+    }
+
+    #[test]
+    fn server_tools_share_the_tools_array_with_function_tools() {
+        let options = RequestOptions::new(100)
+            .with_server_tools(vec![json!({"type": "openrouter:web_search", "parameters": {"max_uses": 5}})]);
+        let tools = [Tool { name: "noop".into(), description: "d".into(), parameters: json!({"type": "object"}) }];
+        let body = OpenAIProvider::build_request_body("m", vec![], &tools, &options);
+        let sent = body["tools"].as_array().unwrap();
+        assert_eq!(sent.len(), 2);
+        assert_eq!(sent[0]["function"]["name"], "noop");
+        assert_eq!(sent[1]["type"], "openrouter:web_search");
+        let only = OpenAIProvider::build_request_body("m", vec![], &[], &options);
+        assert_eq!(only["tools"].as_array().unwrap().len(), 1);
+        assert!(OpenAIProvider::build_request_body("m", vec![], &[], &RequestOptions::new(100)).get("tools").is_none());
     }
 }

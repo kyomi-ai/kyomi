@@ -47,6 +47,9 @@ impl AgentTool for NativePrivacyTool {
     fn is_mcp_only(&self) -> bool {
         self.0.is_mcp_only()
     }
+    fn is_internal_only(&self) -> bool {
+        self.0.is_internal_only()
+    }
     fn annotations(&self) -> Option<crate::types::ToolAnnotations> {
         self.0.annotations()
     }
@@ -172,6 +175,15 @@ async fn inherit(ctx: &ToolContext) -> kyomi_core::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    /// Web search/fetch send queries to a third party, so they must not be
+    /// classed as read-only: a session holding restricted personal data is
+    /// refused every non-read native tool (KYO-969).
+    #[test]
+    fn web_tools_are_not_read_only_so_restricted_sessions_cannot_use_them() {
+        assert!(!super::reads_only("web_search"));
+        assert!(!super::reads_only("web_fetch"));
+    }
+
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
     struct PublishingTool {

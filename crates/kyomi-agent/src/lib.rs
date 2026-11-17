@@ -54,6 +54,7 @@ pub mod thinking;
 pub mod tools;
 pub mod types;
 pub mod watch_execution;
+pub mod web;
 pub mod web_push;
 
 pub use adapter::{AssistantMessagePersistence, ChatAgentAdapter, UserMessagePersistence};
