@@ -564,21 +564,16 @@ pub async fn update_watch_llm(
         (w::KEY_BATCH_FAILURE, settings.batch_failure.map(|p| p.as_str().into())),
     ];
     let found = crate::workspace_service::update_workspace_settings_with(db, workspace_id, |current| {
-        let mut s = current.clone().unwrap_or_else(|| serde_json::json!({}));
-        if !s.get("custom_settings").is_some_and(serde_json::Value::is_object) {
-            s["custom_settings"] = serde_json::json!({});
-        }
-        for (k, v) in &edits {
-            match v {
-                Some(v) => s["custom_settings"][*k] = v.clone(),
-                None => {
-                    if let Some(cs) = s["custom_settings"].as_object_mut() {
-                        cs.remove(*k);
-                    }
+        Ok(edits.iter().fold(
+            current.clone().unwrap_or_else(|| serde_json::json!({})),
+            |settings, (key, value)| {
+                let settings = Some(settings);
+                match value {
+                    Some(v) => merge_custom_settings_key(&settings, key, v.clone()),
+                    None => clear_custom_settings_key(&settings, key),
                 }
-            }
-        }
-        Ok(s)
+            },
+        ))
     })
     .await
     .map_err(|e| WorkspaceAiConfigError::Json(e.to_string()))?;
@@ -667,11 +662,11 @@ fn merge_default_model(
 }
 
 
-/// Internal helper: non-destructively write `settings.custom_settings[key] = model`.
+/// Internal helper: non-destructively write `settings.custom_settings[key] = value`.
 fn merge_custom_settings_key(
     settings: &Option<serde_json::Value>,
     key: &str,
-    model: &str,
+    value: impl Into<serde_json::Value>,
 ) -> serde_json::Value {
     let mut s = settings
         .clone()
@@ -689,9 +684,18 @@ fn merge_custom_settings_key(
     }
 
     if let Some(cs) = s.get_mut("custom_settings").and_then(|v| v.as_object_mut()) {
-        cs.insert(key.to_string(), serde_json::json!(model));
+        cs.insert(key.to_string(), value.into());
     }
 
+    s
+}
+
+/// Internal helper: remove `settings.custom_settings[key]`; unchanged when absent.
+fn clear_custom_settings_key(settings: &Option<serde_json::Value>, key: &str) -> serde_json::Value {
+    let mut s = settings.clone().unwrap_or_else(|| serde_json::json!({}));
+    if let Some(cs) = s.get_mut("custom_settings").and_then(|v| v.as_object_mut()) {
+        cs.remove(key);
+    }
     s
 }
 

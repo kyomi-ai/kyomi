@@ -182,6 +182,11 @@ pub async fn begin_call(
         .ok_or_else(|| db_err("record call", "row vanished after insert"))
 }
 
+/// SQL predicate: the run is not a batch-mode run. A batch run waits hours for its
+/// provider, so the short-lived-run rules (stale expiry, orphan recovery, shutdown
+/// cleanup) must not time it out; it has its own deadline and reaper.
+pub const NOT_A_BATCH_RUN: &str = "COALESCE(llm_mode, 'realtime') <> 'batch'";
+
 /// Who a run's usage is billed to.
 pub struct UsageBill<'a> {
     /// Decrypts the stored vendor responses.

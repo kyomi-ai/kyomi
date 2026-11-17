@@ -503,7 +503,7 @@ pub fn ExecutionLogViewer(
                                                     on_ask_about_chart=on_ask_about_chart
                                                 />
                                             }.into_any()
-                                        } else if status == "running" || status == "waiting_batch" {
+                                        } else if crate::types::watch_execution_in_flight(&status) {
                                             view! {
                                                 <div class="flex items-center gap-2 text-muted-foreground">
                                                     <Spinner/>

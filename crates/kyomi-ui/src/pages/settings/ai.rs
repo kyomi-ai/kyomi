@@ -307,6 +307,25 @@ fn TuningField(
     }
 }
 
+/// The card chrome shared by the tuning-style settings cards: a title, a
+/// description and the body (a form behind a loading skeleton).
+#[component]
+fn SettingsCard(title: &'static str, description: &'static str, children: Children) -> impl IntoView {
+    view! {
+        <Card>
+            <CardContent>
+                <div class="space-y-4 p-2">
+                    <div>
+                        <h2 class="text-xl font-display text-foreground">{title}</h2>
+                        <p class="text-sm text-muted-foreground">{description}</p>
+                    </div>
+                    {children()}
+                </div>
+            </CardContent>
+        </Card>
+    }
+}
+
 #[component]
 fn LlmTuningCard() -> impl IntoView {
     let tuning = Resource::new(|| (), |_| get_llm_tuning());
@@ -316,44 +335,34 @@ fn LlmTuningCard() -> impl IntoView {
     let resolved = Resource::new(|| (), |_| get_resolved_ai_provider());
 
     view! {
-        <Card>
-            <CardContent>
-                <div class="space-y-4 p-2">
-                    <div>
-                        <h2 class="text-xl font-display text-foreground">"LLM Tuning"</h2>
-                        <p class="text-sm text-muted-foreground">
-                            "Reasoning effort and temperature for this workspace. Leave a field empty to use the instance value (shown as the placeholder); if neither is set, nothing is sent and the provider's own default applies. A value you enter is sent exactly as written."
-                        </p>
-                    </div>
-                    <Transition fallback=move || view! { <Skeleton class="h-40 w-full"/> }>
-                        {move || Suspend::new(async move {
-                            match tuning.await {
-                                Ok(view_data) => {
-                                    let model_id = match resolved.await {
-                                        Ok(ResolvedAiProviderView::Resolved { model, .. }) => model,
-                                        _ => None,
-                                    };
-                                    let model_efforts = models
-                                        .await
-                                        .ok()
-                                        .and_then(|list| {
-                                            list.into_iter().find(|m| Some(&m.id) == model_id.as_ref())
-                                        })
-                                        .map(|m| (m.supported_efforts, m.default_effort));
-                                    view! { <LlmTuningForm data=view_data model_efforts/> }.into_any()
-                                }
-                                Err(e) => view! {
-                                    <Alert variant=AlertVariant::Error>
-                                        <AlertTitle>"Couldn't load LLM tuning"</AlertTitle>
-                                        <AlertDescription>{e.to_string()}</AlertDescription>
-                                    </Alert>
-                                }.into_any(),
-                            }
-                        })}
-                    </Transition>
-                </div>
-            </CardContent>
-        </Card>
+        <SettingsCard title="LLM Tuning" description="Reasoning effort and temperature for this workspace. Leave a field empty to use the instance value (shown as the placeholder); if neither is set, nothing is sent and the provider's own default applies. A value you enter is sent exactly as written.">
+            <Transition fallback=move || view! { <Skeleton class="h-40 w-full"/> }>
+                {move || Suspend::new(async move {
+                    match tuning.await {
+                        Ok(view_data) => {
+                            let model_id = match resolved.await {
+                                Ok(ResolvedAiProviderView::Resolved { model, .. }) => model,
+                                _ => None,
+                            };
+                            let model_efforts = models
+                                .await
+                                .ok()
+                                .and_then(|list| {
+                                    list.into_iter().find(|m| Some(&m.id) == model_id.as_ref())
+                                })
+                                .map(|m| (m.supported_efforts, m.default_effort));
+                            view! { <LlmTuningForm data=view_data model_efforts/> }.into_any()
+                        }
+                        Err(e) => view! {
+                            <Alert variant=AlertVariant::Error>
+                                <AlertTitle>"Couldn't load LLM tuning"</AlertTitle>
+                                <AlertDescription>{e.to_string()}</AlertDescription>
+                            </Alert>
+                        }.into_any(),
+                    }
+                })}
+            </Transition>
+        </SettingsCard>
     }
 }
 
@@ -361,31 +370,21 @@ fn LlmTuningCard() -> impl IntoView {
 fn WatchLlmCard() -> impl IntoView {
     let watch_llm = Resource::new(|| (), |_| get_watch_llm());
     view! {
-        <Card>
-            <CardContent>
-                <div class="space-y-4 p-2">
-                    <div>
-                        <h2 class="text-xl font-display text-foreground">"Watch LLM"</h2>
-                        <p class="text-sm text-muted-foreground">
-                            "Run watches on their own provider, model or key, and optionally on the provider's batch API. Leave a field empty to use the instance default (shown as the placeholder) or the main LLM. Reasoning effort and temperature for watches are set in LLM Tuning above."
-                        </p>
-                    </div>
-                    <Transition fallback=move || view! { <Skeleton class="h-40 w-full"/> }>
-                        {move || Suspend::new(async move {
-                            match watch_llm.await {
-                                Ok(data) => view! { <WatchLlmForm data/> }.into_any(),
-                                Err(e) => view! {
-                                    <Alert variant=AlertVariant::Error>
-                                        <AlertTitle>"Couldn't load watch LLM settings"</AlertTitle>
-                                        <AlertDescription>{e.to_string()}</AlertDescription>
-                                    </Alert>
-                                }.into_any(),
-                            }
-                        })}
-                    </Transition>
-                </div>
-            </CardContent>
-        </Card>
+        <SettingsCard title="Watch LLM" description="Run watches on their own provider, model or key, and optionally on the provider's batch API. Leave a field empty to use the instance default (shown as the placeholder) or the main LLM. Reasoning effort and temperature for watches are set in LLM Tuning above.">
+            <Transition fallback=move || view! { <Skeleton class="h-40 w-full"/> }>
+                {move || Suspend::new(async move {
+                    match watch_llm.await {
+                        Ok(data) => view! { <WatchLlmForm data/> }.into_any(),
+                        Err(e) => view! {
+                            <Alert variant=AlertVariant::Error>
+                                <AlertTitle>"Couldn't load watch LLM settings"</AlertTitle>
+                                <AlertDescription>{e.to_string()}</AlertDescription>
+                            </Alert>
+                        }.into_any(),
+                    }
+                })}
+            </Transition>
+        </SettingsCard>
     }
 }
 

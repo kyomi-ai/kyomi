@@ -527,8 +527,9 @@ impl WatchScheduler {
                  error_message = 'Execution orphaned — recovered after server restart', \
                  completed_at = {now_fn} \
              WHERE status = 'running' \
-               AND COALESCE(llm_mode, 'realtime') <> 'batch' \
-               AND started_at < $1"
+               AND {not_batch} \
+               AND started_at < $1",
+            not_batch = watch_batch_service::NOT_A_BATCH_RUN
         );
         // A batch-mode run is exempt from the 30-minute rule above (it waits for
         // hours), but not forever: far past its own deadline it is stopped.
@@ -813,8 +814,9 @@ impl WatchScheduler {
                          error_message = 'Execution interrupted by scheduler shutdown', \
                          completed_at = {now_fn} \
                      WHERE status = 'running' \
-                       AND COALESCE(llm_mode, 'realtime') <> 'batch' \
-                       AND watch_id = $1"
+                       AND {not_batch} \
+                       AND watch_id = $1",
+                    not_batch = watch_batch_service::NOT_A_BATCH_RUN
                 );
                 match kyomi_core::db_execute!(self.db, &sql, wid) {
                     Ok(res) => total_marked += res.rows_affected(),

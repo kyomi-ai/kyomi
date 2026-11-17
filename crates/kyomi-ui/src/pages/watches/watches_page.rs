@@ -195,7 +195,7 @@ fn WatchCard(
                                     view! { <Icon icon=phosphor_leptos::CHECK_CIRCLE attr:class="h-3 w-3" /> }.into_any()
                                 } else if status == "error" {
                                     view! { <Icon icon=phosphor_leptos::X_CIRCLE attr:class="h-3 w-3" /> }.into_any()
-                                } else if status == "running" || status == "waiting_batch" {
+                                } else if crate::types::watch_execution_in_flight(&status) {
                                     view! { <Icon icon=phosphor_leptos::CIRCLE_NOTCH attr:class="h-3 w-3 animate-spin" /> }.into_any()
                                 } else {
                                     view! { <Icon icon=phosphor_leptos::CHECK_CIRCLE attr:class="h-3 w-3" /> }.into_any()

@@ -1404,8 +1404,11 @@ pub async fn can_run_watch_now(
     let stale_count: i64 = kyomi_core::db_fetch_scalar!(
         db,
         i64,
-        "SELECT COUNT(*) FROM watch_executions WHERE watch_id = $1 AND status = 'running' \
-           AND COALESCE(llm_mode, 'realtime') <> 'batch' AND started_at < $2",
+        &format!(
+            "SELECT COUNT(*) FROM watch_executions WHERE watch_id = $1 AND status = 'running' \
+               AND {} AND started_at < $2",
+            crate::watch_batch_service::NOT_A_BATCH_RUN
+        ),
         watch_id,
         stale_cutoff
     )
@@ -1419,8 +1422,9 @@ pub async fn can_run_watch_now(
                SET status = 'error', completed_at = {now},
                    error_message = 'Execution timed out after 5 minutes'
                WHERE watch_id = $1 AND status = 'running'
-                 AND COALESCE(llm_mode, 'realtime') <> 'batch' AND started_at < $2"#,
+                 AND {not_batch} AND started_at < $2"#,
             now = sql_compat::now(is_pg),
+            not_batch = crate::watch_batch_service::NOT_A_BATCH_RUN,
         );
 
         kyomi_core::db_execute!(db, &expire_sql, watch_id, stale_cutoff)

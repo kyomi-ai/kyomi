@@ -192,6 +192,12 @@ pub struct WatchListItem {
     pub slack_channel_name: Option<String>,
 }
 
+/// Whether a watch execution status means the run is still in flight: executing
+/// now, or (batch mode) waiting on the provider's batch.
+pub fn watch_execution_in_flight(status: &str) -> bool {
+    matches!(status, "running" | "waiting_batch")
+}
+
 /// A watch execution record.
 ///
 /// Maps from `kyomi_core::models::WatchExecution` with timestamps converted to
