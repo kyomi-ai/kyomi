@@ -1,4 +1,4 @@
--- KYO-973: see the PostgreSQL migration 20261116000100.
+-- KYO-973: see the PostgreSQL migration 20261118000100.
 ALTER TABLE watch_executions ADD COLUMN llm_provider TEXT;
 ALTER TABLE watch_executions ADD COLUMN llm_model TEXT;
 ALTER TABLE watch_executions ADD COLUMN llm_mode TEXT;
