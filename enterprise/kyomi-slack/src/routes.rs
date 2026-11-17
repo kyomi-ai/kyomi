@@ -1954,8 +1954,10 @@ async fn run_slack_query(
             user_message_id,
         )),
         // Slack never pre-inserts an assistant placeholder — mirrors
-        // copilot (KYO-572) and watch execution.
-        assistant_message_persistence: kyomi_agent::AssistantMessagePersistence::AdapterInserts(None),
+        // copilot (KYO-572) and watch execution. The id is minted here so the
+        // saved row and the tracker's/metadata's id are one and the same
+        // (KYO-976).
+        assistant_message_persistence: kyomi_agent::AssistantMessagePersistence::adapter_inserts_with_new_id(),
         conversation_history: None,
         user_display_name: "Kyomi Slack".to_string(),
         context_window: 0,

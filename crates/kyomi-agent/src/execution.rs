@@ -171,7 +171,7 @@ impl Default for AgentExecutionConfig {
             max_tokens: 4096,
             component: "custom_agent".into(),
             user_message_persistence: UserMessagePersistence::AdapterPersists(None),
-            assistant_message_persistence: AssistantMessagePersistence::AdapterInserts(None),
+            assistant_message_persistence: AssistantMessagePersistence::default(),
             conversation_history: None,
             user_display_name: "Unknown".to_string(),
             context_window: 0,
@@ -533,18 +533,22 @@ pub async fn execute_agent_chat(
     );
 
     // 8. Resolve the assistant message id.
-    //    `AssistantMessagePersistence::tag_id()` covers both arms: for
-    //    `CallerPreInserted` (chat — KYO-493) this is the id of the
-    //    placeholder row `prepare_chat_dispatch` already wrote; for
-    //    `AdapterInserts` (copilot, Slack, watch) it's either the caller's
-    //    chosen id or, if none, freshly generated here — either way no row
-    //    exists for it yet, and `persist_after_chat()` INSERTs the real
-    //    response under it once the loop produces one.
+    //    Every `AssistantMessagePersistence` variant carries the id the
+    //    caller chose (KYO-976): for `CallerPreInserted` (chat — KYO-493)
+    //    it is the placeholder row `prepare_chat_dispatch` already wrote;
+    //    for `AdapterInserts` (copilot, Slack, watch) no row exists yet and
+    //    `persist_after_chat()` INSERTs the real response under it. The
+    //    same id feeds the tracker, step 14's metadata write and step 15b's
+    //    full-text rows, so they cannot diverge from the saved row.
     let assistant_message_id = config
         .assistant_message_persistence
         .tag_id()
         .map(str::to_string)
-        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        .ok_or_else(|| {
+            kyomi_core::Error::Internal(
+                "assistant message persistence carries no message id".to_string(),
+            )
+        })?;
 
     // 9. Create thinking tracker.
     // Context window comes from the provider (which gets it from the workspace
@@ -759,18 +763,37 @@ pub async fn execute_agent_chat(
         // anything back. Logged at error level when it carries content —
         // unlike a metadata-only failure, that loses the only durable copy
         // of an error/cancellation turn's outcome.
-        if let Err(e) =
-            chat_service::update_message(db, encryption_key, &assistant_message_id, content, Some(&metadata), Some(message_status))
-                .await
+        match chat_service::update_message(
+            db,
+            encryption_key,
+            &assistant_message_id,
+            content,
+            Some(&metadata),
+            Some(message_status),
+        )
+        .await
         {
-            if content.is_some() {
+            Ok(true) => {}
+            // No row carries this id: the thinking events, token usage and
+            // terminal status went nowhere. This is the signature of an id
+            // mismatch (KYO-976), so it must be loud, not a silent `false`.
+            Ok(false) => {
+                error!(
+                    session_id = %config.session_id,
+                    assistant_message_id = %assistant_message_id,
+                    "Terminal assistant message update matched no row — thinking events, \
+                     token usage and status were not saved"
+                );
+            }
+            Err(e) if content.is_some() => {
                 error!(
                     session_id = %config.session_id,
                     assistant_message_id = %assistant_message_id,
                     error = %e,
                     "Failed to finalize assistant message — terminal content/status may be lost"
                 );
-            } else {
+            }
+            Err(e) => {
                 tracing::warn!(error = %e, "Failed to attach metadata to assistant message (non-fatal)");
             }
         }
@@ -1790,7 +1813,7 @@ mod tests {
         assert_eq!(config.component, "custom_agent");
         assert!(matches!(
             config.assistant_message_persistence,
-            AssistantMessagePersistence::AdapterInserts(None)
+            AssistantMessagePersistence::AdapterInserts(ref id) if !id.is_empty()
         ));
         assert_eq!(config.context_window, 0);
         // Empty is the correct *test/placeholder* default (see field doc) —
