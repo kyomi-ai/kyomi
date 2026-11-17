@@ -478,3 +478,25 @@ impl AgentTool for SucceedingTool {
         Ok("{\"ok\":true}".into())
     }
 }
+
+// ---------------------------------------------------------------------------
+// OpenAI-compatible HTTP fake — a real network boundary for whole-turn tests
+// ---------------------------------------------------------------------------
+
+/// Serve `reply` as the body of every `POST /chat/completions` and return the
+/// running server; point `LLM_BASE_URL` at its `uri()`. The code under test
+/// (`execute_agent_chat`) builds its real OpenAI provider and speaks real HTTP
+/// to this server; only the remote LLM is faked. Keep the server alive for the
+/// duration of the turn.
+pub(crate) async fn spawn_openai_fake(reply: serde_json::Value) -> wiremock::MockServer {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, ResponseTemplate};
+
+    let server = wiremock::MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(reply))
+        .mount(&server)
+        .await;
+    server
+}

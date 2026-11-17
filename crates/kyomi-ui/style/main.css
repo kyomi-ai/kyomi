@@ -296,15 +296,17 @@ html {
 /* Table chartml extends flush to the card edge — axis-free charts don't
  * need the 16px breathing room that bar/line/scatter/pie need for tick
  * labels, so tables get `padding: 0` overriding the default above when
- * the chart content is a chartml-table. KYO-14. */
-.chart-card:has(.chartml-table) > div:not(:first-child) {
+ * the chart content is a chartml-table. `[data-chart-type="table"]`
+ * (set until the first render) applies the same rules while the table is
+ * still loading (KYO-977). */
+.chart-card:is(:has(.chartml-table), [data-chart-type="table"]) > div:not(:first-child) {
   padding: 0;
 }
 
 /* Tables don't need the chartml-rendered title (the Instrument Serif heading
  * inside the chart) — the markdown heading above the chart-card already
  * names the content. The hover ChartHeaderBar with refresh/actions stays. */
-.chart-card:has(.chartml-table) .chart-title {
+.chart-card:is(:has(.chartml-table), [data-chart-type="table"]) .chart-title {
   display: none;
 }
 
@@ -1170,21 +1172,10 @@ button:focus-visible, a:focus-visible, [role="button"]:focus-visible {
 .kode-toolbar { overflow-y: hidden; }
 
 
-/* KYO-214: chartml-container must grow to fill the height-reserve wrapper
- * so the absolutely-positioned loading indicator centers vertically within
- * the full chart tile, not just the container's natural content height. */
-.chart-card .chartml-container {
-  flex: 1 1 0%;
-  min-height: 0;
-}
-
-/* KYO-9: overlay the loading state so it doesn't stack below existing chart
- * content and cause layout shift on refresh. The animated Kyomi logo replaces
- * the default CSS spinner. `.chartml-container` already sets `position:
- * relative` inline, so `inset: 0` anchors correctly to the chart tile. */
+/* KYO-977: positioning is chartml-leptos's (in flow on first load,
+ * absolute over the old chart on refresh, set inline). Do not set `position`
+ * or `inset` here. The animated Kyomi logo replaces the default spinner. */
 .chartml-loading {
-  position: absolute;
-  inset: 0;
   z-index: 5;
   background-color: var(--color-card, #ffffff);
   opacity: 0.9;

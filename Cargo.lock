@@ -6449,6 +6449,7 @@ dependencies = [
  "url",
  "uuid",
  "web-push-native",
+ "wiremock",
 ]
 
 [[package]]

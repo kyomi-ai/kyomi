@@ -1088,6 +1088,54 @@ fn decode_session_messages(rows: Vec<MessageWithSenderRow>, encryption_key: &[u8
     Ok(result)
 }
 
+/// The values of one `chat_messages` INSERT; see [`insert_message_row!`].
+struct MessageRow<'a> {
+    message_id: &'a str,
+    session_id: &'a str,
+    role: &'a str,
+    encrypted_content: &'a str,
+    sent_by_user_id: Option<&'a str>,
+    created_at: chrono::DateTime<Utc>,
+    current_time_user_tz: Option<&'a str>,
+    message_source: Option<&'a str>,
+    encrypted_metadata: Option<&'a str>,
+    tool_call_id: Option<&'a str>,
+    tool_name: Option<&'a str>,
+    tool_calls: Option<&'a serde_json::Value>,
+    status: &'a str,
+}
+
+/// The one `chat_messages` INSERT, run on any sqlx executor — a pool
+/// ([`add_message`]) or an open transaction
+/// ([`add_assistant_message_with_thinking_details`]).
+macro_rules! insert_message_row {
+    ($executor:expr, $row:expr) => {{
+        let row = &$row;
+        sqlx::query(
+            "INSERT INTO chat_messages \
+             (message_id, session_id, role, content, sent_by_user_id, pinned, \
+              created_at, current_time_user_tz, message_source, extra_metadata, \
+              tool_call_id, tool_name, tool_calls, status) \
+             VALUES ($1, $2, $3, $4, $5, false, $6, $7, $8, $9, $10, $11, $12, $13)",
+        )
+        .bind(row.message_id)
+        .bind(row.session_id)
+        .bind(row.role)
+        .bind(row.encrypted_content)
+        .bind(row.sent_by_user_id)
+        .bind(row.created_at)
+        .bind(row.current_time_user_tz)
+        .bind(row.message_source)
+        .bind(row.encrypted_metadata)
+        .bind(row.tool_call_id)
+        .bind(row.tool_name)
+        .bind(row.tool_calls as Option<&serde_json::Value>)
+        .bind(row.status)
+        .execute($executor)
+        .await
+    }};
+}
+
 /// Add a message to a session. Encrypts content and metadata before storage.
 ///
 /// `message_source` (`"web"`, `"slack"`, `"mcp"`, `"Kyomi Watch"`, ...) is
@@ -1166,12 +1214,6 @@ pub struct NewMessage<'a> {
     pub status: MessageStatus,
 }
 
-const INSERT_MESSAGE_SQL: &str = "INSERT INTO chat_messages \
-     (message_id, session_id, role, content, sent_by_user_id, pinned, \
-      created_at, current_time_user_tz, message_source, extra_metadata, \
-      tool_call_id, tool_name, tool_calls, status) \
-     VALUES ($1, $2, $3, $4, $5, false, $6, $7, $8, $9, $10, $11, $12, $13)";
-
 /// Insert a message, with the provider's verbatim blocks for it (KYO-969) in the
 /// same transaction when given, so a message never exists with half of its replay
 /// state. Returns the message id.
@@ -1201,28 +1243,28 @@ pub async fn insert_message(
     };
 
     // Insert the message and its provider blocks in one transaction.
+    let row = MessageRow {
+        message_id: &msg_id,
+        session_id,
+        role,
+        encrypted_content: &encrypted_content,
+        sent_by_user_id,
+        created_at: now,
+        current_time_user_tz,
+        message_source,
+        encrypted_metadata: encrypted_metadata.as_deref(),
+        tool_call_id,
+        tool_name,
+        tool_calls,
+        status: status.as_str(),
+    };
     let protected = provider_content
         .map(|blocks| encryption::protect_json_field(blocks, encryption_key))
         .transpose()?;
     macro_rules! insert_in_transaction {
         ($pool:expr) => {{
             let mut tx = $pool.begin().await?;
-            sqlx::query(INSERT_MESSAGE_SQL)
-                .bind(&msg_id)
-                .bind(session_id)
-                .bind(role)
-                .bind(&encrypted_content)
-                .bind(sent_by_user_id)
-                .bind(now)
-                .bind(current_time_user_tz)
-                .bind(message_source)
-                .bind(&encrypted_metadata)
-                .bind(tool_call_id)
-                .bind(tool_name)
-                .bind(tool_calls)
-                .bind(status.as_str())
-                .execute(&mut *tx)
-                .await?;
+            insert_message_row!(&mut *tx, row)?;
             if let Some(protected) = &protected {
                 sqlx::query(PROVIDER_CONTENT_UPSERT_SQL)
                     .bind(&msg_id)
@@ -1240,7 +1282,19 @@ pub async fn insert_message(
     }
     .map_err(|e| kyomi_core::Error::Internal(format!("failed to add message: {e}")))?;
 
-    // Update session timestamp.
+    touch_session_after_message(db, session_id, now).await?;
+
+    Ok(msg_id)
+}
+
+/// Bump the session's `updated_at` and write its sync-log entry after a
+/// message was added (shared by [`add_message`] and
+/// [`add_assistant_message_with_thinking_details`]).
+async fn touch_session_after_message(
+    db: &DbPool,
+    session_id: &str,
+    now: chrono::DateTime<Utc>,
+) -> kyomi_core::Result<()> {
     kyomi_core::db_execute!(
         db,
         "UPDATE chat_sessions SET updated_at = $1 WHERE session_id = $2",
@@ -1252,8 +1306,7 @@ pub async fn insert_message(
     // Sync log for the session metadata update — real counts, RFC3339
     // timestamps, populated created_by (KYO-491).
     write_session_metadata_sync_log(db, session_id, SyncActionType::Update, "add_message").await;
-
-    Ok(msg_id)
+    Ok(())
 }
 
 /// Update message content, metadata, and/or status (re-encrypts content and
@@ -3229,6 +3282,78 @@ pub async fn get_thinking_event_detail(
         }
         None => Ok(None),
     }
+}
+
+/// Insert a completed assistant message and, in the same transaction, copy
+/// every stored full-text reasoning row of `copy_details_from` onto it
+/// (KYO-976, "Continue in Chat"). The text is copied as ciphertext: both
+/// messages belong to one workspace and so share one encryption key. If any
+/// row fails to copy the transaction rolls back and no message is created, so
+/// a trace can never exist with only some of its full texts.
+pub async fn add_assistant_message_with_thinking_details(
+    db: &DbPool,
+    encryption_key: &[u8; 32],
+    session_id: &str,
+    message_id: &str,
+    content: &str,
+    metadata: Option<&serde_json::Value>,
+    copy_details_from: Option<&str>,
+) -> kyomi_core::Result<()> {
+    let now = Utc::now();
+    let encrypted_content = encryption::encrypt(content, encryption_key)?;
+    let encrypted_metadata: Option<String> = match metadata {
+        Some(m) => Some(encryption::encrypt_json(m, encryption_key)?),
+        None => None,
+    };
+
+    let row = MessageRow {
+        message_id,
+        session_id,
+        role: "assistant",
+        encrypted_content: &encrypted_content,
+        sent_by_user_id: None,
+        created_at: now,
+        current_time_user_tz: None,
+        message_source: None,
+        encrypted_metadata: encrypted_metadata.as_deref(),
+        tool_call_id: None,
+        tool_name: None,
+        tool_calls: None,
+        status: MessageStatus::Complete.as_str(),
+    };
+
+    let result = kyomi_core::db_with_pool!(db, |pool| async {
+        let mut tx = pool.begin().await?;
+        insert_message_row!(&mut *tx, row)?;
+        if let Some(source) = copy_details_from {
+            let rows: Vec<(String, String)> = sqlx::query_as(
+                "SELECT event_id, full_text FROM thinking_event_details WHERE message_id = $1",
+            )
+            .bind(source)
+            .fetch_all(&mut *tx)
+            .await?;
+            for (event_id, full_text) in rows {
+                sqlx::query(
+                    "INSERT INTO thinking_event_details (id, message_id, event_id, full_text) \
+                     VALUES ($1, $2, $3, $4)",
+                )
+                .bind(uuid::Uuid::new_v4().to_string())
+                .bind(message_id)
+                .bind(event_id)
+                .bind(full_text)
+                .execute(&mut *tx)
+                .await?;
+            }
+        }
+        tx.commit().await?;
+        Ok::<(), sqlx::Error>(())
+    }
+    .await);
+    result.map_err(|e| {
+        kyomi_core::Error::Internal(format!("failed to add assistant message with thinking details: {e}"))
+    })?;
+
+    touch_session_after_message(db, session_id, now).await
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
