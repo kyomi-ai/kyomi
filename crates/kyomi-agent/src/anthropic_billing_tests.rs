@@ -372,3 +372,62 @@ async fn a_run_dropped_mid_flight_still_bills_its_paid_calls() {
     assert!((rows[0].4 - 0.013 * AI_COST_MULTIPLIER).abs() < 1e-9, "priced: {}", rows[0].4);
     assert!(ledger.is_empty(), "nothing left to bill twice");
 }
+
+/// The non-durable usage insert runs against a real Postgres: `ApiUsageInsert::insert_sql(true)`
+/// (the `$15::text::json` cast on the `json` column) through the real `UsageLedger::bill`,
+/// then read back. Skipped without a reachable Postgres, except where CI requires it
+/// (`KYOMI_REQUIRE_POSTGRES_TESTS=1`, the same switch kyomi-auth's Postgres tests use).
+#[tokio::test]
+async fn the_non_durable_usage_insert_round_trips_on_postgres() {
+    let db = match kyomi_core::test_db::connect_test_pool().await {
+        Ok(db) => db,
+        Err(e) => {
+            assert!(
+                std::env::var("KYOMI_REQUIRE_POSTGRES_TESTS").as_deref() != Ok("1"),
+                "KYOMI_REQUIRE_POSTGRES_TESTS=1 but Postgres is unreachable: {e}"
+            );
+            eprintln!("SKIP: no Postgres test server reachable: {e}");
+            return;
+        }
+    };
+    let DbPool::Postgres(pg) = &db else { panic!("connect_test_pool returns a Postgres pool") };
+    let id = uuid::Uuid::new_v4().to_string();
+    let (user, workspace) = (format!("usr-{id}"), format!("ws-{id}"));
+    kyomi_core::db_execute!(&db, "INSERT INTO users(user_id,email,active) VALUES ($1,$2,true)", &user, format!("{user}@example.test")).unwrap();
+    kyomi_core::db_execute!(&db, "INSERT INTO workspaces(workspace_id,name,owner_user_id) VALUES ($1,'test',$2)", &workspace, &user).unwrap();
+
+    let client = metered("claude-sonnet-5-5", response(100));
+    call(&client).await;
+    client
+        .ledger()
+        .bill(&BillingContext {
+            db: &db,
+            user_id: &user,
+            workspace_id: &workspace,
+            session_id: None,
+            component: "title",
+            provider: "anthropic",
+            model: "claude-sonnet-5-5",
+            is_byok: false,
+            durable: None,
+        })
+        .await
+        .unwrap();
+
+    let (component, input, write, read, cost, meta): (String, i32, i32, i32, f64, String) = sqlx::query_as(
+        "SELECT component, input_tokens, cache_creation_input_tokens, cache_read_input_tokens, \
+         cost_estimate, extra_metadata::text FROM api_usage_log WHERE workspace_id=$1",
+    )
+    .bind(&workspace)
+    .fetch_one(pg)
+    .await
+    .expect("exactly one row, read back from Postgres");
+    assert_eq!((component.as_str(), input, write, read), ("title", 53_000, 2_000, 50_000));
+    assert!((cost - 0.013 * AI_COST_MULTIPLIER).abs() < 1e-9, "priced: {cost}");
+    let meta: serde_json::Value = serde_json::from_str(&meta).unwrap();
+    assert_eq!(meta["calls"][0]["cache_read_input_tokens"], 50_000, "the json column holds the breakdown");
+
+    sqlx::query("DELETE FROM api_usage_log WHERE workspace_id=$1").bind(&workspace).execute(pg).await.unwrap();
+    sqlx::query("DELETE FROM workspaces WHERE workspace_id=$1").bind(&workspace).execute(pg).await.unwrap();
+    sqlx::query("DELETE FROM users WHERE user_id=$1").bind(&user).execute(pg).await.unwrap();
+}

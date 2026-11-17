@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 //! KYO-974 guard: every LLM call is metered through the one path
-//! (`MeteredClient` + `UsageLedger::bill`). The type system already forces
-//! `create_provider_from_workspace` to return `MeteredClient` and keeps the raw
-//! factory crate-private; this scan catches the one thing types cannot: a new
-//! place constructing a provider client directly. That each call site bills is
+//! (`MeteredClient` + `UsageLedger::bill`). The compiler already guarantees it from
+//! outside this crate: `create_provider_from_workspace` returns `MeteredClient`, and the
+//! raw factory and every client constructor are `pub(crate)`. Inside this crate it does
+//! not, so this scan catches a new module constructing a provider client directly. That each call site bills is
 //! covered by real-call-site tests in `anthropic_billing_tests.rs`.
 
 use std::path::{Path, PathBuf};

@@ -57,12 +57,13 @@ pub struct AnthropicClient {
 }
 
 impl AnthropicClient {
-    /// Create a new Anthropic client.
+    /// Create a new Anthropic client. Crate-private on purpose (KYO-974): outside this crate
+    /// the only way to get a provider is the metered factory, `create_provider_from_workspace`.
     ///
     /// # Arguments
     /// * `api_key` - Anthropic API key.
     /// * `model` - Model name; uses [`DEFAULT_MODEL`] if `None`.
-    pub fn new(api_key: String, model: Option<String>) -> kyomi_core::Result<Self> {
+    pub(crate) fn new(api_key: String, model: Option<String>) -> kyomi_core::Result<Self> {
         Ok(Self {
             base: crate::provider::ProviderBase::new(
                 api_key,
@@ -76,7 +77,7 @@ impl AnthropicClient {
     }
 
     /// Create a client pointing at a custom API URL.
-    pub fn with_base_url(
+    pub(crate) fn with_base_url(
         api_key: String,
         model: Option<String>,
         base_url: String,

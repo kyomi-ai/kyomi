@@ -45,7 +45,8 @@ const fn rates(input: f64, output: f64, w5m: f64, w1h: f64, read: f64) -> Rates 
 
 /// Applied to a model id with no row so an unrecognised model over-estimates
 /// rather than bills nothing. Each component is the maximum published for it
-/// (all from Claude Opus 4 / 4.1); a test checks it dominates every row.
+/// (all from Claude Opus 4 / 4.1); `tests::fallback_dominates_every_published_row` checks it
+/// dominates every row, including Haiku 5.5's long-prompt tier.
 const FALLBACK_RATES: Rates = rates(15.0, 75.0, 18.75, 30.0, 1.5);
 
 /// How one model family is priced and sized.

@@ -362,10 +362,33 @@ impl BillingSlot {
     }
 }
 
+/// Calls taken out of a ledger for billing. If the billing future is dropped before it
+/// finishes (shutdown abort, panic) or the write is refused, the calls go back into the
+/// ledger rather than vanishing, so whoever owns the ledger next still sees them.
+struct Taken<'a> {
+    ledger: &'a UsageLedger,
+    calls: Option<Vec<CallRecord>>,
+}
+
+impl Taken<'_> {
+    /// The write is done (or its failure was logged): the calls are not coming back.
+    fn settled(mut self) {
+        self.calls = None;
+    }
+}
+
+impl Drop for Taken<'_> {
+    fn drop(&mut self) {
+        if let Some(calls) = self.calls.take() {
+            self.ledger.lock().extend(calls);
+        }
+    }
+}
+
 impl UsageLedger {
     /// Take the calls recorded since the last `bill`, so each call is billed once.
-    fn drain(&self) -> Vec<CallRecord> {
-        std::mem::take(&mut *self.lock())
+    fn take(&self) -> Taken<'_> {
+        Taken { ledger: self, calls: Some(std::mem::take(&mut *self.lock())) }
     }
 
     /// Write the `api_usage_log` row for the calls recorded since the last
@@ -374,9 +397,10 @@ impl UsageLedger {
     /// of the run); any other failure means that call is not billed, so it is
     /// logged with every value needed to rebuild the row.
     pub async fn bill(&self, ctx: &BillingContext<'_>) -> kyomi_core::Result<()> {
-        let taken = self.drain();
-        let calls = UsageLedger(Arc::new(Mutex::new(taken.clone())));
+        let taken = self.take();
+        let calls = UsageLedger(Arc::new(Mutex::new(taken.calls.clone().unwrap_or_default())));
         let Some(mut usage) = calls.billing_row(ctx.is_byok, ctx.provider, ctx.model, ctx.component) else {
+            taken.settled();
             return Ok(());
         };
         if let Some((run, encryption_key)) = ctx.durable {
@@ -390,10 +414,9 @@ impl UsageLedger {
             )
             .await
             .map_err(|error| kyomi_core::Error::ServiceUnavailable(error.to_string()));
-            if written.is_err() {
-                // Keep the calls so a later attempt (the worker bills what is left before it
-                // finishes the run) can still write them.
-                self.lock().extend(taken);
+            // A refused write keeps the calls (the guard puts them back on drop).
+            if written.is_ok() {
+                taken.settled();
             }
             return written;
         }
@@ -432,6 +455,7 @@ impl UsageLedger {
                 "BILLING ROW LOST: failed to log API usage to database"
             );
         }
+        taken.settled();
         Ok(())
     }
 }

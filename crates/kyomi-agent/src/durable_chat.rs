@@ -228,8 +228,7 @@ impl DurableChatWorker {
         // heartbeat failure) *before* the run is finished: the fenced write is only valid
         // while the run is still `Running`. On a heartbeat failure the last known lease is the
         // best we have; a refused write is logged, never silent.
-        let billing_lease = driven.as_ref().map_or_else(|_| owned.lease.clone(), |(_, lease)| lease.clone());
-        bill_run_remainder(&owned, &billing_lease, &self.encryption_key).await;
+        settle_run_billing(&owned, &driven, &self.encryption_key).await.ok();
         let (result, lease) = driven?;
         let (state, content, metadata, model, usage) = match result {
             Ok(result) => {
@@ -323,12 +322,23 @@ pub(crate) fn terminal_outcome<'a>(status: &str, response: &'a str) -> (RunState
     }
 }
 
-/// Bill a durable run's unbilled calls under `lease`; a failure is logged with the totals.
-async fn bill_run_remainder(owned: &DurableRun, lease: &agent_runtime::Lease, key: &[u8; 32]) {
-    let current = DurableRun { lease: lease.clone(), ..owned.clone() };
-    if let Err(e) = owned.billing.bill_remaining(&current, key).await {
+/// Bill a durable run's unbilled calls before the run is finished, whatever way
+/// `drive_execution` ended: with the lease it returned, or on a heartbeat failure the last
+/// lease we held. A refused write keeps the calls and is logged (and logged again with the
+/// totals if the slot is then dropped unbilled); the result tells the caller (and tests)
+/// whether the write happened.
+async fn settle_run_billing<T>(
+    owned: &DurableRun,
+    driven: &kyomi_core::Result<(kyomi_core::Result<T>, agent_runtime::Lease)>,
+    key: &[u8; 32],
+) -> kyomi_core::Result<()> {
+    let lease = driven.as_ref().map_or_else(|_| owned.lease.clone(), |(_, lease)| lease.clone());
+    let current = DurableRun { lease, ..owned.clone() };
+    let billed = owned.billing.bill_remaining(&current, key).await;
+    if let Err(e) = &billed {
         tracing::error!(error = %e, run_id = %owned.run_id.as_str(), "BILLING ROW LOST: failed to bill a durable run's remaining usage");
     }
+    billed
 }
 
 fn now() -> i64 {
@@ -681,8 +691,65 @@ mod tests {
         .await;
         assert!(driven.is_err(), "a refused heartbeat abandons the execution");
 
-        bill_run_remainder(&owned, &owned.lease, &key).await; // refused by the fence: logged, not silent
+        // The worker's own post-drive step: it must ATTEMPT to bill (the fence refuses a
+        // terminal run, so an attempt is observable as an error) and keep the refused calls.
+        let attempted = settle_run_billing(&owned, &driven, &key).await;
+        assert!(attempted.is_err(), "billing was attempted and refused by the fence");
         assert!(!ledger.is_empty(), "the refused calls are kept");
+    }
+
+    /// The same heartbeat-failure path on a run that is still live (a transient DB error
+    /// rather than a lost run): the worker bills under the last known lease and the row lands.
+    #[tokio::test]
+    async fn a_heartbeat_failure_on_a_live_run_still_bills_under_the_last_lease() {
+        use crate::usage_ledger::{OwnedBilling, UsageLedger};
+        let db = crate::test_support::test_pool().await;
+        crate::test_support::seed_user_and_workspace(&db).await;
+        let key = [7u8; 32];
+        let owned = claimed(&db, &key).await;
+        let body = serde_json::json!({"content": [], "stop_reason": "end_turn", "usage": {"input_tokens": 1000, "output_tokens": 100}});
+        let response = crate::anthropic::AnthropicClient::parse_response("claude-sonnet-5-5", &body, None).unwrap();
+        let ledger = UsageLedger::default();
+        ledger.record("claude-sonnet-5-5", &response);
+        owned.billing.register(
+            ledger.clone(),
+            OwnedBilling {
+                db: db.clone(), encryption_key: [0u8; 32], user_id: "user-a".into(), workspace_id: "ws-1".into(),
+                session_id: None, component: "custom_agent".into(), provider: "anthropic".into(),
+                model: "claude-sonnet-5-5".into(), is_byok: false, durable: None,
+            },
+        );
+        let driven: kyomi_core::Result<(kyomi_core::Result<()>, agent_runtime::Lease)> =
+            Err(kyomi_core::Error::ServiceUnavailable("heartbeat store unavailable".into()));
+        settle_run_billing(&owned, &driven, &key).await.expect("billed under the last known lease");
+        let rows: i64 = kyomi_core::db_fetch_scalar!(
+            &db, i64, "SELECT COUNT(*) FROM api_usage_log WHERE request_id=$1", owned.run_id.as_str()
+        ).expect("count");
+        assert_eq!(rows, 1);
+        assert!(ledger.is_empty());
+    }
+
+    /// A durable run's slot dropped with unbilled calls (panic, shutdown abort) logs the loss.
+    #[tokio::test]
+    async fn a_dropped_billing_slot_with_unbilled_calls_logs_the_loss() {
+        use crate::usage_ledger::{BillingSlot, OwnedBilling, UsageLedger};
+        let capture = kyomi_test_tracing::capture_tracing();
+        let db = crate::test_support::test_pool().await;
+        let body = serde_json::json!({"content": [], "stop_reason": "end_turn", "usage": {"input_tokens": 10, "output_tokens": 5}});
+        let response = crate::anthropic::AnthropicClient::parse_response("claude-sonnet-5-5", &body, None).unwrap();
+        let ledger = UsageLedger::default();
+        ledger.record("claude-sonnet-5-5", &response);
+        let slot = BillingSlot::default();
+        slot.register(
+            ledger,
+            OwnedBilling {
+                db, encryption_key: [0u8; 32], user_id: "user-a".into(), workspace_id: "ws-1".into(),
+                session_id: None, component: "custom_agent".into(), provider: "anthropic".into(),
+                model: "claude-sonnet-5-5".into(), is_byok: false, durable: None,
+            },
+        );
+        drop(slot);
+        assert!(capture.has_error_containing("BILLING ROW LOST"), "{:?}", capture.events());
     }
 
     #[tokio::test]

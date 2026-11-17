@@ -48,7 +48,7 @@ impl OpenAIProvider {
     /// * `api_key` - API key for authentication.
     /// * `model` - Model name; uses [`DEFAULT_MODEL`] if `None`.
     /// * `base_url` - API endpoint URL; uses OpenAI's default if `None`.
-    pub fn new(
+    pub(crate) fn new(
         api_key: String,
         model: Option<String>,
         base_url: Option<String>,
@@ -65,8 +65,10 @@ impl OpenAIProvider {
         })
     }
 
-    /// Create a provider pointing at a custom API URL.
-    pub fn with_base_url(
+    /// Create a provider pointing at a custom API URL (tests only: production builds clients
+    /// through the metered factory).
+    #[cfg(test)]
+    pub(crate) fn with_base_url(
         api_key: String,
         model: Option<String>,
         base_url: String,
