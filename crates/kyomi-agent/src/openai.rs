@@ -48,7 +48,7 @@ impl OpenAIProvider {
     /// * `api_key` - API key for authentication.
     /// * `model` - Model name; uses [`DEFAULT_MODEL`] if `None`.
     /// * `base_url` - API endpoint URL; uses OpenAI's default if `None`.
-    pub fn new(
+    pub(crate) fn new(
         api_key: String,
         model: Option<String>,
         base_url: Option<String>,
@@ -65,8 +65,10 @@ impl OpenAIProvider {
         })
     }
 
-    /// Create a provider pointing at a custom API URL.
-    pub fn with_base_url(
+    /// Create a provider pointing at a custom API URL (tests only: production builds clients
+    /// through the metered factory).
+    #[cfg(test)]
+    pub(crate) fn with_base_url(
         api_key: String,
         model: Option<String>,
         base_url: String,
@@ -232,8 +234,8 @@ impl OpenAIProvider {
             body["tools"] = json!(all);
         }
 
-        if let Some(temp) = options.temperature {
-            body["temperature"] = json!(temp);
+        if let Some(temp) = &options.temperature {
+            body["temperature"] = temp.clone();
         }
 
         // Top-level `reasoning_effort` (OpenAI, OpenRouter, DeepSeek and most
@@ -539,6 +541,7 @@ impl OpenAIProvider {
             tool_calls,
             cost,
             thinking_content,
+            call_detail: None,
         })
     }
 
@@ -1549,8 +1552,8 @@ mod tests {
 
     #[test]
     fn temperature_number_is_sent_and_none_omits_it() {
-        let body = body_with(&RequestOptions::new(1024).with_temperature(Some(0.1)));
-        assert_eq!(body["temperature"], json!(0.1f32));
+        let body = body_with(&RequestOptions::new(1024).with_temperature(Some(json!(0.1))));
+        assert_eq!(body["temperature"], json!(0.1));
         let body = body_with(&RequestOptions::new(1024).with_temperature(None));
         assert!(body.get("temperature").is_none());
     }

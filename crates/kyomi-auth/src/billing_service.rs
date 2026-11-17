@@ -120,6 +120,20 @@ struct WorkspaceBilling {
 
 // ─── Service ────────────────────────────────────────────────────────────────
 
+/// The canonical usage feature an `api_usage_log.component` is reported under.
+/// Every metered call type must land on a feature the usage UI renders, or the
+/// displayed percentages stop adding up (KYO-974 added `title`,
+/// `dashboard_summary` and `collection_tag`).
+pub(crate) fn feature_key(component: &str) -> &str {
+    match component {
+        "custom_agent" | "chat_agent" | "chat" | "chat_title_generation" | "title" => "chat",
+        "dashboard_copilot" | "dashboard_summary" | "collection_tag" => "dashboard_copilot",
+        "chart_builder_copilot" | "chart_copilot" => "chart_builder_copilot",
+        "kyomi_watch" | "watch" => "kyomi_watch",
+        other => other,
+    }
+}
+
 /// Stateless billing service — all state lives in the database.
 ///
 /// Takes a `&DbPool` as a parameter to each method rather than holding
@@ -497,13 +511,7 @@ impl BillingService {
             std::collections::HashMap::new();
         for row in feature_rows {
             let component = row.component.unwrap_or_else(|| "unknown".to_string());
-            let feature_key = match component.as_str() {
-                "custom_agent" | "chat_agent" | "chat" | "chat_title_generation" => "chat",
-                "dashboard_copilot" => "dashboard_copilot",
-                "chart_builder_copilot" | "chart_copilot" => "chart_builder_copilot",
-                "kyomi_watch" | "watch" => "kyomi_watch",
-                other => other,
-            };
+            let feature_key = feature_key(&component);
             *cost_by_feature.entry(feature_key.to_string()).or_default() +=
                 row.cost_usd.unwrap_or(0.0);
         }
@@ -678,6 +686,22 @@ struct SubIdRow {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn every_metered_component_lands_on_a_rendered_usage_feature() {
+        use super::feature_key;
+        // The components `execute_agent_chat`, the title, summary and tagging calls write.
+        for (component, feature) in [
+            ("custom_agent", "chat"),
+            ("title", "chat"),
+            ("dashboard_summary", "dashboard_copilot"),
+            ("collection_tag", "dashboard_copilot"),
+            ("kyomi_watch", "kyomi_watch"),
+            ("chart_builder_copilot", "chart_builder_copilot"),
+        ] {
+            assert_eq!(feature_key(component), feature, "{component}");
+        }
+    }
+
     use super::*;
     use chrono::TimeZone;
     use kyomi_core::SubscriptionTier;

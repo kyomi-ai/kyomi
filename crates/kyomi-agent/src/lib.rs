@@ -28,6 +28,7 @@ mod runtime_adapter;
 pub mod agent;
 pub mod alert;
 pub mod anthropic;
+pub mod anthropic_pricing;
 pub mod catalog;
 pub mod catalog_scheduler;
 pub mod copilot;
@@ -50,9 +51,16 @@ pub mod scheduler;
 // Slack message processor moved to enterprise/kyomi-slack crate (Phase 12).
 #[cfg(test)]
 mod test_support;
+#[cfg(test)]
+mod anthropic_billing_tests;
+#[cfg(test)]
+mod metering_guard_tests;
+#[cfg(test)]
+mod anthropic_live_tests;
 pub mod thinking;
 pub mod tools;
 pub mod types;
+pub mod usage_ledger;
 pub mod watch_execution;
 pub mod web;
 pub mod web_push;
@@ -70,7 +78,7 @@ pub use tools::{
     create_default_registry, AgentTool, ToolContext, ToolFilter, ToolRegistry, WATCH_TOOLS,
 };
 pub use provider::{
-    create_provider, create_provider_from_workspace, resolve_provider_config, LLMProvider,
+    create_provider_from_workspace, resolve_provider_config, LLMProvider,
     LLMProviderConfig, ProviderKind, RequestOptions,
 };
 pub use types::*;

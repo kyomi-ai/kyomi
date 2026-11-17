@@ -31,27 +31,10 @@ use kyomi_embed::LazyEmbedding;
 
 use crate::adapter::{AssistantMessagePersistence, ChatAgentAdapter, UserMessagePersistence};
 
-/// SQL used to persist a row to `api_usage_log` after an agent turn.
-///
-/// Semantics of the two cost columns (see [`kyomi_core::models::ApiUsageLog`]):
-/// * `cost_estimate` is what `BillingService::calculate_credits_info` sums —
-///   it is the amount debited from Kyomi bundle credits. For BYOK rows it is
-///   always `0.0` so BYOK traffic does not touch Kyomi billing.
-/// * `provider_cost_usd` is BYOK-only observability — the real upstream
-///   provider cost in USD. `NULL` for Kyomi rows where `cost_estimate` is
-///   already the real cost.
-///
-/// Extracted as a const so it can be unit-tested without a database.
-pub(crate) const API_USAGE_LOG_INSERT_SQL: &str = "INSERT INTO api_usage_log \
-     (user_id, workspace_id, session_id, timestamp, provider, model, \
-      input_tokens, output_tokens, total_tokens, \
-      cache_creation_input_tokens, cache_read_input_tokens, \
-      cost_estimate, component, provider_cost_usd) \
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 0, 0, $10, $11, $12)";
 use crate::agent::{AgentConfig, CustomAgent};
 use crate::prompt;
 use crate::provider::{
-    create_provider, create_provider_from_workspace, ProviderKind,
+    create_provider_from_workspace, resolve_provider_config, LLMProvider, ProviderKind,
 };
 use crate::thinking::AgentThinkingTracker;
 use crate::tools::web::WEB_TOOL_NAMES;
@@ -69,10 +52,6 @@ pub struct AgentExecutionConfig {
     pub workspace_id: String,
     pub message: String,
     pub model_name: Option<String>,
-    /// This call site's historical temperature, used when neither the
-    /// workspace nor `LLM_*` env configures one. `None` omits the field.
-    /// The effective value is resolved in [`execute_agent_chat`] (KYO-972).
-    pub temperature: Option<f32>,
     /// Which tuning profile applies: interactive chat, or a watch run.
     pub llm_profile: kyomi_core::llm_sampling::LlmProfile,
     pub is_shared_conversation: bool,
@@ -153,7 +132,6 @@ impl Default for AgentExecutionConfig {
             workspace_id: String::new(),
             message: String::new(),
             model_name: None,
-            temperature: Some(0.7),
             llm_profile: kyomi_core::llm_sampling::LlmProfile::Chat,
             is_shared_conversation: false,
             context_type: "chat".into(),
@@ -357,11 +335,76 @@ fn build_agent_config(
         max_duration: config.max_duration,
         max_total_tokens: config.max_total_tokens,
         max_tokens: config.max_tokens,
-        temperature: sampling.temperature,
+        temperature: sampling.temperature.clone(),
         reasoning_effort: sampling.reasoning_effort.clone(),
         tool_filter,
         ..Default::default()
     }
+}
+
+/// The vendor usage rows are attributed to. For Kyomi-managed (and all SaaS)
+/// workspaces that is whatever the server env keys resolve to (which may be
+/// OpenAI or Gemini for self-hosted tenants), not the workspace's own provider.
+fn effective_provider_kind(
+    ws_config: &kyomi_auth::workspace_ai_config::WorkspaceAiConfig,
+    app_config: &kyomi_core::Config,
+) -> ProviderKind {
+    use kyomi_auth::workspace_ai_config::WorkspaceAiProvider;
+    let from_workspace = match ws_config.provider {
+        WorkspaceAiProvider::Kyomi | WorkspaceAiProvider::Anthropic => ProviderKind::Anthropic,
+        WorkspaceAiProvider::OpenAI => ProviderKind::OpenAI,
+        WorkspaceAiProvider::Gemini => ProviderKind::Gemini,
+    };
+    if matches!(ws_config.provider, WorkspaceAiProvider::Kyomi) || !app_config.self_hosted {
+        resolve_provider_config(app_config)
+            .map(|c| c.provider)
+            .unwrap_or(from_workspace)
+    } else {
+        from_workspace
+    }
+}
+
+/// BYOK workspaces (their own key, self-hosted only) cost Kyomi credits nothing.
+fn is_byok(
+    ws_config: &kyomi_auth::workspace_ai_config::WorkspaceAiConfig,
+    app_config: &kyomi_core::Config,
+) -> bool {
+    ws_config.is_byok() && app_config.self_hosted
+}
+
+/// Who a short background LLM task (title, summary, tagging) runs for.
+struct BackgroundTask<'a> {
+    db: &'a DbPool,
+    ws_config: &'a kyomi_auth::workspace_ai_config::WorkspaceAiConfig,
+    app_config: &'a kyomi_core::Config,
+    user_id: &'a str,
+    workspace_id: &'a str,
+    session_id: Option<&'a str>,
+}
+
+/// Bill the provider calls a background task made since the last bill, through
+/// the same ledger/writer as a chat run (KYO-974).
+async fn bill_background_call(
+    client: &crate::usage_ledger::MeteredClient,
+    task: &BackgroundTask<'_>,
+    component: &str,
+) {
+    // A non-durable bill logs its own failure ("BILLING ROW LOST") and returns Ok.
+    client
+        .ledger()
+        .bill(&crate::usage_ledger::BillingContext {
+            db: task.db,
+            user_id: task.user_id,
+            workspace_id: task.workspace_id,
+            session_id: task.session_id,
+            component,
+            provider: &effective_provider_kind(task.ws_config, task.app_config).to_string(),
+            model: client.model(),
+            is_byok: is_byok(task.ws_config, task.app_config),
+            durable: None,
+        })
+        .await
+        .ok();
 }
 
 /// What [`register_web_tools_for_run`] decided for one run: whether the model has any
@@ -505,11 +548,11 @@ pub async fn execute_agent_chat(
         if let Some(ref model) = config.model_name {
             ws_config.model = Some(model.clone());
         }
-        let is_byok = ws_config.is_byok() && app_config.self_hosted;
+        let is_byok = is_byok(&ws_config, app_config);
         let llm_config = crate::provider::resolve_workspace_provider_config(&ws_config, app_config)?;
         let provider_kind = llm_config.provider;
-        let llm_base_url = llm_config.base_url.clone();
-        let client = create_provider(llm_config)?;
+        let llm_base_url = llm_config.base_url;
+        let client = create_provider_from_workspace(&ws_config, app_config, None)?;
         // Resolved once per execution so the value is stable for the whole
         // conversation turn (effort changes invalidate Anthropic's prompt
         // cache).
@@ -517,7 +560,6 @@ pub async fn execute_agent_chat(
             config.llm_profile,
             &ws_config,
             app_config,
-            config.temperature,
             false,
         );
         (client, provider_kind, is_byok, sampling, llm_base_url)
@@ -525,6 +567,32 @@ pub async fn execute_agent_chat(
     // Read the authoritative model name from the provider (not from config defaults).
     let model_name = client.model().to_string();
     let provider_context_window = client.context_window();
+    // Every provider call of this run is recorded here by the metered client (KYO-974).
+    let usage_ledger = client.ledger();
+    let billing = crate::usage_ledger::OwnedBilling {
+        db: db.clone(),
+        encryption_key: **encryption_key,
+        user_id: config.user_id.clone(),
+        workspace_id: config.workspace_id.clone(),
+        session_id: Some(config.session_id.clone()),
+        component: config.component.clone(),
+        provider: provider_kind.to_string(),
+        model: model_name.clone(),
+        is_byok,
+        durable: config.assistant_message_persistence.durable_run().cloned(),
+    };
+    // A run dropped mid-flight never reaches the bill below, so its calls are billed by
+    // someone else: the durable worker, deterministically before it finishes the run (via the
+    // slot in the run), or, for a non-durable run, a guard that bills when the run is dropped.
+    let _bill_if_dropped = match config.assistant_message_persistence.durable_run() {
+        Some(run) => {
+            let mut registered = billing.clone();
+            registered.durable = None; // the worker supplies the run's current lease
+            run.billing.register(usage_ledger.clone(), registered);
+            None
+        }
+        None => Some(crate::usage_ledger::BillOnDrop::new(usage_ledger.clone(), billing.clone())),
+    };
 
 
     // 3. Create agent config with context-appropriate tool filter.
@@ -597,7 +665,7 @@ pub async fn execute_agent_chat(
     // `format_user_message` renders `[Name (userid)]:`, matching the prompt's
     // message-format contract.
     let user_names = sender_display_names(db, &config.user_id).await?;
-    let mut agent = CustomAgent::new(client, agent_config, registry, tool_context, user_names);
+    let mut agent = CustomAgent::new(Box::new(client), agent_config, registry, tool_context, user_names);
 
     // The system prompt must be the first message in the agent's state.
     // Each LLM provider implementation extracts it and maps it to
@@ -745,7 +813,7 @@ pub async fn execute_agent_chat(
     // `AgentThinkingTracker::finalize`'s doc for why the ordering
     // (finalize while holding the lock, release, then step 14 writes) is
     // what makes the terminal write strictly win.
-    let (thinking_events, full_texts, token_usage, input_tokens, output_tokens, total_cost) = {
+    let (thinking_events, full_texts, token_usage) = {
         let mut t = tracker.lock().await;
         t.finalize();
         let events = t.get_events_for_storage();
@@ -763,70 +831,13 @@ pub async fn execute_agent_chat(
             "context_tokens": ctx,
             "context_window": ctx_win,
         });
-        (events, ft, Some(usage), inp, out, cost)
+        (events, ft, Some(usage))
     };
 
-    // 14b. Log usage to api_usage_log for billing.
-    // Apply 10% markup to cover payment processing fees.
-    //
-    // BYOK (workspace-owned keys): the workspace pays the provider directly,
-    // so we record the row with `cost_estimate = 0.0` — token counts and
-    // model names are preserved for diagnostics, but `check_ai_usage_allowed`
-    // sums `cost_estimate` from this table and must not charge BYOK usage
-    // against `ai_credits_used_usd`. Writing 0 keeps the single source of
-    // truth for billing consistent without a parallel BYOK-only code path.
-    const AI_COST_MULTIPLIER: f64 = 1.1;
-    if input_tokens > 0 || output_tokens > 0 {
-        let total_tokens = (input_tokens + output_tokens) as i32;
-        // BYOK: `cost_estimate = 0.0` (not billed against Kyomi credits) and
-        //       `provider_cost_usd = total_cost` so we keep observability into
-        //       the real upstream provider spend. `total_cost` comes from the
-        //       tracker, which accumulates the `cost` field from each LLM response.
-        // Kyomi: `cost_estimate = total_cost * markup` (billed) and
-        //       `provider_cost_usd = NULL` — `cost_estimate` already reflects
-        //       the real cost, so the extra column would be redundant.
-        let (billed_cost, provider_cost_usd): (f64, Option<f64>) = if is_byok {
-            (0.0, Some(total_cost))
-        } else {
-            (total_cost * AI_COST_MULTIPLIER, None)
-        };
-        let provider_str = provider_kind.to_string();
-        if let Some(run) = config.assistant_message_persistence.durable_run() {
-            let usage = kyomi_auth::conversation_events::ApiUsageWrite {
-                provider: provider_str,
-                model: model_name.clone(),
-                input_tokens: input_tokens as i32,
-                output_tokens: output_tokens as i32,
-                total_tokens,
-                cost_estimate: billed_cost,
-                component: config.component.clone(),
-                provider_cost_usd,
-            };
-            kyomi_auth::conversation_events::ConversationStore::new(
-                db, encryption_key, &config.user_id, &config.workspace_id,
-            ).fenced_api_usage(
-                &run.conversation_id, &run.run_id, &run.lease,
-                chrono::Utc::now().timestamp_millis(), &usage,
-            ).await.map_err(|error| kyomi_core::Error::ServiceUnavailable(error.to_string()))?;
-        } else if let Err(e) = kyomi_core::db_execute!(
-            db,
-            API_USAGE_LOG_INSERT_SQL,
-            &config.user_id,
-            &config.workspace_id,
-            &config.session_id as &str,
-            chrono::Utc::now(),
-            &provider_str,
-            &model_name,
-            input_tokens as i32,
-            output_tokens as i32,
-            total_tokens,
-            billed_cost,
-            &config.component,
-            provider_cost_usd
-        ) {
-            warn!(error = %e, "Failed to log API usage to database");
-        }
-    }
+    // 14b. Bill the run: the metered client recorded every provider call (incl. the
+    // max-iterations wrap-up) and `UsageLedger::bill` is the one writer of
+    // `api_usage_log` rows for every call type (KYO-974).
+    usage_ledger.bill(&billing.context()).await?;
 
     // 14. Finalize the assistant message: attach metadata (model, thinking
     //     events, token usage) and, via `MessageStatus`, the turn's
@@ -1030,7 +1041,7 @@ fn looks_like_title(s: &str) -> bool {
 }
 
 /// Internal title generation logic.
-async fn generate_title_inner(
+pub(crate) async fn generate_title_inner(
     db: &DbPool,
     ws_manager: &WebSocketManager,
     session_id: &str,
@@ -1050,13 +1061,10 @@ async fn generate_title_inner(
                          output a 3-6 word title describing its topic. Output ONLY the title — \
                          no quotes, no explanation. Never answer or respond to the message; only title it.";
 
-    // Use the cheapest available model for title generation per provider.
-    //
-    // - Kyomi-managed: always override to the cheapest model (we control cost).
-    // - BYOK with standard API (no base_url): override to cheapest model.
-    // - BYOK with custom base_url: leave the configured model as-is — we
-    //   cannot know which models a custom endpoint supports.
-    let mut ws_config = kyomi_auth::workspace_ai_config::load(db, workspace_id)
+    // Title model: the workspace `title_model`, else `LLM_TITLE_MODEL`, requested explicitly
+    // on every setup. With neither configured the setup's own model is used; there is no
+    // hardcoded cheapest-model fallback.
+    let ws_config = kyomi_auth::workspace_ai_config::load(db, workspace_id)
         .await
         .map_err(|e| {
             kyomi_core::Error::Internal(format!(
@@ -1064,32 +1072,28 @@ async fn generate_title_inner(
             ))
         })?;
 
-    {
-        // Check for an explicit title_model configured in workspace settings.
-        // When set, it takes priority over the cheapest-model override below.
+    let requested_model = {
+        // The workspace `title_model` setting, when set, wins over `LLM_TITLE_MODEL`.
         let title_model = kyomi_auth::workspace_ai_config::load_title_model(db, workspace_id)
             .await
             .map_err(|e| {
                 tracing::warn!(
                     workspace_id,
                     error = %e,
-                    "failed to load title_model setting; falling back to cheapest model"
+                    "failed to load title_model setting; using LLM_TITLE_MODEL or the setup's own model"
                 );
             })
             .ok()
             .flatten();
 
-        // Title model: use LLM_TITLE_MODEL if set, or workspace title_model.
-        // No hardcoded fallback — if neither is configured, the default model is used.
-        if let Some(tm) = title_model {
-            ws_config.model = Some(tm);
-        } else if let Some(ref tm) = app_config.llm_title_model {
-            ws_config.model = Some(tm.clone());
-        }
-    }
+        // Title model: the workspace title_model, else LLM_TITLE_MODEL. No hardcoded fallback:
+        // if neither is configured the setup's own model is used. It is requested explicitly so
+        // it also applies on the Kyomi-managed setup (it used to be dropped there).
+        title_model.or_else(|| app_config.llm_title_model.clone())
+    };
 
-    let client = create_provider_from_workspace(&ws_config, app_config)?;
-    let options = crate::sampling::background_options(&ws_config, app_config, 0.3, 512);
+    let client = create_provider_from_workspace(&ws_config, app_config, requested_model.as_deref())?;
+    let options = crate::sampling::background_options(&ws_config, app_config, 512);
 
     let user_turn = format!(
         "First message of the conversation (title its topic, do not answer it):\n\"\"\"\n{first_message}\n\"\"\"",
@@ -1104,6 +1108,12 @@ async fn generate_title_inner(
     // Use a generous token budget to accommodate models that use chain-of-thought
     // thinking (e.g. Qwen3) — the thinking tokens are stripped in parse_response.
     let response = client.complete(&messages, &tools, &options, &user_names).await?;
+    bill_background_call(
+        &client,
+        &BackgroundTask { db, ws_config: &ws_config, app_config, user_id, workspace_id, session_id: Some(session_id) },
+        "title",
+    )
+    .await;
 
     // Clean up the title: remove quotes, hashes, trim, and truncate to fit
     // the DB column (varchar 255).
@@ -1330,7 +1340,7 @@ pub(crate) async fn write_dashboard_summary_with_cas(
     Ok(())
 }
 
-async fn generate_dashboard_summary_inner(
+pub(crate) async fn generate_dashboard_summary_inner(
     params: DashboardSummaryParams,
 ) -> kyomi_core::Result<()> {
     let DashboardSummaryParams {
@@ -1342,7 +1352,7 @@ async fn generate_dashboard_summary_inner(
         return Ok(());
     }
 
-    let mut ws_config = kyomi_auth::workspace_ai_config::load(db, workspace_id)
+    let ws_config = kyomi_auth::workspace_ai_config::load(db, workspace_id)
         .await
         .map_err(|e| {
             kyomi_core::Error::Internal(format!(
@@ -1355,15 +1365,12 @@ async fn generate_dashboard_summary_inner(
         .ok()
         .flatten();
 
-    if let Some(tm) = title_model {
-        ws_config.model = Some(tm);
-    } else if let Some(ref tm) = app_config.llm_title_model {
-        ws_config.model = Some(tm.clone());
-    }
-
-    let client = create_provider_from_workspace(&ws_config, app_config)?;
-    let options = crate::sampling::background_options(&ws_config, app_config, 0.3, 512);
-    let tag_options = crate::sampling::background_options(&ws_config, app_config, 0.0, 256);
+    // The workspace title_model, else LLM_TITLE_MODEL, requested explicitly (also on the
+    // Kyomi-managed setup); `None` keeps the setup's own model.
+    let requested_model = title_model.or_else(|| app_config.llm_title_model.clone());
+    let client = create_provider_from_workspace(&ws_config, app_config, requested_model.as_deref())?;
+    let options = crate::sampling::background_options(&ws_config, app_config, 512);
+    let tag_options = crate::sampling::background_options(&ws_config, app_config, 256);
 
     let doc_type_label = if doc_type == "knowledge" { "document" } else { "dashboard" };
     let system_prompt = format!(
@@ -1388,6 +1395,15 @@ async fn generate_dashboard_summary_inner(
     ];
 
     let response = client.complete(&messages, &[], &options, &HashMap::new()).await?;
+    let background = BackgroundTask {
+        db,
+        ws_config: &ws_config,
+        app_config,
+        user_id,
+        workspace_id,
+        session_id: None,
+    };
+    bill_background_call(&client, &background, "dashboard_summary").await;
 
     let mut summary = response.content.trim().trim_matches('"').trim().to_string();
     if summary.is_empty() { return Ok(()); }
@@ -1480,6 +1496,7 @@ async fn generate_dashboard_summary_inner(
             let tag_response = client
                 .complete(&tag_messages, &[], &tag_options, &HashMap::new())
                 .await;
+            bill_background_call(&client, &background, "collection_tag").await;
 
             match tag_response {
                 Ok(response) => {
@@ -1800,44 +1817,9 @@ mod tests {
         );
     }
 
-    // -- Contract: api_usage_log INSERT includes provider_cost_usd -----------
-    //
-    // Guards the BYOK observability column: `provider_cost_usd` must appear
-    // in both the column list and the VALUES clause, and the parameter count
-    // must match. If someone accidentally drops the column or reorders the
-    // INSERT, this test catches it at `cargo test` time rather than in prod.
-
-    #[test]
-    fn api_usage_log_insert_has_provider_cost_usd_column() {
-        let sql = API_USAGE_LOG_INSERT_SQL;
-        assert!(
-            sql.contains("provider_cost_usd"),
-            "INSERT must reference provider_cost_usd: {sql}"
-        );
-        // Must be the 12th bind parameter (after the 11 existing ones).
-        assert!(
-            sql.contains("$12"),
-            "INSERT must bind $12 for provider_cost_usd: {sql}"
-        );
-        // Sanity: the 12 placeholders line up with 12 named columns (two of
-        // the columns — cache_creation_input_tokens / cache_read_input_tokens
-        // — are hard-coded to 0 in VALUES, so 14 columns total, 12 binds).
-        let placeholder_count = (1..=12).filter(|n| sql.contains(&format!("${n}"))).count();
-        assert_eq!(
-            placeholder_count, 12,
-            "INSERT should have exactly 12 bind placeholders: {sql}"
-        );
-    }
-
-    #[test]
-    fn api_usage_log_insert_targets_correct_table() {
-        assert!(API_USAGE_LOG_INSERT_SQL.contains("INSERT INTO api_usage_log"));
-    }
-
     #[test]
     fn agent_execution_config_defaults() {
         let config = AgentExecutionConfig::default();
-        assert_eq!(config.temperature, Some(0.7));
         assert_eq!(config.max_iterations, 25);
         assert_eq!(config.max_duration, Some(Duration::from_secs(15 * 60)));
         assert_eq!(config.max_total_tokens, Some(1_500_000));
@@ -1897,7 +1879,6 @@ mod tests {
         assert_eq!(config.workspace_id, "");
         assert_eq!(config.message, "");
         assert!(config.model_name.is_none());
-        assert_eq!(config.temperature, Some(0.7));
         assert!(!config.is_shared_conversation);
         assert_eq!(config.context_type, "chat");
         assert!(config.workspace_user_ids.is_none());
@@ -1931,7 +1912,6 @@ mod tests {
             workspace_id: "ws-789".into(),
             message: "Show me revenue".into(),
             model_name: Some("claude-haiku-4-5-20251001".into()),
-            temperature: Some(0.3),
             llm_profile: kyomi_core::llm_sampling::LlmProfile::Chat,
             is_shared_conversation: true,
             context_type: "copilot".into(),
@@ -2401,7 +2381,6 @@ mod tests {
             max_duration: Some(Duration::from_secs(123)),
             max_total_tokens: Some(654_321),
             max_tokens: 9_999,
-            temperature: Some(0.42),
             ..AgentExecutionConfig::default()
         };
         let tool_filter = ToolFilter {
@@ -2412,7 +2391,7 @@ mod tests {
 
         let sampling = kyomi_core::llm_sampling::ResolvedSampling {
             reasoning_effort: Some("max".into()),
-            temperature: Some(0.42),
+            temperature: Some(serde_json::json!(0.42)),
         };
         let agent_config = build_agent_config(&config, tool_filter, &sampling);
 
@@ -2424,7 +2403,7 @@ mod tests {
             "AgentExecutionConfig::max_tokens must reach AgentConfig::max_tokens \
              (KYO-534) — this is the seam client.complete() actually reads"
         );
-        assert_eq!(agent_config.temperature, Some(0.42));
+        assert_eq!(agent_config.temperature, Some(serde_json::json!(0.42)));
         assert_eq!(agent_config.reasoning_effort.as_deref(), Some("max"));
     }
 

@@ -36,10 +36,12 @@ use crate::types::{LLMResponse, Message, Tool};
 /// omits the field from the request body entirely (KYO-972). `reasoning_effort`
 /// is an opaque string passed to the provider unchanged — each adapter decides
 /// the wire field and whether a numeric value is sent as a number.
+/// `temperature` is passed through exactly as configured (a JSON number, or a
+/// string left for the provider to reject; KYO-974).
 #[derive(Debug, Clone, PartialEq)]
 pub struct RequestOptions {
-    /// Sampling temperature; `None` omits the field.
-    pub temperature: Option<f32>,
+    /// Sampling temperature as configured; `None` omits the field.
+    pub temperature: Option<serde_json::Value>,
     /// Reasoning effort / thinking level; `None` omits the field.
     pub reasoning_effort: Option<String>,
     /// Maximum tokens to generate (reasoning tokens count against it).
@@ -58,7 +60,7 @@ impl RequestOptions {
     }
 
     /// Builder: set the temperature.
-    pub fn with_temperature(mut self, temperature: Option<f32>) -> Self {
+    pub fn with_temperature(mut self, temperature: Option<serde_json::Value>) -> Self {
         self.temperature = temperature;
         self
     }
@@ -289,8 +291,7 @@ impl LLMProvider for AnthropicClient {
     }
 
     fn context_window(&self) -> u32 {
-        // All Claude models share a 200,000-token context window.
-        200_000
+        AnthropicClient::context_window(self)
     }
 }
 
@@ -340,16 +341,17 @@ impl LLMProvider for GeminiProvider {
 ///
 /// Supports Anthropic, OpenAI, and Gemini providers. The provider kind
 /// determines which concrete implementation is instantiated.
-pub fn create_provider(
+pub(crate) fn create_provider(
     config: LLMProviderConfig,
 ) -> kyomi_core::Result<Box<dyn LLMProvider>> {
     match config.provider {
         ProviderKind::Anthropic => {
-            let client = if let Some(base_url) = config.base_url {
+            let mut client = if let Some(base_url) = config.base_url {
                 AnthropicClient::with_base_url(config.api_key, config.model, base_url)?
             } else {
                 AnthropicClient::new(config.api_key, config.model)?
             };
+            client.set_context_window(config.context_window);
             Ok(Box::new(client))
         }
         ProviderKind::OpenAI => {
@@ -375,7 +377,8 @@ pub fn create_provider(
 // Workspace-scoped factory (BYOK)
 // ---------------------------------------------------------------------------
 
-/// Build an [`LLMProvider`] from a workspace AI config.
+/// Build the metered [`LLMProvider`] for a workspace AI config. Every response
+/// it returns is recorded for billing (see [`crate::usage_ledger`]).
 ///
 /// * **Kyomi mode** (`ws_config.provider == WorkspaceAiProvider::Kyomi`):
 ///   uses the server's env-configured keys and model (`LLM_PROVIDER`,
@@ -384,11 +387,27 @@ pub fn create_provider(
 ///
 /// * **BYOK mode** (anthropic / openai / gemini): uses the workspace's
 ///   decrypted API key, model, and optional base URL.
+///
+/// `requested_model` is a model the caller explicitly asks for (the title model for titles,
+/// summaries and tags). It is requested as given on every setup, the Kyomi-managed and SaaS
+/// ones included, and the usage row records it; `None` keeps the setup's own model. A
+/// workspace's stored default model is still ignored on the managed setup (it may name a
+/// model from an earlier BYOK configuration), which is why an explicit request is separate.
 pub fn create_provider_from_workspace(
     ws_config: &kyomi_auth::workspace_ai_config::WorkspaceAiConfig,
     fallback_config: &kyomi_core::Config,
+    requested_model: Option<&str>,
+) -> kyomi_core::Result<crate::usage_ledger::MeteredClient> {
+    build_provider_from_workspace(ws_config, fallback_config, requested_model)
+        .map(crate::usage_ledger::MeteredClient::new)
+}
+
+fn build_provider_from_workspace(
+    ws_config: &kyomi_auth::workspace_ai_config::WorkspaceAiConfig,
+    fallback_config: &kyomi_core::Config,
+    requested_model: Option<&str>,
 ) -> kyomi_core::Result<Box<dyn LLMProvider>> {
-    create_provider(resolve_workspace_provider_config(ws_config, fallback_config)?)
+    create_provider(resolve_workspace_provider_config_for(ws_config, fallback_config, requested_model)?)
 }
 
 /// The provider configuration [`create_provider_from_workspace`] builds the
@@ -399,13 +418,27 @@ pub fn resolve_workspace_provider_config(
     ws_config: &kyomi_auth::workspace_ai_config::WorkspaceAiConfig,
     fallback_config: &kyomi_core::Config,
 ) -> kyomi_core::Result<LLMProviderConfig> {
+    resolve_workspace_provider_config_for(ws_config, fallback_config, None)
+}
+
+/// [`resolve_workspace_provider_config`] with an explicitly requested model, as
+/// [`create_provider_from_workspace`] documents.
+fn resolve_workspace_provider_config_for(
+    ws_config: &kyomi_auth::workspace_ai_config::WorkspaceAiConfig,
+    fallback_config: &kyomi_core::Config,
+    requested_model: Option<&str>,
+) -> kyomi_core::Result<LLMProviderConfig> {
     use kyomi_auth::workspace_ai_config::WorkspaceAiProvider;
 
     // SaaS mode: always use Kyomi-managed credentials and model.
     // Workspace-level BYOK configs and default_model are preserved in the
     // database but ignored at runtime — the server controls everything.
     if !fallback_config.self_hosted {
-        return resolve_provider_config(fallback_config);
+        let mut config = resolve_provider_config(fallback_config)?;
+        if let Some(model) = requested_model {
+            config.model = Some(model.to_string());
+        }
+        return Ok(config);
     }
 
     match ws_config.provider {
@@ -413,7 +446,11 @@ pub fn resolve_workspace_provider_config(
             // Server-side keys: server controls the model entirely.
             // Workspace default_model is ignored — it may reference a
             // BYOK-only model from a previous provider configuration.
-            resolve_provider_config(fallback_config)
+            let mut config = resolve_provider_config(fallback_config)?;
+            if let Some(model) = requested_model {
+                config.model = Some(model.to_string());
+            }
+            Ok(config)
         }
         WorkspaceAiProvider::Anthropic
         | WorkspaceAiProvider::OpenAI
@@ -433,7 +470,7 @@ pub fn resolve_workspace_provider_config(
             Ok(LLMProviderConfig {
                 provider,
                 api_key,
-                model: ws_config.model.clone(),
+                model: requested_model.map(str::to_string).or_else(|| ws_config.model.clone()),
                 base_url: ws_config.base_url.clone(),
                 context_window: ws_config.context_window,
             })
@@ -742,10 +779,38 @@ mod tests {
             sampling_warnings: Vec::new(),
         };
 
-        let provider = create_provider_from_workspace(&ws, &fallback)
+        let provider = create_provider_from_workspace(&ws, &fallback, None)
             .expect("Kyomi-mode dispatch should succeed with server env key");
         // Server default model flows through.
         assert_eq!(provider.model(), "claude-sonnet-4-20250514");
+    }
+
+    /// An explicitly requested model (the title model) is honoured on the Kyomi-managed setups
+    /// (SaaS and self-hosted Kyomi mode); with none requested the setup's own model is kept, and a
+    /// workspace's stored default model is still ignored (KYO-974).
+    #[test]
+    fn workspace_factory_honours_an_explicitly_requested_model_on_managed_setups() {
+        use kyomi_auth::workspace_ai_config::{WorkspaceAiConfig, WorkspaceAiProvider};
+        let ws = WorkspaceAiConfig {
+            provider: WorkspaceAiProvider::Kyomi,
+            model: Some("claude-opus-4-5".into()),
+            api_key: None,
+            base_url: None,
+            title_model: None,
+            context_window: 0,
+            sampling: Default::default(),
+            sampling_warnings: Vec::new(),
+        };
+        for self_hosted in [false, true] {
+            let mut fallback = kyomi_core::Config::test_config();
+            fallback.self_hosted = self_hosted;
+            fallback.anthropic_api_key = Some("sk-ant-server".into());
+            fallback.llm_model = Some("claude-sonnet-5-5".into());
+            let chat = create_provider_from_workspace(&ws, &fallback, None).unwrap();
+            assert_eq!(chat.model(), "claude-sonnet-5-5", "self_hosted={self_hosted}: setup model, stored default ignored");
+            let title = create_provider_from_workspace(&ws, &fallback, Some("claude-haiku-5-5")).unwrap();
+            assert_eq!(title.model(), "claude-haiku-5-5", "self_hosted={self_hosted}: requested model wins");
+        }
     }
 
     #[test]
@@ -767,7 +832,7 @@ mod tests {
             sampling_warnings: Vec::new(),
         };
 
-        let provider = create_provider_from_workspace(&ws, &fallback).unwrap();
+        let provider = create_provider_from_workspace(&ws, &fallback, None).unwrap();
         // Kyomi mode: server controls the model, workspace model is ignored.
         assert_eq!(provider.model(), "claude-sonnet-4-20250514");
     }
@@ -795,7 +860,7 @@ mod tests {
             sampling_warnings: Vec::new(),
         };
 
-        let provider = create_provider_from_workspace(&ws, &fallback)
+        let provider = create_provider_from_workspace(&ws, &fallback, None)
             .expect("BYOK OpenAI dispatch should not need fallback keys");
         assert_eq!(provider.model(), "gpt-4o");
     }
@@ -818,7 +883,7 @@ mod tests {
             sampling_warnings: Vec::new(),
         };
 
-        let provider = create_provider_from_workspace(&ws, &fallback).unwrap();
+        let provider = create_provider_from_workspace(&ws, &fallback, None).unwrap();
         assert_eq!(provider.model(), crate::gemini::DEFAULT_MODEL);
     }
 
@@ -840,7 +905,7 @@ mod tests {
             sampling_warnings: Vec::new(),
         };
 
-        let err = match create_provider_from_workspace(&ws, &fallback) {
+        let err = match create_provider_from_workspace(&ws, &fallback, None) {
             Ok(_) => panic!("expected BYOK-without-key to error"),
             Err(e) => e,
         };
@@ -873,7 +938,7 @@ mod tests {
         };
 
         // SaaS mode should ignore BYOK and use server config
-        let provider = create_provider_from_workspace(&ws, &fallback)
+        let provider = create_provider_from_workspace(&ws, &fallback, None)
             .expect("SaaS mode should use server-managed provider");
         // Server config resolves to Anthropic with claude-sonnet-4-20250514
         assert_eq!(provider.model(), "claude-sonnet-4-20250514");
@@ -971,6 +1036,7 @@ mod reasoning_usage_tests {
             tool_calls,
             cost: None,
             thinking_content: None,
+            call_detail: None,
         }
     }
 

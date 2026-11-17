@@ -580,7 +580,6 @@ fn build_watch_retry_config(
         workspace_id: workspace_id.to_string(),
         message: correction_prompt,
         model_name: None,
-        temperature: Some(0.7),
         llm_profile: kyomi_core::llm_sampling::LlmProfile::Watch,
         is_shared_conversation: false,
         context_type: "kyomi_watch".into(),
@@ -1197,7 +1196,6 @@ async fn execute_watch_inner(
         workspace_id: watch.workspace_id.clone(),
         message: watch.prompt.clone(),
         model_name: None, // use default model
-        temperature: Some(0.7),
         llm_profile: kyomi_core::llm_sampling::LlmProfile::Watch,
         is_shared_conversation: false,
         context_type: "kyomi_watch".into(),

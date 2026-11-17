@@ -175,6 +175,8 @@ pub(crate) enum Reply {
     /// (zero) token usage; use `TextWithUsage` when a test needs to drive
     /// `max_total_tokens`.
     Text(String),
+    /// A text answer that also carries provider thinking text (KYO-974).
+    TextWithThinking(String, String),
     /// A single tool call — drives the loop into another iteration. Carries
     /// the default (zero) token usage; use `ToolCallWithUsage` when a test
     /// needs to drive `max_total_tokens`.
@@ -190,7 +192,7 @@ pub(crate) enum Reply {
     SlowToolCall(std::time::Duration),
     /// A fully specified response (e.g. a provider-executed server-tool turn,
     /// KYO-969).
-    Response(LLMResponse),
+    Response(Box<LLMResponse>),
     /// A provider failure.
     Failure(String),
     /// A single tool call whose arguments the provider could not parse
@@ -220,6 +222,7 @@ pub(crate) fn tool_call_response(usage: AgentTokenUsage) -> LLMResponse {
         }]),
         cost: None,
         thinking_content: None,
+        call_detail: None,
     }
 }
 
@@ -285,6 +288,17 @@ impl LLMProvider for ScriptedProvider {
                 tool_calls: None,
                 cost: None,
                 thinking_content: None,
+                call_detail: None,
+            }),
+            Reply::TextWithThinking(content, thinking) => Ok(LLMResponse {
+                raw_response: serde_json::Value::Null,
+                content,
+                finish_reason: "end_turn".to_string(),
+                usage: AgentTokenUsage::default(),
+                tool_calls: None,
+                cost: None,
+                thinking_content: Some(thinking),
+                call_detail: None,
             }),
             Reply::ToolCall => Ok(tool_call_response(AgentTokenUsage::default())),
             Reply::ToolCallWithUsage(usage) => Ok(tool_call_response(usage)),
@@ -292,7 +306,7 @@ impl LLMProvider for ScriptedProvider {
                 tokio::time::sleep(duration).await;
                 Ok(tool_call_response(AgentTokenUsage::default()))
             }
-            Reply::Response(response) => Ok(response),
+            Reply::Response(response) => Ok(*response),
             Reply::Failure(message) => Err(kyomi_core::Error::Internal(message)),
             Reply::TruncatedToolCall => Ok(LLMResponse {
         raw_response: serde_json::Value::Null,
@@ -311,6 +325,7 @@ impl LLMProvider for ScriptedProvider {
                 }]),
                 cost: None,
                 thinking_content: None,
+                call_detail: None,
             }),
         }
     }

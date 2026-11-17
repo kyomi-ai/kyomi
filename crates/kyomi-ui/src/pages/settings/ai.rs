@@ -278,7 +278,7 @@ fn provider_effort_suggestions(provider: &str) -> Vec<String> {
     list.iter().map(|s| (*s).to_string()).collect()
 }
 
-const TEMPERATURE_SUGGESTIONS: &[&str] = &["omit", "0", "0.1", "0.3", "0.7", "1"];
+const TEMPERATURE_SUGGESTIONS: &[&str] = &["0", "0.1", "0.3", "0.7", "1"];
 
 #[component]
 fn TuningField(
@@ -320,9 +320,7 @@ fn LlmTuningCard() -> impl IntoView {
                     <div>
                         <h2 class="text-xl font-display text-foreground">"LLM Tuning"</h2>
                         <p class="text-sm text-muted-foreground">
-                            "Reasoning effort and temperature for this workspace. Leave a field empty to use the instance default (shown as the placeholder); type "
-                            <code class="px-1 py-0.5 bg-muted rounded-md text-xs font-mono">"omit"</code>
-                            " to send no value, which some models require."
+                            "Reasoning effort and temperature for this workspace. Leave a field empty to use the instance value (shown as the placeholder); if neither is set, nothing is sent and the provider's own default applies. A value you enter is sent exactly as written."
                         </p>
                     </div>
                     <Transition fallback=move || view! { <Skeleton class="h-40 w-full"/> }>
@@ -364,11 +362,10 @@ fn LlmTuningForm(
 ) -> impl IntoView {
     let LlmTuningView { provider, workspace, instance, warnings } = data;
 
-    let (mut efforts, default_effort) = match model_efforts {
+    let (efforts, default_effort) = match model_efforts {
         Some((supported, default)) if !supported.is_empty() => (supported, default),
         _ => (provider_effort_suggestions(&provider), None),
     };
-    efforts.push("omit".to_string());
 
     let reasoning = RwSignal::new(workspace.reasoning_effort.clone());
     let title_reasoning = RwSignal::new(workspace.title_reasoning_effort.clone());
@@ -391,8 +388,8 @@ fn LlmTuningForm(
     let ph_reasoning = placeholder(&instance.reasoning_effort, &effort_default);
     let ph_title_reasoning = placeholder(&instance.title_reasoning_effort, "low if a title model and chat effort are set, else none");
     let ph_watch_reasoning = placeholder(&instance.watch_reasoning_effort, "same as chat");
-    let ph_temperature = placeholder(&instance.temperature, "0.7 (chat), 0.1 (copilot)");
-    let ph_title_temperature = placeholder(&instance.title_temperature, "0.3");
+    let ph_temperature = placeholder(&instance.temperature, "none (provider default)");
+    let ph_title_temperature = placeholder(&instance.title_temperature, "none (provider default)");
     let ph_watch_temperature = placeholder(&instance.watch_temperature, "same as chat");
 
     let save = Action::new(|values: &LlmTuningValues| {
@@ -437,7 +434,7 @@ fn LlmTuningForm(
                 hint="Passed to the provider unchanged."
                 value=reasoning placeholder=ph_reasoning list_id="llm-effort-suggestions"/>
             <TuningField label="Temperature \u{2014} chat"
-                hint="A number from 0 to 2, or omit."
+                hint="Sent as written; leave empty to send none."
                 value=temperature placeholder=ph_temperature list_id="llm-temperature-suggestions"/>
             <TuningField label="Reasoning effort \u{2014} watches"
                 hint="Scheduled watch runs."

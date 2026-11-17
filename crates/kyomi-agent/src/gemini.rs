@@ -45,7 +45,7 @@ impl GeminiProvider {
     /// * `api_key` - Google AI API key.
     /// * `model` - Model name; uses [`DEFAULT_MODEL`] if `None`.
     /// * `base_url` - Base URL; uses [`DEFAULT_BASE_URL`] if `None`.
-    pub fn new(
+    pub(crate) fn new(
         api_key: String,
         model: Option<String>,
         base_url: Option<String>,
@@ -61,8 +61,10 @@ impl GeminiProvider {
         })
     }
 
-    /// Create a provider pointing at a custom API URL.
-    pub fn with_base_url(
+    /// Create a provider pointing at a custom API URL (tests only: production builds clients
+    /// through the metered factory).
+    #[cfg(test)]
+    pub(crate) fn with_base_url(
         api_key: String,
         model: Option<String>,
         base_url: String,
@@ -234,8 +236,8 @@ impl GeminiProvider {
         let mut gen_config = json!({
             "maxOutputTokens": options.max_tokens,
         });
-        if let Some(temp) = options.temperature {
-            gen_config["temperature"] = json!(temp);
+        if let Some(temp) = &options.temperature {
+            gen_config["temperature"] = temp.clone();
         }
         if let Some(effort) = &options.reasoning_effort {
             gen_config["thinkingConfig"] = match effort.parse::<i64>() {
@@ -480,6 +482,7 @@ impl GeminiProvider {
             },
             cost: None,
             thinking_content: None,
+            call_detail: None,
         })
     }
 
@@ -1316,7 +1319,7 @@ mod tests {
 
     #[test]
     fn temperature_number_is_sent_and_none_omits_it() {
-        let g = GeminiProvider::build_generation_config(&RequestOptions::new(512).with_temperature(Some(0.5)));
+        let g = GeminiProvider::build_generation_config(&RequestOptions::new(512).with_temperature(Some(json!(0.5))));
         assert_eq!(g["temperature"], json!(0.5));
         let g = GeminiProvider::build_generation_config(&RequestOptions::new(512).with_temperature(None));
         assert!(g.get("temperature").is_none());

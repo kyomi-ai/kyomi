@@ -43,6 +43,7 @@ impl crate::provider::LLMProvider for CapturedThenText {
             tool_calls: None,
             cost: None,
             thinking_content: None,
+            call_detail: None,
         })
     }
 }
@@ -103,7 +104,7 @@ struct TwoTurns {
 /// that reads history only from the database.
 async fn run_two_turns() -> TwoTurns {
     let captured = captured_search_message();
-    let live = crate::anthropic::AnthropicClient::parse_response("claude", &captured).expect("parse capture");
+    let live = crate::anthropic::AnthropicClient::parse_response("claude", &captured, None).expect("parse capture");
     let mut turns = run_turns(vec![live], false).await;
     turns.captured = captured;
     turns
@@ -150,7 +151,7 @@ async fn run_turns(script: Vec<crate::types::LLMResponse>, fail_when_exhausted: 
     let user2 = UserMessagePersistence::CallerPersisted(user_message_id);
     let assistant2 = AssistantMessagePersistence::Durable {
         message_id: assistant_message_id,
-        run: DurableRun { conversation_id: run.conversation_id.clone(), run_id, lease: claim.snapshot.lease.expect("lease"), context: Arc::new(claim.context) },
+        run: DurableRun { conversation_id: run.conversation_id.clone(), run_id, lease: claim.snapshot.lease.expect("lease"), context: Arc::new(claim.context), billing: Default::default() },
     };
     let mut second = adapter_with_server_tools(&db, &session_id, &key,
         CapturedThenText { script: std::sync::Mutex::new(Default::default()), fail_when_exhausted: false, seen: seen.clone() });
@@ -192,7 +193,7 @@ async fn a_provider_executed_search_is_recorded_as_a_source_card_event_and_repla
     let key = Arc::new([7u8; 32]);
     let session_id = uuid::Uuid::new_v4().to_string();
     let captured = captured_search_message();
-    let live = crate::anthropic::AnthropicClient::parse_response("claude", &captured).expect("parse capture");
+    let live = crate::anthropic::AnthropicClient::parse_response("claude", &captured, None).expect("parse capture");
     let (user, assistant) = claim_durable_turn(&db, &key, &session_id, chrono::Utc::now().timestamp_millis(), 30_000).await;
     let mut adapter = adapter_with_server_tools(&db, &session_id, &key,
         CapturedThenText { script: std::sync::Mutex::new(vec![live].into()), fail_when_exhausted: false, seen: Arc::new(std::sync::Mutex::new(Vec::new())) });
@@ -317,7 +318,7 @@ async fn a_failed_run_does_not_keep_blocks_for_the_replaced_text() {
     crate::test_support::seed_user_and_workspace(&db).await;
     let key = Arc::new([7u8; 32]);
     let session_id = uuid::Uuid::new_v4().to_string();
-    let live = crate::anthropic::AnthropicClient::parse_response("claude", &captured_search_message()).expect("parse");
+    let live = crate::anthropic::AnthropicClient::parse_response("claude", &captured_search_message(), None).expect("parse");
     let (user, assistant) = claim_durable_turn(&db, &key, &session_id, chrono::Utc::now().timestamp_millis(), 30_000).await;
     let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
     let mut adapter = adapter_with_server_tools(&db, &session_id, &key, CapturedThenText { script: std::sync::Mutex::new(vec![live].into()), fail_when_exhausted: false, seen });
@@ -376,7 +377,7 @@ async fn the_legacy_error_text_write_drops_blocks_but_completion_keeps_them() {
 
 fn live_response(raw: &str) -> crate::types::LLMResponse {
     let value: serde_json::Value = serde_json::from_str(raw).expect("fixture");
-    crate::anthropic::AnthropicClient::parse_response("claude", &value).expect("parse capture")
+    crate::anthropic::AnthropicClient::parse_response("claude", &value, None).expect("parse capture")
 }
 
 fn live_pause_chain() -> (crate::types::LLMResponse, crate::types::LLMResponse) {

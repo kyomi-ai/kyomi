@@ -35,7 +35,7 @@ pub mod workspace;
 pub mod workspace_invitation;
 
 pub use api_token::ApiToken;
-pub use api_usage_log::ApiUsageLog;
+pub use api_usage_log::{ApiUsageInsert, ApiUsageLog};
 pub use chartml_validation_log::ChartMLValidationLog;
 pub use auth_method::UserAuthMethod;
 pub use chart::Chart;

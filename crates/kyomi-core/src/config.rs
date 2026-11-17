@@ -247,7 +247,9 @@ pub struct Config {
     pub llm_base_url: Option<String>,
 
     /// Context window size for the configured LLM model (in tokens).
-    /// Populated at startup from the provider's model list API (e.g., OpenRouter).
+    /// `LLM_CONTEXT_WINDOW` when set (it always wins); otherwise populated at
+    /// startup from the provider's model list API (e.g., OpenRouter), and
+    /// otherwise left 0 so the provider uses its own per-model window.
     /// 0 = unknown.
     pub llm_context_window: u32,
 
@@ -259,7 +261,7 @@ pub struct Config {
     /// (`LLM_REASONING_EFFORT`, `LLM_TITLE_REASONING_EFFORT`,
     /// `LLM_WATCH_REASONING_EFFORT`, `LLM_TEMPERATURE`,
     /// `LLM_TITLE_TEMPERATURE`, `LLM_WATCH_TEMPERATURE`). Unset fields send
-    /// nothing extra; `omit` explicitly omits the field. See
+    /// nothing; set values are passed through as given. See
     /// [`crate::llm_sampling`].
     pub llm_sampling: crate::llm_sampling::LlmSamplingSettings,
 
@@ -506,7 +508,7 @@ impl Config {
             llm_api_key: env::var("LLM_API_KEY").ok(),
             llm_model: env::var("LLM_MODEL").ok(),
             llm_base_url: env::var("LLM_BASE_URL").ok(),
-            llm_context_window: 0,
+            llm_context_window: context_window_from(|k| env::var(k).ok()),
             llm_title_model: env::var("LLM_TITLE_MODEL").ok(),
             llm_sampling: llm_sampling_from_env(),
             web_tools: crate::web_tools::WebToolsSettings::from_env(),
@@ -645,6 +647,14 @@ impl Config {
         self.slack_client_id.is_some() && self.slack_client_secret.is_some()
     }
 
+    /// Record a context window fetched from the provider's model list API. An
+    /// explicit `LLM_CONTEXT_WINDOW` is never overwritten.
+    pub fn apply_fetched_context_window(&mut self, tokens: u32) {
+        if self.llm_context_window == 0 {
+            self.llm_context_window = tokens;
+        }
+    }
+
     /// Returns true if an LLM provider is configured (AI features available).
     pub fn llm_configured(&self) -> bool {
         self.anthropic_api_key.is_some() || self.llm_api_key.is_some()
@@ -666,6 +676,20 @@ fn optional_parsed<T>(
     }
 }
 
+/// `LLM_CONTEXT_WINDOW` in tokens; unset or empty means 0 (use the provider's
+/// per-model window). An invalid value aborts startup naming the variable.
+fn context_window_from(get: impl Fn(&str) -> Option<String>) -> u32 {
+    match get("LLM_CONTEXT_WINDOW") {
+        Some(raw) if !raw.trim().is_empty() => raw
+            .trim()
+            .parse::<u32>()
+            .ok()
+            .filter(|n| *n > 0)
+            .unwrap_or_else(|| panic!("LLM_CONTEXT_WINDOW: expected a positive integer, got {raw:?}")),
+        _ => 0,
+    }
+}
+
 fn llm_sampling_from_env() -> crate::llm_sampling::LlmSamplingSettings {
     llm_sampling_from(|k| env::var(k).ok())
 }
@@ -673,14 +697,24 @@ fn llm_sampling_from_env() -> crate::llm_sampling::LlmSamplingSettings {
 /// Build the instance LLM tuning from a variable lookup (the process
 /// environment in production; a map in tests).
 fn llm_sampling_from(get: impl Fn(&str) -> Option<String>) -> crate::llm_sampling::LlmSamplingSettings {
-    use crate::llm_sampling::{parse_reasoning_effort as effort, parse_temperature as temp};
+    use crate::llm_sampling::parse_reasoning_effort as effort;
+    // Temperature is passed through as set (no validation); empty text is unset.
+    let temp = |key: &str| {
+        get(key)
+            .filter(|raw| !raw.trim().is_empty())
+            .inspect(|raw| crate::llm_sampling::warn_if_legacy_omit(key, Some(raw)))
+            .map(|raw| crate::llm_sampling::temperature_value(&raw))
+    };
+    for key in ["LLM_REASONING_EFFORT", "LLM_TITLE_REASONING_EFFORT", "LLM_WATCH_REASONING_EFFORT"] {
+        crate::llm_sampling::warn_if_legacy_omit(key, get(key).as_deref());
+    }
     crate::llm_sampling::LlmSamplingSettings {
         reasoning_effort: optional_parsed(&get, "LLM_REASONING_EFFORT", effort),
         title_reasoning_effort: optional_parsed(&get, "LLM_TITLE_REASONING_EFFORT", effort),
         watch_reasoning_effort: optional_parsed(&get, "LLM_WATCH_REASONING_EFFORT", effort),
-        temperature: optional_parsed(&get, "LLM_TEMPERATURE", temp),
-        title_temperature: optional_parsed(&get, "LLM_TITLE_TEMPERATURE", temp),
-        watch_temperature: optional_parsed(&get, "LLM_WATCH_TEMPERATURE", temp),
+        temperature: temp("LLM_TEMPERATURE"),
+        title_temperature: temp("LLM_TITLE_TEMPERATURE"),
+        watch_temperature: temp("LLM_WATCH_TEMPERATURE"),
     }
 }
 

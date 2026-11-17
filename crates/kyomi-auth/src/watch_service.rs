@@ -2367,7 +2367,6 @@ pub async fn create_chat_session_from_alert(
             "last_input_tokens": 0,
             "config": {
                 "max_iterations": 25,
-                "temperature": 0.1,
             }
         });
 
