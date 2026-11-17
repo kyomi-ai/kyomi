@@ -44,8 +44,9 @@ pub fn resolve_for_call(
 
 /// Whether a dedicated title model is configured for this workspace.
 pub fn title_model_configured(ws_config: &WorkspaceAiConfig, app_config: &Config) -> bool {
-    let ws_title = app_config.self_hosted && ws_config.title_model.is_some();
-    ws_title || app_config.llm_title_model.is_some()
+    // Mirrors what the title/summary/tag callers request: the workspace title model, else
+    // `LLM_TITLE_MODEL`, on every setup.
+    ws_config.title_model.is_some() || app_config.llm_title_model.is_some()
 }
 
 /// Request options for a short background call (title, summary, tagging).
@@ -132,16 +133,17 @@ mod tests {
     }
 
     #[test]
-    fn title_model_configured_follows_workspace_only_when_self_hosted() {
+    fn title_model_configured_follows_the_model_the_callers_request() {
         let mut c = config(true);
         assert!(title_model_configured(&ws(Default::default(), Some("m")), &c));
         assert!(!title_model_configured(&ws(Default::default(), None), &c));
         // The instance title model counts too.
         c.llm_title_model = Some("env-title".into());
         assert!(title_model_configured(&ws(Default::default(), None), &c));
-        // SaaS ignores a workspace title model.
+        // On SaaS the workspace title model is requested too, so it counts.
         let saas = config(false);
-        assert!(!title_model_configured(&ws(Default::default(), Some("m")), &saas));
+        assert!(title_model_configured(&ws(Default::default(), Some("m")), &saas));
+        assert!(!title_model_configured(&ws(Default::default(), None), &saas));
     }
 
     #[test]

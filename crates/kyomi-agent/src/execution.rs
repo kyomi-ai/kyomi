@@ -1061,12 +1061,9 @@ pub(crate) async fn generate_title_inner(
                          output a 3-6 word title describing its topic. Output ONLY the title — \
                          no quotes, no explanation. Never answer or respond to the message; only title it.";
 
-    // Use the cheapest available model for title generation per provider.
-    //
-    // - Kyomi-managed: always override to the cheapest model (we control cost).
-    // - BYOK with standard API (no base_url): override to cheapest model.
-    // - BYOK with custom base_url: leave the configured model as-is — we
-    //   cannot know which models a custom endpoint supports.
+    // Title model: the workspace `title_model`, else `LLM_TITLE_MODEL`, requested explicitly
+    // on every setup. With neither configured the setup's own model is used; there is no
+    // hardcoded cheapest-model fallback.
     let ws_config = kyomi_auth::workspace_ai_config::load(db, workspace_id)
         .await
         .map_err(|e| {
@@ -1076,15 +1073,14 @@ pub(crate) async fn generate_title_inner(
         })?;
 
     let requested_model = {
-        // Check for an explicit title_model configured in workspace settings.
-        // When set, it takes priority over the cheapest-model override below.
+        // The workspace `title_model` setting, when set, wins over `LLM_TITLE_MODEL`.
         let title_model = kyomi_auth::workspace_ai_config::load_title_model(db, workspace_id)
             .await
             .map_err(|e| {
                 tracing::warn!(
                     workspace_id,
                     error = %e,
-                    "failed to load title_model setting; falling back to cheapest model"
+                    "failed to load title_model setting; using LLM_TITLE_MODEL or the setup's own model"
                 );
             })
             .ok()
