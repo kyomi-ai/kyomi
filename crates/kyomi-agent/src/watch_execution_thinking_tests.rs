@@ -195,28 +195,79 @@ async fn terminal_update_matching_no_row_is_logged_at_error_level() {
     );
 }
 
-/// A cancelled watch turn saves no assistant row, so there is nothing for the
-/// full-text rows to reference: they must be skipped, not attempted and
-/// reported as a failed store.
+/// Test 1, main run: a real `execute_watch_inner` run (the path scheduled and
+/// manual watch runs take) saves the thinking events on its assistant row,
+/// and that row's id is the one its full reasoning text is stored under.
 #[tokio::test]
-async fn cancelled_watch_turn_does_not_attempt_to_store_thinking_details() {
+async fn execute_watch_inner_attaches_the_trace_to_the_saved_assistant_row() {
     let logs = capture_tracing();
-    let run = run_watch_turn(|session_id| {
-        let config = watch_config(session_id);
-        config.cancel_token.cancel();
-        config
-    })
-    .await;
+    let llm = fake_llm().await;
+    let db = test_pool().await;
+    seed_user_and_workspace(&db).await;
+    let watch = watch_service::create_watch(
+        &db, "ws-1", "user-a", "Revenue", "Check revenue.", "0 9 * * *", None, "alert", None,
+        None, None, false,
+    )
+    .await
+    .expect("create watch");
+    let execution = watch_service::create_execution(
+        &db, &watch.watch_id, &watch.name, "ws-1", watch.mode, "user-a",
+    )
+    .await
+    .expect("create execution");
 
-    assert_eq!(run.result.status, "cancelled");
+    let mut app_config = kyomi_core::Config::test_config();
+    app_config.self_hosted = false;
+    app_config.llm_provider = Some("openai".into());
+    app_config.llm_api_key = Some("test-key".into());
+    app_config.llm_model = Some("fake-model".into());
+    app_config.llm_base_url = Some(llm.uri());
+    let app_config = Arc::new(app_config);
+    let kv = kyomi_core::kv_store_memory::InMemoryKVStore::new_pool();
+    let embedding = kyomi_embed::EmbeddingService::new().expect("load embedding model");
+    let ws_manager = kyomi_auth::websocket::WebSocketManager::new(None, db.clone());
+    let key = Arc::new(KEY);
+    let platforms = Arc::new(kyomi_core::platform::PlatformRegistry::new());
+
+    execute_watch_inner(
+        &db, &kv, &key, &embedding, &ws_manager, &app_config, None, &platforms, &watch,
+        execution.id,
+    )
+    .await
+    .expect("watch run completes");
+
+    let saved = watch_service::get_execution_by_id(&db, &watch.watch_id, execution.id, "ws-1", "user-a")
+        .await
+        .expect("load execution")
+        .expect("execution exists");
+    let session_id = saved.session_id.expect("execution is linked to its session");
+    let messages = chat_service::get_session_messages(&db, &KEY, &session_id, 100)
+        .await
+        .expect("load session messages");
+    let assistant = messages
+        .iter()
+        .find(|m| m.message_type == "assistant")
+        .expect("assistant row was saved");
     assert!(
-        logs.has_message_containing(tracing::Level::ERROR, "matched no row"),
-        "the lost terminal update must be reported at error level: {:?}",
-        logs.events()
+        !assistant.thinking_events.is_empty(),
+        "the assistant row's thinking_events must not be empty"
     );
+    let event_id = assistant
+        .thinking_events
+        .iter()
+        .find(|e| e.get("has_full_text").and_then(|v| v.as_bool()) == Some(true))
+        .and_then(|e| e["event_id"].as_str())
+        .expect("a reasoning event with full text");
+    let full = chat_service::get_thinking_event_detail(
+        &db, &KEY, &assistant.message_id, event_id, "user-a", "ws-1",
+    )
+    .await
+    .expect("detail lookup")
+    .expect("full text is stored under the saved row's id");
+    assert_eq!(full, long_reasoning());
     assert!(
         !logs.has_message_containing(tracing::Level::WARN, "Failed to store thinking event details"),
-        "a turn with no saved row must not try to store details: {:?}",
+        "{:?}",
         logs.events()
     );
 }

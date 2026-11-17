@@ -2092,11 +2092,8 @@ pub struct SessionThinkingTrace {
     pub events: Vec<serde_json::Value>,
 }
 
-/// The last assistant message of `session_id` that carries thinking events.
-///
-/// A watch run that fails validation is retried in the same session, so the
-/// session can hold several assistant messages with events. The last one is
-/// the turn that produced the stored answer, so its trace is the one shown.
+/// The first assistant message of `session_id` that carries thinking events
+/// (the selection rule this code has always used).
 ///
 /// `chat_service::get_session_messages` filters only on `session_id`, so the
 /// caller must already have authorised access to the session (see the notes
@@ -2109,7 +2106,6 @@ pub async fn load_session_thinking_trace(
     let messages = chat_service::get_session_messages(db, encryption_key, session_id, 1000).await?;
     Ok(messages
         .into_iter()
-        .rev()
         .find(|m| m.message_type == "assistant" && !m.thinking_events.is_empty())
         .map(|m| SessionThinkingTrace {
             message_id: m.message_id,
@@ -2124,6 +2120,18 @@ pub async fn load_session_thinking_trace(
 pub struct ExecutionThinkingEvents {
     pub message_id: Option<String>,
     pub events: Vec<serde_json::Value>,
+}
+
+/// Events that old executions stored on `execution_trace` (they have no
+/// message row, so no full texts). Empty when there are none.
+fn legacy_trace_events(execution: &kyomi_core::models::WatchExecution) -> Vec<serde_json::Value> {
+    execution
+        .execution_trace
+        .as_ref()
+        .and_then(|t| t.get("events"))
+        .and_then(|e| e.as_array())
+        .cloned()
+        .unwrap_or_default()
 }
 
 /// Load the thinking events of `execution` (already authorised by the
@@ -2142,14 +2150,7 @@ pub async fn get_execution_thinking_events(
         });
     }
 
-    // Fallback for old executions that stored events in execution_trace.
-    let events = execution
-        .execution_trace
-        .as_ref()
-        .and_then(|t| t.get("events"))
-        .and_then(|e| e.as_array())
-        .cloned()
-        .unwrap_or_default();
+    let events = legacy_trace_events(execution);
     Ok(ExecutionThinkingEvents { message_id: None, events })
 }
 
@@ -2233,12 +2234,30 @@ pub async fn create_chat_session_from_alert(
     // user's execution. If this session_id is ever sourced from anywhere
     // other than the gated `execution` row, it must get its own ownership
     // check — do not assume get_session_messages is safe on its own.
-    let trace = get_execution_thinking_events(db, encryption_key, &execution).await?;
+    let mut events: Vec<serde_json::Value> = Vec::new();
     // The source assistant message, whose full-text details are copied to the
     // new message in step 8 so "more" keeps working in the continued chat.
-    let source_message_id = trace.message_id;
+    let mut source_message_id: Option<String> = None;
+
+    if let Some(ref session_id) = execution.session_id {
+        match load_session_thinking_trace(db, encryption_key, session_id).await {
+            Ok(Some(trace)) => {
+                events = trace.events;
+                source_message_id = Some(trace.message_id);
+            }
+            Ok(None) => {}
+            Err(e) => {
+                tracing::warn!("Failed to load thinking events from session: {e}");
+            }
+        }
+    }
+
+    // Fallback for old executions that stored events in execution_trace.
+    if events.is_empty() {
+        events = legacy_trace_events(&execution);
+    }
     let thinking_events =
-        (!trace.events.is_empty()).then_some(serde_json::Value::Array(trace.events));
+        (!events.is_empty()).then_some(serde_json::Value::Array(events));
 
     // 5. Load agent_state from the execution trace.
     let mut agent_state: Option<serde_json::Value> = None;
@@ -3882,20 +3901,18 @@ mod privacy_tests {
         assert_eq!(full, LONG_REASONING);
     }
 
-    /// A watch run that failed validation is retried in the same session, so
-    /// the session holds two traced assistant messages. The trace (and the
-    /// message id that "more" uses) must belong to the last one — the turn
-    /// that produced the stored answer.
+    /// With two traced assistant messages in one session (a validation retry),
+    /// the existing selection rule applies: the first one, with its own events
+    /// and full texts. The retry's steps stay in the database.
     #[tokio::test]
-    async fn execution_trace_is_the_turn_that_produced_the_answer() {
+    async fn execution_trace_uses_the_first_traced_assistant_message() {
         let pool = test_pool().await;
         seed_two_users_one_workspace(sqlite_pool(&pool), "a@test.local", "b@test.local").await;
         let watch = create_test_watch(&pool, "user-a", "Retry Watch").await;
-        let (execution_id, session_id, first_message_id, _) =
+        let (execution_id, session_id, first_message_id, first_event_id) =
             seed_execution_with_trace(&pool, &watch.watch_id).await;
-        let retry_text = "Reasoning of the retry turn, which produced the stored answer.";
-        let (retry_message_id, retry_event_id) =
-            add_traced_assistant_message(&pool, &session_id, "evt-retry-1", retry_text).await;
+        let (retry_message_id, _) =
+            add_traced_assistant_message(&pool, &session_id, "evt-retry-1", "retry reasoning").await;
         assert_ne!(first_message_id, retry_message_id);
 
         let execution = get_execution_by_id(&pool, &watch.watch_id, execution_id, "ws-1", "user-a")
@@ -3907,13 +3924,76 @@ mod privacy_tests {
             .await
             .expect("load thinking events");
 
-        assert_eq!(trace.message_id.as_deref(), Some(retry_message_id.as_str()));
+        assert_eq!(trace.message_id.as_deref(), Some(first_message_id.as_str()));
         let full = chat_service::get_thinking_event_detail(
-            &pool, key, &retry_message_id, &retry_event_id, "user-a", "ws-1",
+            &pool, key, &first_message_id, &first_event_id, "user-a", "ws-1",
         )
         .await
         .expect("detail lookup");
-        assert_eq!(full.as_deref(), Some(retry_text));
+        assert_eq!(full.as_deref(), Some(LONG_REASONING));
+    }
+
+    /// An old alert with no trace data at all still continues in chat: empty is
+    /// not an error.
+    #[tokio::test]
+    async fn continue_in_chat_works_for_an_alert_with_no_trace() {
+        let pool = test_pool().await;
+        seed_two_users_one_workspace(sqlite_pool(&pool), "a@test.local", "b@test.local").await;
+        let watch = create_test_watch(&pool, "user-a", "Old Watch").await;
+        let execution_id = insert_triggered_alert_with_content(
+            &pool, &watch.watch_id, "user-a", "old answer", "old prompt", "Old Alert",
+        )
+        .await;
+        let key = &[0u8; 32];
+
+        let session = create_chat_session_from_alert(&pool, key, "user-a", "ws-1", execution_id)
+            .await
+            .expect("an alert without a trace continues in chat");
+
+        let trace = load_session_thinking_trace(&pool, key, &session)
+            .await
+            .expect("load new session trace");
+        assert!(trace.is_none(), "there is no trace to carry over");
+        let messages = chat_service::get_session_messages(&pool, key, &session, 10)
+            .await
+            .expect("messages");
+        assert!(messages.iter().any(|m| m.content.contains("old answer")));
+    }
+
+    /// An old execution that stored its events on `execution_trace` (the
+    /// fallback this ticket leaves as is) keeps them in the continued chat;
+    /// there are no full texts to copy.
+    #[tokio::test]
+    async fn continue_in_chat_keeps_the_execution_trace_events_fallback() {
+        let pool = test_pool().await;
+        seed_two_users_one_workspace(sqlite_pool(&pool), "a@test.local", "b@test.local").await;
+        let watch = create_test_watch(&pool, "user-a", "Old Watch").await;
+        let execution_id = insert_triggered_alert_with_content(
+            &pool, &watch.watch_id, "user-a", "old answer", "old prompt", "Old Alert",
+        )
+        .await;
+        let trace = serde_json::json!({
+            "watch_prompt": "old prompt",
+            "alert_title": "Old Alert",
+            "events": [{"event_id": "old-1", "event_type": "agent_thought", "title": "Planning"}],
+        });
+        sqlx::query("UPDATE watch_executions SET execution_trace = $1 WHERE id = $2")
+            .bind(trace.to_string())
+            .bind(execution_id)
+            .execute(sqlite_pool(&pool))
+            .await
+            .expect("store legacy events");
+        let key = &[0u8; 32];
+
+        let session = create_chat_session_from_alert(&pool, key, "user-a", "ws-1", execution_id)
+            .await
+            .expect("continue in chat");
+
+        let carried = load_session_thinking_trace(&pool, key, &session)
+            .await
+            .expect("load new session trace")
+            .expect("the legacy events are carried over");
+        assert_eq!(carried.events.len(), 1);
     }
 
     /// If copying a detail row fails, no assistant message is left behind in
@@ -3947,32 +4027,6 @@ mod privacy_tests {
         .await
         .expect("count assistant messages");
         assert_eq!(stray.0, 0, "no assistant message may survive a failed detail copy");
-    }
-
-    /// Continue in Chat fails, and creates nothing, when the execution's
-    /// trace cannot be loaded; it no longer carries on without the events.
-    #[tokio::test]
-    async fn continue_in_chat_fails_when_the_trace_cannot_be_loaded() {
-        let pool = test_pool().await;
-        seed_two_users_one_workspace(sqlite_pool(&pool), "a@test.local", "b@test.local").await;
-        let watch = create_test_watch(&pool, "user-a", "Trace Watch").await;
-        let (execution_id, _, _, _) = seed_execution_with_trace(&pool, &watch.watch_id).await;
-        // Make reading the session's messages fail with a database error.
-        sqlx::query("ALTER TABLE chat_messages RENAME TO chat_messages_unavailable")
-            .execute(sqlite_pool(&pool))
-            .await
-            .expect("make messages unreadable");
-
-        let result =
-            create_chat_session_from_alert(&pool, &[0u8; 32], "user-a", "ws-1", execution_id).await;
-        assert!(result.is_err(), "an unloadable trace must fail the call: {result:?}");
-        let sessions: (i64,) = sqlx::query_as(
-            "SELECT COUNT(*) FROM chat_sessions WHERE session_type = 'chat'",
-        )
-        .fetch_one(sqlite_pool(&pool))
-        .await
-        .expect("count chat sessions");
-        assert_eq!(sessions.0, 0, "no chat session may be created");
     }
 
     // ── Alert mutation IDOR guards (KYO-204) ─────────────────────────────

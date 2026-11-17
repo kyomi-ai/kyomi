@@ -1088,6 +1088,54 @@ fn decode_session_messages(rows: Vec<MessageWithSenderRow>, encryption_key: &[u8
     Ok(result)
 }
 
+/// The values of one `chat_messages` INSERT; see [`insert_message_row!`].
+struct MessageRow<'a> {
+    message_id: &'a str,
+    session_id: &'a str,
+    role: &'a str,
+    encrypted_content: &'a str,
+    sent_by_user_id: Option<&'a str>,
+    created_at: chrono::DateTime<Utc>,
+    current_time_user_tz: Option<&'a str>,
+    message_source: Option<&'a str>,
+    encrypted_metadata: Option<&'a str>,
+    tool_call_id: Option<&'a str>,
+    tool_name: Option<&'a str>,
+    tool_calls: Option<&'a serde_json::Value>,
+    status: &'a str,
+}
+
+/// The one `chat_messages` INSERT, run on any sqlx executor — a pool
+/// ([`add_message`]) or an open transaction
+/// ([`add_assistant_message_with_thinking_details`]).
+macro_rules! insert_message_row {
+    ($executor:expr, $row:expr) => {{
+        let row = &$row;
+        sqlx::query(
+            "INSERT INTO chat_messages \
+             (message_id, session_id, role, content, sent_by_user_id, pinned, \
+              created_at, current_time_user_tz, message_source, extra_metadata, \
+              tool_call_id, tool_name, tool_calls, status) \
+             VALUES ($1, $2, $3, $4, $5, false, $6, $7, $8, $9, $10, $11, $12, $13)",
+        )
+        .bind(row.message_id)
+        .bind(row.session_id)
+        .bind(row.role)
+        .bind(row.encrypted_content)
+        .bind(row.sent_by_user_id)
+        .bind(row.created_at)
+        .bind(row.current_time_user_tz)
+        .bind(row.message_source)
+        .bind(row.encrypted_metadata)
+        .bind(row.tool_call_id)
+        .bind(row.tool_name)
+        .bind(row.tool_calls as Option<&serde_json::Value>)
+        .bind(row.status)
+        .execute($executor)
+        .await
+    }};
+}
+
 /// Add a message to a session. Encrypts content and metadata before storage.
 ///
 /// `message_source` (`"web"`, `"slack"`, `"mcp"`, `"Kyomi Watch"`, ...) is
@@ -1149,28 +1197,23 @@ pub async fn add_message(
     };
 
     // Insert message.
-    kyomi_core::db_execute!(
-        db,
-        "INSERT INTO chat_messages \
-         (message_id, session_id, role, content, sent_by_user_id, pinned, \
-          created_at, current_time_user_tz, message_source, extra_metadata, \
-          tool_call_id, tool_name, tool_calls, status) \
-         VALUES ($1, $2, $3, $4, $5, false, $6, $7, $8, $9, $10, $11, $12, $13)",
-        &msg_id,
+    let row = MessageRow {
+        message_id: &msg_id,
         session_id,
         role,
-        &encrypted_content,
+        encrypted_content: &encrypted_content,
         sent_by_user_id,
-        now,
+        created_at: now,
         current_time_user_tz,
         message_source,
-        encrypted_metadata,
+        encrypted_metadata: encrypted_metadata.as_deref(),
         tool_call_id,
         tool_name,
-        tool_calls as Option<&serde_json::Value>,
-        status.as_str()
-    )
-    .map_err(|e| kyomi_core::Error::Internal(format!("failed to add message: {e}")))?;
+        tool_calls,
+        status: status.as_str(),
+    };
+    kyomi_core::db_with_pool!(db, |p| insert_message_row!(p, row).map(|_| ()))
+        .map_err(|e| kyomi_core::Error::Internal(format!("failed to add message: {e}")))?;
 
     touch_session_after_message(db, session_id, now).await?;
 
@@ -3126,26 +3169,26 @@ pub async fn add_assistant_message_with_thinking_details(
         None => None,
     };
 
-    // The INSERT below mirrors the column set `add_message` writes for a
-    // completed assistant message; it is a separate statement only because
-    // `add_message` cannot run inside a caller's transaction. Keep the two in
-    // step if the `chat_messages` columns change.
+    let row = MessageRow {
+        message_id,
+        session_id,
+        role: "assistant",
+        encrypted_content: &encrypted_content,
+        sent_by_user_id: None,
+        created_at: now,
+        current_time_user_tz: None,
+        message_source: None,
+        encrypted_metadata: encrypted_metadata.as_deref(),
+        tool_call_id: None,
+        tool_name: None,
+        tool_calls: None,
+        status: MessageStatus::Complete.as_str(),
+    };
+
     macro_rules! insert_in_transaction {
         ($pool:expr) => {{
             let mut tx = $pool.begin().await?;
-            sqlx::query(
-                "INSERT INTO chat_messages \
-                 (message_id, session_id, role, content, pinned, created_at, extra_metadata, status) \
-                 VALUES ($1, $2, 'assistant', $3, false, $4, $5, $6)",
-            )
-            .bind(message_id)
-            .bind(session_id)
-            .bind(&encrypted_content)
-            .bind(now)
-            .bind(&encrypted_metadata)
-            .bind(MessageStatus::Complete.as_str())
-            .execute(&mut *tx)
-            .await?;
+            insert_message_row!(&mut *tx, row)?;
             if let Some(source) = copy_details_from {
                 let rows: Vec<(String, String)> = sqlx::query_as(
                     "SELECT event_id, full_text FROM thinking_event_details WHERE message_id = $1",

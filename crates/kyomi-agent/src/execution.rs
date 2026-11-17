@@ -540,7 +540,15 @@ pub async fn execute_agent_chat(
     //    `persist_after_chat()` INSERTs the real response under it. The
     //    same id feeds the tracker, step 14's metadata write and step 15b's
     //    full-text rows, so they cannot diverge from the saved row.
-    let assistant_message_id = config.assistant_message_persistence.message_id().to_string();
+    let assistant_message_id = config
+        .assistant_message_persistence
+        .tag_id()
+        .map(str::to_string)
+        .ok_or_else(|| {
+            kyomi_core::Error::Internal(
+                "assistant message persistence carries no message id".to_string(),
+            )
+        })?;
 
     // 9. Create thinking tracker.
     // Context window comes from the provider (which gets it from the workspace
@@ -739,10 +747,6 @@ pub async fn execute_agent_chat(
     //     call is the only place it's persisted — the exact gap KYO-493's
     //     ticket describes ("today an in-loop error is streamed to the
     //     client but never persisted").
-    // Set when step 14 finds no row for the assistant message id. Step 15b's
-    // rows reference that row by foreign key, so they are skipped in that case
-    // (the error logged below already reports that they were not saved).
-    let mut assistant_row_missing = false;
     if config.assistant_message_persistence.durable_run().is_none() {
         let metadata = serde_json::json!({
             "model": model_name,
@@ -771,17 +775,14 @@ pub async fn execute_agent_chat(
         {
             Ok(true) => {}
             // No row carries this id: the thinking events, token usage and
-            // terminal status went nowhere. Either the row was saved under a
-            // different id (the KYO-976 defect) or this turn ended before any
-            // reply was saved (error/cancel on `AdapterInserts`); both lose
-            // data, so it must be loud, not a silent `false`.
+            // terminal status went nowhere. This is the signature of an id
+            // mismatch (KYO-976), so it must be loud, not a silent `false`.
             Ok(false) => {
-                assistant_row_missing = true;
                 error!(
                     session_id = %config.session_id,
                     assistant_message_id = %assistant_message_id,
                     "Terminal assistant message update matched no row — thinking events, \
-                     full reasoning texts, token usage and status were not saved"
+                     token usage and status were not saved"
                 );
             }
             Err(e) if content.is_some() => {
@@ -808,7 +809,6 @@ pub async fn execute_agent_chat(
         ).await.map_err(|e| kyomi_core::Error::ServiceUnavailable(e.to_string()))?;
     }
     if config.assistant_message_persistence.durable_run().is_none()
-        && !assistant_row_missing
         && !full_texts.is_empty()
         && let Err(e) = chat_service::store_thinking_event_details(
             db,

@@ -200,36 +200,34 @@ pub struct DurableRun {
 }
 
 impl Default for AssistantMessagePersistence {
-    /// `AdapterInserts` under a freshly minted id. The id travels with the
-    /// variant, so whoever reads the persistence (tracker, terminal metadata
-    /// write, full-text rows) and the adapter that inserts the row always see
-    /// the same one — there is no "no id" state (KYO-976).
+    /// `AdapterInserts` under a freshly minted id: no pre-inserted row. The
+    /// id travels with the variant, so there is no "no id" state (KYO-976).
     fn default() -> Self {
         Self::adapter_inserts_with_new_id()
     }
 }
 
 impl AssistantMessagePersistence {
-    /// The id of the assistant message this turn produces. Every variant
-    /// carries one, so there is no "untagged" case (KYO-976). It is what
-    /// keeps the id used for WebSocket streaming / the thinking tracker in
-    /// sync with the id ultimately written to the DB.
-    ///
-    /// `pub(crate)`: also called from `crate::execution::execute_agent_chat`
-    /// to resolve the id it hands the thinking tracker and
-    /// `AgentExecutionResult`, before `ChatParams` is even built.
-    pub(crate) fn message_id(&self) -> &str {
-        match self {
-            Self::AdapterInserts(id) => id.as_str(),
-            Self::CallerPreInserted(id) => id.as_str(),
-            Self::Durable { message_id, .. } => message_id.as_str(),
-        }
-    }
-
     /// `AdapterInserts` under a freshly minted id — for callers that do not
     /// choose the id themselves (watch execution, Slack).
     pub fn adapter_inserts_with_new_id() -> Self {
         Self::AdapterInserts(uuid::Uuid::new_v4().to_string())
+    }
+
+    /// The id to stamp on the final assistant message in agent state — fires
+    /// for every variant (each carries an id).
+    /// This is what keeps the id used for WebSocket streaming / the
+    /// thinking tracker in sync with the id ultimately written to the DB.
+    ///
+    /// `pub(crate)`: also called from `crate::execution::execute_agent_chat`
+    /// to resolve the id it hands the thinking tracker and
+    /// `AgentExecutionResult`, before `ChatParams` is even built.
+    pub(crate) fn tag_id(&self) -> Option<&str> {
+        match self {
+            Self::AdapterInserts(id) => Some(id.as_str()),
+            Self::CallerPreInserted(id) => Some(id.as_str()),
+            Self::Durable { message_id, .. } => Some(message_id.as_str()),
+        }
     }
 
     /// The id of a row the caller already pre-inserted — `Some` only for
@@ -699,7 +697,9 @@ impl ChatAgentAdapter {
 
         // Tag the final assistant message with the known ID so that the DB
         // record matches the ID used for WebSocket streaming.
-        self.tag_last_assistant_message_id(params.assistant_message_persistence.message_id());
+        if let Some(amid) = params.assistant_message_persistence.tag_id() {
+            self.tag_last_assistant_message_id(amid);
+        }
 
         // Durable turns must surface every persistence failure before their worker
         // can commit a terminal result. Legacy callers retain their existing
@@ -714,7 +714,7 @@ impl ChatAgentAdapter {
         if let Err(e) = self.persist_after_chat().await {
             error!(
                 session_id = self.session_id.as_deref().unwrap_or("<none>"),
-                assistant_message_id = params.assistant_message_persistence.message_id(),
+                assistant_message_id = params.assistant_message_persistence.tag_id().unwrap_or("<none>"),
                 user_id = %self.user_id,
                 error = %e,
                 "Failed to persist agent state after chat — messages may be lost"
@@ -2374,7 +2374,7 @@ mod tests {
             message_source: Some("web"), user_id: Some("user-a"), user_message_persistence: &user,
             assistant_message_persistence: &assistant,
         }).await.expect("provider and fenced writes succeed");
-        let amid = assistant.message_id();
+        let amid = assistant.tag_id().expect("assistant id");
         assert_eq!(chat_service::get_message_status(&db, amid).await.expect("read").expect("row").0, chat_service::MessageStatus::InProgress);
         let run = assistant.durable_run().expect("durable");
         kyomi_auth::conversation_events::ConversationStore::new(&db, &key, "user-a", "ws-1")
@@ -2444,7 +2444,7 @@ mod tests {
         let (_, assistant) = claim_durable_turn(&db, &key, &session_id, chrono::Utc::now().timestamp_millis(), 30_000).await;
         let message = Message::assistant("repeated complete response");
         for index in [42, 42, 43] {
-            persist_one_new_message(&db, &key, &session_id, &message, None, Some(assistant.message_id()), MessagePersistenceScope {
+            persist_one_new_message(&db, &key, &session_id, &message, None, assistant.tag_id(), MessagePersistenceScope {
                 durable_run: assistant.durable_run(), user_id: "user-a", workspace_id: "ws-1", message_index: index,
             }).await.expect("fenced immutable response commit/retry");
         }
@@ -2469,7 +2469,7 @@ mod tests {
         let rows = chat_service::get_session_messages(&db, &key, &session_id, 100).await.expect("read projections");
         assert_eq!(rows.len(), 2, "only atomic submission rows survive");
         assert!(rows.iter().all(|row| row.content != "must not persist"));
-        assert_eq!(rows.iter().find(|row| row.message_id == assistant.message_id()).expect("placeholder").status, "in_progress");
+        assert_eq!(rows.iter().find(|row| row.message_id == assistant.tag_id().expect("id")).expect("placeholder").status, "in_progress");
     }
 
     #[tokio::test]
@@ -2508,7 +2508,7 @@ mod tests {
         const REAL_REPLY: &str = "Q4 revenue was $1M.";
         let (user_persistence, assistant_persistence) =
             dispatch_chat_turn(&db, &key, &session_id, "what was Q4 revenue").await;
-        let assistant_message_id = assistant_persistence.message_id().to_string();
+        let assistant_message_id = assistant_persistence.tag_id().expect("CallerPreInserted has an id").to_string();
 
         let mut adapter = adapter_with_provider(
             db.clone(),
@@ -2561,7 +2561,7 @@ mod tests {
 
         let (user_persistence, assistant_persistence) =
             dispatch_chat_turn(&db, &key, &session_id, "what was Q4 revenue").await;
-        let assistant_message_id = assistant_persistence.message_id().to_string();
+        let assistant_message_id = assistant_persistence.tag_id().expect("has an id").to_string();
 
         let mut adapter = adapter_with_provider(
             db.clone(),
@@ -2626,7 +2626,7 @@ mod tests {
 
         let (user_persistence, assistant_persistence) =
             dispatch_chat_turn(&db, &key, &session_id, "what was Q4 revenue").await;
-        let assistant_message_id = assistant_persistence.message_id().to_string();
+        let assistant_message_id = assistant_persistence.tag_id().expect("has an id").to_string();
 
         // Matches the exact text crate::agent constructs on cancellation
         // (e.g. agent.rs's cancel-token checks) — classify_agent_failure
@@ -2755,9 +2755,7 @@ mod tests {
                 message_source: Some("Kyomi Watch"),
                 user_id: Some("user-a"),
                 user_message_persistence: &watch_dispatch.user_message_persistence,
-                assistant_message_persistence: &AssistantMessagePersistence::AdapterInserts(
-                    uuid::Uuid::new_v4().to_string(),
-                ),
+                assistant_message_persistence: &AssistantMessagePersistence::adapter_inserts_with_new_id(),
             })
             .await
             .expect("chat() should succeed");
@@ -3048,7 +3046,7 @@ mod tests {
         } else {
             dispatch_chat_turn(&db, &key, &session_id, "investigate revenue").await
         };
-        let assistant_message_id = assistant_persistence.message_id().to_string();
+        let assistant_message_id = assistant_persistence.tag_id().expect("has an id").to_string();
 
         let (mut adapter, snapshot) =
             adapter_with_probe(db.clone(), key.clone(), &session_id, &assistant_message_id, durable);
@@ -3517,7 +3515,7 @@ mod tests {
         let query_rejected = matches!(fail_writer, "query_rejected" | "query_rejected_184");
         let provider=AwaitedProvider {inner:crate::test_support::ScriptedProvider {script:std::sync::Mutex::new(script.into()),after_script:crate::test_support::Reply::Text("unexpected".into()),calls:Arc::new(std::sync::Mutex::new(Vec::new()))},index:std::sync::atomic::AtomicUsize::new(0),invalid_chart,query_rejected,query_error_marker};
         let mut registry=crate::tools::ToolRegistry::new();
-        registry.register(Arc::new(AwaitedTool {db:db.clone(),key:key.clone(),run:run.clone(),message:assistant.message_id().into(),calls:calls.clone(),invalid_chart,uncertain_failure:fail_writer == "uncertain",uncertain_result:fail_writer == "uncertain_result",query_rejected,query_error}));
+        registry.register(Arc::new(AwaitedTool {db:db.clone(),key:key.clone(),run:run.clone(),message:assistant.tag_id().unwrap().into(),calls:calls.clone(),invalid_chart,uncertain_failure:fail_writer == "uncertain",uncertain_result:fail_writer == "uncertain_result",query_rejected,query_error}));
         let mut context=crate::test_support::build_ctx(db.clone());
         context.session_id=Some(session.clone());
         let agent=CustomAgent::new(Box::new(provider),crate::agent::AgentConfig::default(),Arc::new(registry),context,std::collections::HashMap::new());
@@ -3529,7 +3527,7 @@ mod tests {
         assert!(receiver.try_recv().is_err(),"fixture begins without progress");
         let tracker=Arc::new(tokio::sync::Mutex::new(crate::thinking::AgentThinkingTracker::new(crate::thinking::AgentThinkingTrackerConfig {
             workspace_id: "ws-1".into(),
-            session_id:session.clone(),user_id:"user-a".into(),message_id:assistant.message_id().into(),ws_manager:manager,workspace_user_ids:None,context_type:Some("chat".into()),context_window:0,incremental_flush:None,
+            session_id:session.clone(),user_id:"user-a".into(),message_id:assistant.tag_id().unwrap().into(),ws_manager:manager,workspace_user_ids:None,context_type:Some("chat".into()),context_window:0,incremental_flush:None,
         })));
         adapter.set_thinking_tracker(tracker.clone());
         if fail_writer == "response" {
@@ -3589,7 +3587,7 @@ mod tests {
         }).collect();
         assert_eq!(outcomes.len(),2); assert_ne!(outcomes[0].0,outcomes[1].0);
         let projected=chat_service::get_session_messages(&db,&key,&session,100).await.unwrap();
-        let thinking=&projected.iter().find(|message| message.message_id==assistant.message_id()).unwrap().thinking_events;
+        let thinking=&projected.iter().find(|message| message.message_id==assistant.tag_id().unwrap()).unwrap().thinking_events;
         let query_rejected = matches!(fail_writer, "query_rejected" | "query_rejected_184");
         assert_eq!(thinking.iter().filter(|event| event.get("data").and_then(|data| data.get("success")).and_then(serde_json::Value::as_bool)==Some(false)).count(),if query_rejected {1} else {2});
         assert!(outcomes.iter().all(|(_,transport,_)| **transport==agent_runtime::TransportOutcome::Completed));
@@ -3675,7 +3673,7 @@ mod tests {
         let run=assistant.durable_run().unwrap().clone();
         let tracker=Arc::new(tokio::sync::Mutex::new(crate::thinking::AgentThinkingTracker::new(crate::thinking::AgentThinkingTrackerConfig {
             workspace_id: "ws-1".into(),
-            session_id:session,user_id:"user-a".into(),message_id:assistant.message_id().into(),
+            session_id:session,user_id:"user-a".into(),message_id:assistant.tag_id().unwrap().into(),
             ws_manager:kyomi_auth::websocket::WebSocketManager::new(Some((redis,redis_url)),db.clone()),
             workspace_user_ids:None,context_type:Some("chat".into()),context_window:0,incremental_flush:None,
         })));
@@ -3686,7 +3684,7 @@ mod tests {
         let command=context.command("planning",agent_runtime::Payload::Public(agent_runtime::PublicPayload::Planning {text}),detail);
         let outcome=sink.commit(&command).await.unwrap();
         assert!(outcome.notification_error.unwrap().contains("injected publisher failure"));
-        let saved=chat_service::get_thinking_event_detail(&db,&key,assistant.message_id(),command.event_id.as_str(),"user-a","ws-1").await.unwrap();
+        let saved=chat_service::get_thinking_event_detail(&db,&key,assistant.tag_id().unwrap(),command.event_id.as_str(),"user-a","ws-1").await.unwrap();
         assert_eq!(saved,Some(body));
         assert!(sink.commit(&command).await.unwrap().receipt.duplicate);
         assert_eq!(publishes.load(std::sync::atomic::Ordering::SeqCst),1);
@@ -3728,7 +3726,7 @@ mod tests {
         let mut adapter = ChatAgentAdapter::new(agent,"user-a".into(),"ws-1".into(),Some(session.clone()),"custom_agent".into(),db.clone(),key.clone());
         let tracker = Arc::new(tokio::sync::Mutex::new(crate::thinking::AgentThinkingTracker::new(crate::thinking::AgentThinkingTrackerConfig {
             workspace_id: "ws-1".into(),
-            session_id:session.clone(),user_id:"user-a".into(),message_id:assistant.message_id().into(),ws_manager:kyomi_auth::websocket::WebSocketManager::new(None,db.clone()),workspace_user_ids:None,context_type:Some("chat".into()),context_window:0,incremental_flush:None,
+            session_id:session.clone(),user_id:"user-a".into(),message_id:assistant.tag_id().unwrap().into(),ws_manager:kyomi_auth::websocket::WebSocketManager::new(None,db.clone()),workspace_user_ids:None,context_type:Some("chat".into()),context_window:0,incremental_flush:None,
         })));
         adapter.set_thinking_tracker(tracker);
         let answer = adapter.chat(ChatParams {message:"correct tool errors",cancel_token:CancellationToken::new(),current_time_user_tz:None,message_source:Some("web"),user_id:Some("user-a"),user_message_persistence:&user,assistant_message_persistence:&assistant}).await.unwrap();
@@ -3738,7 +3736,7 @@ mod tests {
         let replay = store.replay(&run.conversation_id,0,100).await.unwrap();
         let outcomes: Vec<_> = replay.events.iter().filter_map(|event| match &event.payload { agent_runtime::PublicPayload::ToolOutcome {domain,..} => Some(domain.clone()), _ => None }).collect();
         let rows = chat_service::get_session_messages(&db,&key,&session,100).await.unwrap();
-        let projected: Vec<_> = rows.iter().find(|row| row.message_id == assistant.message_id()).unwrap().thinking_events.iter().filter_map(|event| event.get("data").and_then(|data| data.get("success")).and_then(serde_json::Value::as_bool)).collect();
+        let projected: Vec<_> = rows.iter().find(|row| row.message_id == assistant.tag_id().unwrap()).unwrap().thinking_events.iter().filter_map(|event| event.get("data").and_then(|data| data.get("success")).and_then(serde_json::Value::as_bool)).collect();
         assert_eq!(projected, outcomes.iter().map(|domain| *domain == agent_runtime::DomainOutcome::Succeeded).collect::<Vec<_>>(),"durable domain truth drives compatibility progress");
         let recorded = std::mem::take(&mut *calls.lock().unwrap());
         (outcomes, recorded)
@@ -3790,7 +3788,7 @@ mod tests {
         let mut adapter = ChatAgentAdapter::new(agent,"user-a".into(),"ws-1".into(),Some(session.clone()),"custom_agent".into(),db.clone(),key.clone());
         let tracker = Arc::new(tokio::sync::Mutex::new(crate::thinking::AgentThinkingTracker::new(crate::thinking::AgentThinkingTrackerConfig {
             workspace_id: "ws-1".into(),
-            session_id:session.clone(),user_id:"user-a".into(),message_id:assistant.message_id().into(),
+            session_id:session.clone(),user_id:"user-a".into(),message_id:assistant.tag_id().unwrap().into(),
             ws_manager:kyomi_auth::websocket::WebSocketManager::new(None,db.clone()),workspace_user_ids:None,context_type:Some("chat".into()),context_window:0,incremental_flush:None,
         })));
         adapter.set_thinking_tracker(tracker);
