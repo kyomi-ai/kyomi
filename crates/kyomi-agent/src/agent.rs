@@ -3837,7 +3837,7 @@ Second chart:\n{CHARTML_STRIPPED_NOTE}\nDone."
         let verbatim = paused.raw_response["content"].as_array().unwrap().clone();
         let (mut agent, calls) = scripted_agent_with_config(
             server_tool_agent_config(),
-            vec![Reply::Response(paused)],
+            vec![Reply::Response(Box::new(paused))],
             Reply::Text("final answer".into()),
         )
         .await;
@@ -3858,7 +3858,7 @@ Second chart:\n{CHARTML_STRIPPED_NOTE}\nDone."
         let (mut agent, calls) = scripted_agent_with_config(
             AgentConfig { max_iterations: 50, ..server_tool_agent_config() },
             vec![],
-            Reply::Response(server_response("pause_turn", None)),
+            Reply::Response(Box::new(server_response("pause_turn", None))),
         )
         .await;
         let _ = agent.chat("hi", CancellationToken::new(), None, None, None).await;
@@ -3872,7 +3872,7 @@ Second chart:\n{CHARTML_STRIPPED_NOTE}\nDone."
         let verbatim = mixed.raw_response["content"].as_array().unwrap().clone();
         let (mut agent, calls) = scripted_agent_with_config(
             server_tool_agent_config(),
-            vec![Reply::Response(mixed)],
+            vec![Reply::Response(Box::new(mixed))],
             Reply::Text("done".into()),
         )
         .await;
@@ -3887,7 +3887,7 @@ Second chart:\n{CHARTML_STRIPPED_NOTE}\nDone."
     async fn provider_usage_feeds_the_monthly_budget() {
         let (mut agent, _calls) = scripted_agent_with_config(
             server_tool_agent_config(),
-            vec![Reply::Response(server_response("end_turn", None))],
+            vec![Reply::Response(Box::new(server_response("end_turn", None)))],
             Reply::Text("done".into()),
         )
         .await;
@@ -3928,7 +3928,7 @@ Second chart:\n{CHARTML_STRIPPED_NOTE}\nDone."
         };
         let mut config = server_tool_agent_config();
         config.server_tools[0].backend = kyomi_core::web_tools::WebBackendKind::OpenRouter;
-        let (mut agent, _calls) = scripted_agent_with_config(config, vec![Reply::Response(response)], Reply::Text("x".into())).await;
+        let (mut agent, _calls) = scripted_agent_with_config(config, vec![Reply::Response(Box::new(response))], Reply::Text("x".into())).await;
         let answer = agent.chat("hi", CancellationToken::new(), None, None, None).await.unwrap();
         assert!(answer.contains("**Sources**") && answer.contains("blog.rust-lang.org"), "{answer}");
         let ctx = &agent.tool_context;
@@ -3975,7 +3975,7 @@ Second chart:\n{CHARTML_STRIPPED_NOTE}\nDone."
     async fn live_captured_pause_turn_continues_with_the_paused_content_unchanged() {
         let paused = live_pause_response();
         let verbatim = paused.raw_response["content"].as_array().unwrap().clone();
-        let (mut agent, calls) = scripted_agent_with_config(fetch_agent_config(), vec![Reply::Response(paused)], Reply::Text("all done".into())).await;
+        let (mut agent, calls) = scripted_agent_with_config(fetch_agent_config(), vec![Reply::Response(Box::new(paused))], Reply::Text("all done".into())).await;
         allow_many_fetches(&mut agent);
         let answer = agent.chat("go", CancellationToken::new(), None, None, None).await.unwrap();
         let calls = calls.lock().unwrap();
@@ -3989,7 +3989,7 @@ Second chart:\n{CHARTML_STRIPPED_NOTE}\nDone."
         let (mut agent, calls) = scripted_agent_with_config(
             AgentConfig { max_iterations: 50, ..fetch_agent_config() },
             vec![],
-            Reply::Response(live_pause_response()),
+            Reply::Response(Box::new(live_pause_response())),
         )
         .await;
         allow_many_fetches(&mut agent);
@@ -4009,7 +4009,7 @@ Second chart:\n{CHARTML_STRIPPED_NOTE}\nDone."
         // A provider error after two pauses.
         let (mut agent, _calls) = scripted_agent_with_config(
             fetch_agent_config(),
-            vec![Reply::Response(live_pause_response()), Reply::Response(live_pause_response()), Reply::Failure("provider down".into())],
+            vec![Reply::Response(Box::new(live_pause_response())), Reply::Response(Box::new(live_pause_response())), Reply::Failure("provider down".into())],
             Reply::Text("unused".into()),
         )
         .await;
@@ -4021,7 +4021,7 @@ Second chart:\n{CHARTML_STRIPPED_NOTE}\nDone."
         let (mut agent, _calls) = scripted_agent_with_config(
             AgentConfig { max_iterations: 3, ..fetch_agent_config() },
             vec![],
-            Reply::Response(live_pause_response()),
+            Reply::Response(Box::new(live_pause_response())),
         )
         .await;
         let error = agent.chat("go", CancellationToken::new(), None, None, None).await.expect_err("fails");
@@ -4050,7 +4050,7 @@ Second chart:\n{CHARTML_STRIPPED_NOTE}\nDone."
 
         let (mut agent, _calls) = scripted_agent_with_config(
             fetch_agent_config(),
-            vec![Reply::Response(paused.clone()), Reply::Response(invalid.clone()), Reply::Text("Corrected answer".into())],
+            vec![Reply::Response(Box::new(paused.clone())), Reply::Response(Box::new(invalid.clone())), Reply::Text("Corrected answer".into())],
             Reply::Text("unused".into()),
         )
         .await;
@@ -4066,7 +4066,7 @@ Second chart:\n{CHARTML_STRIPPED_NOTE}\nDone."
         // A failure after the invalid answer keeps nothing of the chain.
         let (mut agent, _calls) = scripted_agent_with_config(
             fetch_agent_config(),
-            vec![Reply::Response(paused), Reply::Response(invalid), Reply::Failure("provider down".into())],
+            vec![Reply::Response(Box::new(paused)), Reply::Response(Box::new(invalid)), Reply::Failure("provider down".into())],
             Reply::Text("unused".into()),
         )
         .await;
@@ -4078,7 +4078,7 @@ Second chart:\n{CHARTML_STRIPPED_NOTE}\nDone."
     async fn a_pause_continuation_carries_the_same_tools_even_after_the_allowance_is_used() {
         let (mut agent, calls) = scripted_agent_with_config(
             server_tool_agent_config(),
-            vec![Reply::Response(server_response("pause_turn", None))],
+            vec![Reply::Response(Box::new(server_response("pause_turn", None)))],
             Reply::Text("done".into()),
         )
         .await;
@@ -4098,7 +4098,7 @@ Second chart:\n{CHARTML_STRIPPED_NOTE}\nDone."
         let first_blocks = paused.raw_response["content"].as_array().unwrap().clone();
         let (mut agent, _calls) = scripted_agent_with_config(
             server_tool_agent_config(),
-            vec![Reply::Response(paused), Reply::Response(server_response("end_turn", None))],
+            vec![Reply::Response(Box::new(paused)), Reply::Response(Box::new(server_response("end_turn", None)))],
             Reply::Text("unused".into()),
         )
         .await;
@@ -4114,7 +4114,7 @@ Second chart:\n{CHARTML_STRIPPED_NOTE}\nDone."
     async fn a_pause_continuation_is_never_followed_by_the_budget_notice_or_retry_messages() {
         // 10 iterations: the 70% budget notice is due by iteration 7; the pause happens late.
         let mut script: Vec<Reply> = vec![Reply::ToolCall; 7];
-        script.push(Reply::Response(live_pause_response()));
+        script.push(Reply::Response(Box::new(live_pause_response())));
         let (mut agent, calls) = scripted_agent_with_config(
             AgentConfig { max_iterations: 10, ..fetch_agent_config() },
             script,
@@ -4145,7 +4145,7 @@ Second chart:\n{CHARTML_STRIPPED_NOTE}\nDone."
             fn model(&self) -> &str { "spy" }
         }
         let calls = Arc::new(Mutex::new(Vec::new()));
-        let inner = ScriptedProvider { script: Mutex::new(vec![Reply::Response(mixed)].into()), after_script: Reply::ToolCall, calls: Arc::clone(&calls) };
+        let inner = ScriptedProvider { script: Mutex::new(vec![Reply::Response(Box::new(mixed))].into()), after_script: Reply::ToolCall, calls: Arc::clone(&calls) };
         let mut registry = ToolRegistry::new();
         registry.register(Arc::new(NoopTool));
         let mut agent = CustomAgent::new(
@@ -4197,7 +4197,7 @@ Second chart:\n{CHARTML_STRIPPED_NOTE}\nDone."
         use agent_runtime::CompleteProvider;
         let paused = live_pause_response();
         let raw = paused.raw_response.clone();
-        let (agent, _calls) = scripted_agent_with_config(fetch_agent_config(), vec![Reply::Response(paused)], Reply::Text("x".into())).await;
+        let (agent, _calls) = scripted_agent_with_config(fetch_agent_config(), vec![Reply::Response(Box::new(paused))], Reply::Text("x".into())).await;
         let provider = RuntimeProvider { agent: &agent, messages: &[], tools: &[], allow_server_tools: true };
         let (response, record) = provider.complete().await.unwrap();
         assert_eq!(response.raw_response, raw, "the loop reads server blocks, usage and sources from this");
@@ -4239,7 +4239,7 @@ Second chart:\n{CHARTML_STRIPPED_NOTE}\nDone."
             fn model(&self) -> &str { "spy" }
         }
         let calls = Arc::new(Mutex::new(Vec::new()));
-        let inner = ScriptedProvider { script: Mutex::new(vec![Reply::Response(first)].into()), after_script: Reply::Text("final".into()), calls };
+        let inner = ScriptedProvider { script: Mutex::new(vec![Reply::Response(Box::new(first))].into()), after_script: Reply::Text("final".into()), calls };
         let mut registry = ToolRegistry::new();
         registry.register(Arc::new(RestrictSessionTool));
         let ctx = test_tool_context().await;
@@ -4258,7 +4258,7 @@ Second chart:\n{CHARTML_STRIPPED_NOTE}\nDone."
         let capture = kyomi_test_tracing::capture_tracing();
         let (mut agent, _calls) = scripted_agent_with_config(
             server_tool_agent_config(),
-            vec![Reply::Response(server_response("end_turn", None))],
+            vec![Reply::Response(Box::new(server_response("end_turn", None)))],
             Reply::Text("x".into()),
         )
         .await;
