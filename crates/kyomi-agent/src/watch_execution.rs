@@ -605,7 +605,6 @@ pub(crate) fn build_watch_agent_config(
         workspace_id: workspace_id.to_string(),
         message,
         model_name: None, // the Watch profile selects the model (see `watch_llm`)
-        temperature: Some(0.7),
         llm_profile: kyomi_core::llm_sampling::LlmProfile::Watch,
         is_shared_conversation: false,
         context_type: "kyomi_watch".into(),
@@ -940,7 +939,7 @@ pub async fn execute_watch_with(
 
             // A failed batch run still paid for its calls.
             if run.is_batch.load(std::sync::atomic::Ordering::SeqCst) {
-                bill_batch_run(db, &watch, execution_id, &run).await;
+                bill_batch_run(db, encryption_key, &watch, execution_id, &run).await;
             }
 
             // Mark execution as failed
@@ -1049,7 +1048,7 @@ struct BillingTarget {
 /// crash or abort cannot lose or repeat a bill, and only the instance holding
 /// the run's live lease can bill, so a displaced driver never bills a partial
 /// run. A transient failure is logged and the run is simply not billed.
-async fn bill_batch_run(db: &DbPool, watch: &Watch, execution_id: i32, run: &RunSetup) {
+async fn bill_batch_run(db: &DbPool, encryption_key: &[u8; 32], watch: &Watch, execution_id: i32, run: &RunSetup) {
     let Some((provider, model, is_byok, session_id)) = run
         .billing
         .lock()
@@ -1059,21 +1058,19 @@ async fn bill_batch_run(db: &DbPool, watch: &Watch, execution_id: i32, run: &Run
         return;
     };
     let bill = watch_batch_service::UsageBill {
-        insert_sql: crate::execution::BATCH_RUN_USAGE_INSERT_SQL,
+        encryption_key,
         user_id: &watch.created_by,
         workspace_id: &watch.workspace_id,
         session_id: &session_id,
-        provider: &provider,
-        model: &model,
-        component: "kyomi_watch",
     };
+    let billing = crate::batch_run::RunBilling { is_byok, provider: &provider, model: &model, component: "kyomi_watch" };
     match watch_batch_service::bill_run_once(
         db,
         execution_id,
         watch_batch_service::BillingFence::LeaseOwner(crate::batch_run::instance_id()),
         Utc::now(),
         &bill,
-        crate::execution::batch_run_amounts(is_byok),
+        |calls| crate::batch_run::batch_run_row(calls, &billing),
     )
     .await
     {
@@ -1803,8 +1800,8 @@ async fn execute_watch_inner(
         }
     }
 
-    // A batch-mode run is billed exactly once, from the usage recorded on its
-    // call rows (see `bill_batch_run`). Done on the failure path too, so the
+    // A batch-mode run is billed exactly once, from the responses stored on its
+    // call rows, through the usage ledger (see `bill_batch_run`). Done on the failure path too, so the
     // calls of a run that is then failed are not silently free.
     if extras.watch_batch.is_some() {
         if let Ok(mut target) = run.billing.lock()
@@ -1813,7 +1810,7 @@ async fn execute_watch_inner(
         {
             t.model = model;
         }
-        bill_batch_run(db, watch, execution_id, run).await;
+        bill_batch_run(db, encryption_key, watch, execution_id, run).await;
     }
 
     // 11. Determine the stored/delivered terminal state. A guard stop is an

@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 //! Resolve the temperature / reasoning effort one LLM call actually sends
-//! (KYO-972). The pure precedence rules live in
+//! (KYO-972, simplified by KYO-974: unset sends nothing, set is passed
+//! through as configured). The pure precedence rules live in
 //! [`kyomi_core::llm_sampling`]; this binds them to the instance [`Config`]
 //! and a workspace's AI configuration.
 
@@ -18,15 +19,13 @@ use crate::provider::RequestOptions;
 /// `create_provider_from_workspace`), so a workspace value chosen for some
 /// other model must not leak into Kyomi-managed calls.
 ///
-/// `call_default_temperature` is the call site's historical value, used when
-/// nothing is configured. `title_model_configured` is whether a dedicated
+/// `title_model_configured` is whether a dedicated
 /// title model (workspace `title_model` or `LLM_TITLE_MODEL`) is in effect,
 /// which switches the background-call effort default to `low`.
 pub fn resolve_for_call(
     profile: LlmProfile,
     ws_config: &WorkspaceAiConfig,
     app_config: &Config,
-    call_default_temperature: Option<f32>,
     title_model_configured: bool,
 ) -> ResolvedSampling {
     let none = LlmSamplingSettings::default();
@@ -39,29 +38,27 @@ pub fn resolve_for_call(
         profile,
         workspace,
         &app_config.llm_sampling,
-        call_default_temperature,
         title_model_configured,
     )
 }
 
 /// Whether a dedicated title model is configured for this workspace.
 pub fn title_model_configured(ws_config: &WorkspaceAiConfig, app_config: &Config) -> bool {
-    let ws_title = app_config.self_hosted && ws_config.title_model.is_some();
-    ws_title || app_config.llm_title_model.is_some()
+    // Mirrors what the title/summary/tag callers request: the workspace title model, else
+    // `LLM_TITLE_MODEL`, on every setup.
+    ws_config.title_model.is_some() || app_config.llm_title_model.is_some()
 }
 
 /// Request options for a short background call (title, summary, tagging).
 pub fn background_options(
     ws_config: &WorkspaceAiConfig,
     app_config: &Config,
-    call_default_temperature: f32,
     max_tokens: u32,
 ) -> RequestOptions {
     let resolved = resolve_for_call(
         LlmProfile::Title,
         ws_config,
         app_config,
-        Some(call_default_temperature),
         title_model_configured(ws_config, app_config),
     );
     RequestOptions::new(max_tokens)
@@ -73,10 +70,10 @@ pub fn background_options(
 mod tests {
     use super::*;
     use kyomi_auth::workspace_ai_config::WorkspaceAiProvider;
-    use kyomi_core::llm_sampling::Setting;
+    use serde_json::json;
 
-    fn effort(v: &str) -> Option<Setting<String>> {
-        Some(Setting::Value(v.into()))
+    fn effort(v: &str) -> Option<String> {
+        Some(v.into())
     }
 
     fn ws(sampling: LlmSamplingSettings, title_model: Option<&str>) -> WorkspaceAiConfig {
@@ -99,7 +96,7 @@ mod tests {
         c.self_hosted = self_hosted;
         c.llm_sampling = LlmSamplingSettings {
             reasoning_effort: effort("env"),
-            temperature: Some(Setting::Value(0.5)),
+            temperature: Some(json!(0.5)),
             ..Default::default()
         };
         c
@@ -108,7 +105,7 @@ mod tests {
     fn workspace_override() -> LlmSamplingSettings {
         LlmSamplingSettings {
             reasoning_effort: effort("workspace"),
-            temperature: Some(Setting::Omit),
+            temperature: Some(json!(1.0)),
             ..Default::default()
         }
     }
@@ -119,11 +116,10 @@ mod tests {
             LlmProfile::Chat,
             &ws(workspace_override(), None),
             &config(true),
-            Some(0.7),
             false,
         );
         assert_eq!(r.reasoning_effort.as_deref(), Some("workspace"));
-        assert_eq!(r.temperature, None, "explicit workspace omit wins over env 0.5");
+        assert_eq!(r.temperature, Some(json!(1.0)), "workspace value wins over env 0.5");
     }
 
     #[test]
@@ -132,41 +128,41 @@ mod tests {
             LlmProfile::Chat,
             &ws(workspace_override(), None),
             &config(false),
-            Some(0.7),
             false,
         );
         assert_eq!(r.reasoning_effort.as_deref(), Some("env"));
-        assert_eq!(r.temperature, Some(0.5));
+        assert_eq!(r.temperature, Some(json!(0.5)));
     }
 
     #[test]
-    fn title_model_configured_follows_workspace_only_when_self_hosted() {
+    fn title_model_configured_follows_the_model_the_callers_request() {
         let mut c = config(true);
         assert!(title_model_configured(&ws(Default::default(), Some("m")), &c));
         assert!(!title_model_configured(&ws(Default::default(), None), &c));
         // The instance title model counts too.
         c.llm_title_model = Some("env-title".into());
         assert!(title_model_configured(&ws(Default::default(), None), &c));
-        // SaaS ignores a workspace title model.
+        // On SaaS the workspace title model is requested too, so it counts.
         let saas = config(false);
-        assert!(!title_model_configured(&ws(Default::default(), Some("m")), &saas));
+        assert!(title_model_configured(&ws(Default::default(), Some("m")), &saas));
+        assert!(!title_model_configured(&ws(Default::default(), None), &saas));
     }
 
     #[test]
     fn background_options_use_the_title_profile_and_default_low_once_effort_is_configured() {
         let mut c = config(true);
         c.llm_title_model = Some("cheap".into());
-        let o = background_options(&ws(Default::default(), None), &c, 0.3, 512);
+        let o = background_options(&ws(Default::default(), None), &c, 512);
         assert_eq!(o.reasoning_effort.as_deref(), Some("low"), "chat effort env is set");
-        assert_eq!(o.temperature, Some(0.3), "title ignores the chat temperature");
+        assert_eq!(o.temperature, None, "title never inherits the chat temperature");
         assert_eq!(o.max_tokens, 512);
 
         // Existing install: title model but no effort anywhere sends nothing.
         let mut bare = Config::test_config();
         bare.self_hosted = true;
         bare.llm_title_model = Some("cheap".into());
-        let o = background_options(&ws(Default::default(), None), &bare, 0.3, 512);
+        let o = background_options(&ws(Default::default(), None), &bare, 512);
         assert_eq!(o.reasoning_effort, None);
-        assert_eq!(o.temperature, Some(0.3));
+        assert_eq!(o.temperature, None, "unset sends nothing");
     }
 }

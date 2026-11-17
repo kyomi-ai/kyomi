@@ -277,6 +277,41 @@ fn usage_of(response: &LLMResponse) -> store::CallUsage {
     }
 }
 
+/// Who a batch run's one usage row is for.
+pub(crate) struct RunBilling<'a> {
+    pub is_byok: bool,
+    pub provider: &'a str,
+    pub model: &'a str,
+    pub component: &'a str,
+}
+
+/// The `api_usage_log` row for a whole batch run: every call's stored vendor
+/// response is parsed by the provider's own parser (which prices it, at the batch
+/// tier for a batch result) and recorded into a [`UsageLedger`], and the ledger
+/// builds the row. The same ledger code builds every other LLM call's row, so
+/// pricing, markup, the BYOK rule and the cache totals live in one place; this
+/// only chooses which calls to put in it: all of the run's, from every attempt,
+/// each exactly once (a replayed call is one stored response, not a second one).
+pub(crate) fn batch_run_row(
+    calls: &[store::StoredResponse],
+    billing: &RunBilling<'_>,
+) -> kyomi_core::Result<Option<kyomi_core::models::ApiUsageInsert>> {
+    let ledger = crate::usage_ledger::UsageLedger::default();
+    for call in calls {
+        let parsed = match call.provider.as_str() {
+            "anthropic" => crate::anthropic::AnthropicClient::parse_response(&call.model, &call.response, None)?,
+            "openai" => crate::openai::OpenAIProvider::parse_response(&call.model, &call.response)?,
+            other => {
+                return Err(kyomi_core::Error::Internal(format!(
+                    "cannot price a stored batch response from provider '{other}'"
+                )));
+            }
+        };
+        ledger.record(&call.model, &parsed);
+    }
+    Ok(ledger.billing_row(billing.is_byok, billing.provider, billing.model, billing.component))
+}
+
 fn request_hash(body: &serde_json::Value) -> String {
     hex::encode(Sha256::digest(body.to_string().as_bytes()))
 }

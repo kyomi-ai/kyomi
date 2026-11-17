@@ -197,6 +197,8 @@ pub struct DurableRun {
     pub run_id: agent_runtime::RunId,
     pub lease: agent_runtime::Lease,
     pub context: Arc<kyomi_auth::conversation_events::ClaimedConversationContext>,
+    /// Where the run's usage ledger waits for the worker to bill what the run never did.
+    pub billing: crate::usage_ledger::BillingSlot,
 }
 
 impl Default for AssistantMessagePersistence {
@@ -1828,6 +1830,7 @@ mod tests {
                 tool_calls: None,
                 cost: None,
                 thinking_content: None,
+                call_detail: None,
             })
         }
 
@@ -2367,7 +2370,7 @@ mod tests {
         let claimed = store.claim(&conversation, &run_id, "worker", claim_time, ttl).await.expect("claim");
         (user, AssistantMessagePersistence::Durable {
             message_id: assistant.as_str().to_string(),
-            run: DurableRun { conversation_id: conversation, run_id, lease: claimed.snapshot.lease.expect("lease"), context: Arc::new(claimed.context) },
+            run: DurableRun { conversation_id: conversation, run_id, lease: claimed.snapshot.lease.expect("lease"), context: Arc::new(claimed.context), billing: Default::default() },
         })
     }
 
@@ -2401,7 +2404,7 @@ mod tests {
         next.user_message_persistence = UserMessagePersistence::CallerPersisted(user_message_id);
         next.assistant_message_persistence = AssistantMessagePersistence::Durable {
             message_id: assistant_message_id,
-            run: DurableRun {conversation_id:owned.conversation_id.clone(),run_id,lease:claim.snapshot.lease.expect("lease"),context:Arc::new(claim.context)},
+            run: DurableRun {conversation_id:owned.conversation_id.clone(),run_id,lease:claim.snapshot.lease.expect("lease"),context:Arc::new(claim.context),billing:Default::default()},
         };
         next.load_context().await.expect("restore next claim snapshot");
         assert!(next.agent_state().messages.iter().any(|message| message.content == "first committed answer"));

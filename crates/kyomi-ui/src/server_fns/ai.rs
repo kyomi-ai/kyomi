@@ -95,8 +95,8 @@ pub struct AiModelInfo {
 }
 
 /// The six LLM tuning fields as the user typed them (KYO-972). An empty
-/// string means "not set here" (fall through to the next layer); `omit`
-/// means "send no field"; anything else is a value.
+/// string means "not set here" (fall through to the next layer); anything
+/// else is a value sent exactly as written.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct LlmTuningValues {
     pub reasoning_effort: String,
@@ -285,7 +285,7 @@ pub async fn update_llm_tuning(values: LlmTuningValues) -> Result<(), ServerFnEr
         let stored = if raw.is_empty() {
             None
         } else {
-            Some(stored_temperature(raw).map_err(|e| ServerFnError::new(format!("{key}: {e}")))?)
+            Some(stored_temperature(raw))
         };
         edits.push((key, stored));
     }

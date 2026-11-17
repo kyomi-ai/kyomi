@@ -73,7 +73,7 @@ pub trait BatchLLMProvider: Send + Sync {
 /// URL is a proxy the vendor batch API cannot be assumed to exist behind.
 pub fn batch_support(provider: ProviderKind, base_url: Option<&str>) -> Result<(), String> {
     match provider {
-        ProviderKind::Anthropic if base_url.is_none() => Ok(()),
+        ProviderKind::Anthropic if is_anthropic_api(base_url) => Ok(()),
         ProviderKind::Anthropic => Err(
             "batch mode needs the Anthropic API itself; a custom base URL is not assumed to \
              support the Message Batches API"
@@ -89,6 +89,18 @@ pub fn batch_support(provider: ProviderKind, base_url: Option<&str>) -> Result<(
         ProviderKind::Gemini => {
             Err("batch mode is not implemented for Gemini; use realtime".into())
         }
+    }
+}
+
+/// Whether the Anthropic client talks to the Anthropic API itself (no custom base URL).
+/// (Under test only, a trailing `/api.anthropic.com` path segment on a loopback server also
+/// counts, so the real adapter selection runs against a fake.)
+fn is_anthropic_api(base_url: Option<&str>) -> bool {
+    match base_url {
+        None => true,
+        #[cfg(test)]
+        Some(url) if url.ends_with("/api.anthropic.com") => true,
+        Some(_) => false,
     }
 }
 
@@ -408,7 +420,7 @@ mod tests {
 
     fn opts() -> RequestOptions {
         RequestOptions::new(512)
-            .with_temperature(Some(0.2))
+            .with_temperature(Some(serde_json::json!(0.2)))
             .with_reasoning_effort(Some("low".into()))
     }
 
@@ -476,7 +488,7 @@ mod tests {
         assert_eq!(envelope["requests"][0]["custom_id"], "req-1");
         assert_eq!(envelope["requests"][0]["params"], realtime, "batch params must equal the realtime body");
         assert_eq!(realtime["output_config"]["effort"], "low");
-        assert_eq!(realtime["temperature"], 0.2f32 as f64);
+        assert_eq!(realtime["temperature"], serde_json::json!(0.2));
     }
 
     fn anthropic_with(status: &'static str, line: &'static str) -> impl Fn(&crate::test_support::RecordedRequest) -> (u16, String) {

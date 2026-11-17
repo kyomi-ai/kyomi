@@ -1,0 +1,260 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+//! Live Anthropic verification for KYO-974. `#[ignore]`d: each run spends real
+//! money. Run with the key in the environment only (never printed):
+//!
+//! ```text
+//! ANTHROPIC_API_KEY="$(cat <key file>)" cargo test -p kyomi-agent --lib \
+//!     anthropic_live_tests -- --ignored --nocapture --test-threads=1
+//! ```
+
+use std::collections::HashMap;
+
+use serde_json::json;
+
+use crate::anthropic::AnthropicClient;
+use crate::provider::RequestOptions;
+use crate::types::{LLMResponse, Message, Tool};
+use crate::usage_ledger::UsageLedger;
+use kyomi_core::models::ApiUsageInsert;
+use kyomi_core::DbPool;
+
+/// Spend ceiling per scenario (USD); the run aborts past it.
+const SCENARIO_CAP_USD: f64 = 0.08;
+
+fn key() -> String {
+    std::env::var("ANTHROPIC_API_KEY").expect("ANTHROPIC_API_KEY (live tests only)")
+}
+
+fn tools() -> Vec<Tool> {
+    vec![Tool {
+        name: "lookup_metric".into(),
+        description: "Look up the current value of a named business metric.".into(),
+        parameters: json!({"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]}),
+    }]
+}
+
+/// ~4k-token system prompt, unique per run so the first call writes the cache.
+fn system_prompt(nonce: &str) -> String {
+    let mut s = format!("You are a careful analytics assistant. Run id: {nonce}.\n");
+    for i in 0..120 {
+        s.push_str(&format!(
+            "Guideline {i}: when answering, state which metric you used, quote its value, and keep the final answer under 80 words; never invent metrics.\n"
+        ));
+    }
+    s
+}
+
+fn metric_value(name: &str) -> &'static str {
+    if name == "top_region" {
+        r#"{"value": "emea"}"#
+    } else if name.starts_with("revenue_") {
+        r#"{"value": 91000, "unit": "usd"}"#
+    } else if name.contains("churn") { r#"{"value": 0.042, "unit": "ratio"}"# } else { r#"{"value": 183000, "unit": "usd"}"# }
+}
+
+fn show(label: &str, r: &LLMResponse) {
+    let d = r.call_detail.as_ref().expect("detail");
+    let u = &r.usage;
+    eprintln!(
+        "{label}: fresh_in={} out={} think_tok={} cache_write={} (5m={},1h={}) cache_read={} cost=${:.6} stop={} tier={:?} msg={:?} req={:?} thinking_chars={}",
+        u.input_tokens, u.output_tokens, u.reasoning_tokens, u.cache_creation_input_tokens,
+        d.cache_creation_5m, d.cache_creation_1h, u.cache_read_input_tokens, d.cost_usd,
+        r.finish_reason, d.service_tier, d.message_id, d.request_id,
+        r.thinking_content.as_ref().map_or(0, String::len),
+    );
+    let types: Vec<_> = r.raw_response["content"].as_array().map_or(vec![], |c| c.iter().map(|b| b["type"].as_str().unwrap_or("?")).collect());
+    eprintln!("  block types: {types:?}");
+    if let Some(t) = &r.thinking_content {
+        eprintln!("  thinking: {}", t.chars().take(160).collect::<String>().replace('\n', " "));
+    }
+}
+
+/// Run the tool loop. `replay` sends the assistant turn back as the raw
+/// content blocks the API returned (thinking blocks and signatures unchanged)
+/// instead of Kyomi's stateless reconstruction.
+async fn tool_loop(model: &str, effort: &str, replay: bool) -> f64 {
+    tool_loop_with(model, effort, replay, PARALLEL_PROMPT).await
+}
+
+const PARALLEL_PROMPT: &str = "Look up the metrics 'monthly_revenue' and 'churn_rate' (call the tool for each), then tell me which is larger in absolute terms and why that comparison is or is not meaningful.";
+
+/// Each lookup depends on the previous result, so the loop needs several rounds.
+const DEPENDENT_PROMPT: &str = "Call lookup_metric with name 'top_region' and wait for the answer. Then call it with name 'revenue_<region>' (region lowercased, from that answer), one call per turn, and wait. Then call it with name 'churn_<region>'. One tool call per turn, never several at once. Finish with a one-sentence summary.";
+
+async fn tool_loop_with(model: &str, effort: &str, replay: bool, prompt: &str) -> f64 {
+    let client = AnthropicClient::new(key(), Some(model.into())).unwrap();
+    let nonce = format!("{model}-{replay}-{}", chrono::Utc::now().timestamp_nanos_opt().unwrap());
+    let opts = RequestOptions::new(8192).with_reasoning_effort(Some(effort.into()));
+    let tools = tools();
+    let mut messages = vec![
+        Message::system(system_prompt(&nonce)),
+        Message::user(prompt),
+    ];
+    let mut total = 0.0;
+    let ledger = UsageLedger::default();
+    let mut raw_assistant: Vec<serde_json::Value> = Vec::new();
+    eprintln!("== {model} effort={effort} replay={replay}");
+    for round in 0..5 {
+        let response = if replay && !raw_assistant.is_empty() {
+            post_with_replay(&client, model, &messages, &tools, &opts, &raw_assistant).await
+        } else {
+            client.complete(&messages, &tools, &opts, &HashMap::new()).await.unwrap()
+        };
+        show(&format!("call {round}"), &response);
+        ledger.record(model, &response);
+        total += response.cost.unwrap();
+        assert!(total < SCENARIO_CAP_USD, "scenario spend cap exceeded: ${total}");
+        let Some(calls) = response.tool_calls.clone() else {
+            eprintln!("  final: {}", response.content.chars().take(240).collect::<String>().replace('\n', " "));
+            break;
+        };
+        raw_assistant.push(json!({"round": round, "content": response.raw_response["content"].clone()}));
+        messages.push(Message::assistant_with_tool_calls(response.content.clone(), calls.clone()));
+        for c in &calls {
+            let name = c.arguments["name"].as_str().unwrap_or_default();
+            messages.push(Message::tool_result(&c.id, &c.name, metric_value(name)));
+        }
+    }
+    eprintln!("== total ${total:.6}");
+    write_and_show_row(&ledger, model).await;
+    total
+}
+
+/// Write the run's row with the production insert and read it back, as the
+/// evidence that cache totals and the per-call breakdown reach `api_usage_log`.
+async fn write_and_show_row(ledger: &UsageLedger, model: &str) {
+    let db = kyomi_test_db::test_pool().await;
+    let DbPool::Sqlite(sq) = &db else { panic!("sqlite fixture") };
+    kyomi_test_db::seed_user(sq, "u1", "u1@example.com").await;
+    kyomi_test_db::seed_workspace(sq, "w1", "u1").await;
+    let u = ledger.billing_row(false, "anthropic", model, "chat_agent").unwrap();
+    sqlx::query(&ApiUsageInsert::insert_sql(false))
+        .bind("u1").bind("w1").bind("s1").bind(chrono::Utc::now())
+        .bind(&u.provider).bind(&u.model).bind(u.input_tokens).bind(u.output_tokens).bind(u.total_tokens)
+        .bind(u.cost_estimate).bind(&u.component).bind(u.provider_cost_usd)
+        .bind(u.cache_creation_input_tokens).bind(u.cache_read_input_tokens).bind(&u.extra_metadata).bind(None::<&str>)
+        .execute(sq).await.unwrap();
+    let (i, o, w, r, c): (i32, i32, i32, i32, f64) = sqlx::query_as(
+        "SELECT input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens, cost_estimate FROM api_usage_log",
+    ).fetch_one(sq).await.unwrap();
+    eprintln!("api_usage_log row: input_tokens={i} output_tokens={o} cache_creation={w} cache_read={r} cost_estimate=${c:.6} (provider cost x1.1)");
+    let calls = u.extra_metadata.as_deref().map_or(0, |m| serde_json::from_str::<serde_json::Value>(m).unwrap()["calls"].as_array().unwrap().len());
+    eprintln!("api_usage_log extra_metadata.calls = {calls}");
+}
+
+/// Same request as `complete`, but each earlier assistant tool-call turn is
+/// replaced by the raw blocks the API returned for it.
+async fn post_with_replay(
+    client: &AnthropicClient,
+    model: &str,
+    messages: &[Message],
+    tools: &[Tool],
+    opts: &RequestOptions,
+    raw_turns: &[serde_json::Value],
+) -> LLMResponse {
+    let (system, mut msgs) = AnthropicClient::convert_messages_to_anthropic(messages, &HashMap::new());
+    let mut turn = 0;
+    for m in msgs.iter_mut() {
+        if m["role"] == "assistant" && m["content"].is_array() {
+            m["content"] = raw_turns[turn]["content"].clone();
+            turn += 1;
+        }
+    }
+    assert_eq!(turn, raw_turns.len());
+    let body = AnthropicClient::build_request_body(model, system, msgs, tools, opts);
+    client.post_for_live_test(&body).await
+}
+
+#[tokio::test]
+#[ignore = "live: spends money"]
+async fn haiku_5_5_stateless_vs_replay() {
+    let a = tool_loop("claude-haiku-5-5", "high", false).await;
+    let b = tool_loop("claude-haiku-5-5", "high", true).await;
+    eprintln!("haiku stateless ${a:.6} vs replay ${b:.6}");
+}
+
+#[tokio::test]
+#[ignore = "live: spends money"]
+async fn haiku_5_5_dependent_chain_stateless_vs_replay() {
+    let mut t = [0.0; 2];
+    for (i, replay) in [false, true].into_iter().enumerate() {
+        t[i] = tool_loop_with("claude-haiku-5-5", "high", replay, DEPENDENT_PROMPT).await;
+    }
+    eprintln!("dependent chain: stateless ${:.6} vs replay ${:.6}", t[0], t[1]);
+}
+
+#[tokio::test]
+#[ignore = "live: spends money"]
+async fn sonnet_5_5_chat_with_thinking_and_tool_loop() {
+    let t = tool_loop("claude-sonnet-5-5", "high", false).await;
+    eprintln!("sonnet total ${t:.6}");
+}
+
+#[tokio::test]
+#[ignore = "live: spends money"]
+async fn sonnet_5_5_dependent_chain_shows_summarized_thinking() {
+    let t = tool_loop_with(
+        "claude-sonnet-5-5",
+        "high",
+        false,
+        "Think carefully. Customer A pays 40% more than B; B pays half of C; C pays $120. Work out what each pays, then call lookup_metric with name 'top_region', then 'revenue_<region>' (lowercased region from the answer), one call per turn, and finally explain whether A's payment exceeds that region's revenue.",
+    )
+    .await;
+    eprintln!("sonnet chain total ${t:.6}");
+}
+
+/// A background call (title) with a small `max_tokens` and thinking on: the
+/// thinking summary must not consume the whole budget. (Live finding: the API
+/// rejects `temperature` other than 1 while thinking is adaptive, so the
+/// request builder drops `thinking` when one is configured.)
+#[tokio::test]
+#[ignore = "live: spends money"]
+async fn haiku_5_5_background_call_with_small_budget_and_thinking() {
+    let client = AnthropicClient::new(key(), Some("claude-haiku-5-5".into())).unwrap();
+    let opts = RequestOptions::new(512).with_reasoning_effort(Some("low".into()));
+    let r = client
+        .complete(&[Message::user("Write a title (max 6 words) for a chat about monthly revenue vs churn.")], &[], &opts, &HashMap::new())
+        .await
+        .expect("API must accept adaptive thinking on the title path");
+    show("title", &r);
+    eprintln!("  title text: {}", r.content);
+    assert!(!r.content.trim().is_empty(), "thinking must not consume the whole 512-token budget");
+}
+
+/// Live finding (recorded, not a defect of this change): a model that thinks by
+/// default rejects a temperature other than 1 even when `thinking` is not sent,
+/// so a configured temperature (any value other than 1) fails there; Kyomi sends none unless one is set.
+#[tokio::test]
+#[ignore = "live: spends money"]
+async fn haiku_5_5_rejects_temperature_without_a_thinking_parameter() {
+    let client = AnthropicClient::new(key(), Some("claude-haiku-5-5".into())).unwrap();
+    let opts = RequestOptions::new(512).with_temperature(Some(json!(0.25)));
+    let result = client.complete(&[Message::user("Say hi.")], &[], &opts, &HashMap::new()).await;
+    eprintln!("haiku-5-5 with temperature 0.25 and no thinking parameter: {:?}", result.as_ref().map(|_| "accepted").map_err(ToString::to_string));
+}
+
+/// Which temperature/thinking combinations the API accepts (recorded for the docs).
+#[tokio::test]
+#[ignore = "live: spends money"]
+async fn temperature_one_matrix() {
+    for model in ["claude-sonnet-5-5", "claude-haiku-5-5"] {
+        let client = AnthropicClient::new(key(), Some(model.into())).unwrap();
+        for (temp, thinking) in [(Some(json!(1.0)), true), (Some(json!(1.0)), false), (None, false), (Some(json!(0.5)), false)] {
+            let mut opts = RequestOptions::new(64);
+            opts.temperature = temp.clone();
+            let msgs = vec![json!({"role": "user", "content": "Say hi."})];
+            let mut body = AnthropicClient::build_request_body(model, None, msgs, &[], &opts);
+            if thinking {
+                body["thinking"] = json!({"type": "adaptive", "display": "summarized"});
+            } else {
+                body.as_object_mut().unwrap().remove("thinking");
+            }
+            let outcome = match client.try_post_for_live_test(&body).await {
+                Ok(r) => format!("200 (cost ${:.6})", r.cost.unwrap_or(0.0)),
+                Err(e) => format!("{e}"),
+            };
+            eprintln!("MATRIX {model} temperature={temp:?} thinking_param={thinking}: {outcome}");
+        }
+    }
+}

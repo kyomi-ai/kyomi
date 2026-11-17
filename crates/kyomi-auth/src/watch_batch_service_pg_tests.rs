@@ -50,6 +50,30 @@ impl Fx {
     }
 }
 
+/// Stands in for the usage ledger (the agent crate's): sums `{"in", "out"}`
+/// responses into a row, so these tests exercise the claim and transaction.
+fn tokens_row(calls: &[StoredResponse]) -> kyomi_core::Result<Option<kyomi_core::models::ApiUsageInsert>> {
+    let sum = |key: &str| calls.iter().map(|c| c.response[key].as_i64().unwrap_or(0)).sum::<i64>() as i32;
+    let (input, output) = (sum("in"), sum("out"));
+    if input == 0 && output == 0 {
+        return Ok(None);
+    }
+    Ok(Some(kyomi_core::models::ApiUsageInsert {
+        provider: "anthropic".into(),
+        model: "m".into(),
+        input_tokens: input,
+        output_tokens: output,
+        total_tokens: input + output,
+        cost_estimate: 0.5,
+        component: "kyomi_watch".into(),
+        provider_cost_usd: None,
+        cache_creation_input_tokens: 0,
+        cache_read_input_tokens: 0,
+        extra_metadata: Some("{}".into()),
+        request_id: None,
+    }))
+}
+
 #[tokio::test]
 async fn postgres_call_cache_lease_resume_and_reap() {
     let Some(f) = fixture("postgres_call_cache_lease_resume_and_reap").await else { return };
@@ -112,13 +136,9 @@ async fn postgres_call_cache_lease_resume_and_reap() {
     let e = crate::watch_service::get_execution_by_id_only(&f.db, id, &f.ws, &f.user).await.unwrap().unwrap();
     assert_eq!(e.status, kyomi_core::WatchExecutionStatus::Error);
     // The reaped run is billed for what it paid, once, via the StoppedRun fence.
-    const INSERT_REAP: &str = "INSERT INTO api_usage_log \
-         (user_id, workspace_id, session_id, timestamp, provider, model, input_tokens, output_tokens, total_tokens, \
-          cache_creation_input_tokens, cache_read_input_tokens, cost_estimate, component, provider_cost_usd) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 0, 0, $10, $11, $12)";
-    let bill = UsageBill { insert_sql: INSERT_REAP, user_id: &f.user, workspace_id: &f.ws, session_id: "s", provider: "anthropic", model: "m", component: "kyomi_watch" };
-    assert!(bill_run_once(&f.db, id, BillingFence::StoppedRun, Utc::now(), &bill, |u: CallUsage| (u.cost_usd.unwrap_or(0.0), None)).await.unwrap());
-    assert!(!bill_run_once(&f.db, id, BillingFence::StoppedRun, Utc::now(), &bill, |u: CallUsage| (u.cost_usd.unwrap_or(0.0), None)).await.unwrap());
+    let bill = UsageBill { encryption_key: &KEY, user_id: &f.user, workspace_id: &f.ws, session_id: "s" };
+    assert!(bill_run_once(&f.db, id, BillingFence::StoppedRun, Utc::now(), &bill, tokens_row).await.unwrap());
+    assert!(!bill_run_once(&f.db, id, BillingFence::StoppedRun, Utc::now(), &bill, tokens_row).await.unwrap());
     f.cleanup().await;
 }
 
@@ -127,28 +147,23 @@ async fn postgres_billing_is_one_atomic_lease_fenced_transaction() {
     let Some(f) = fixture("postgres_billing_is_one_atomic_lease_fenced_transaction").await else { return };
     let id = f.run("me", Duration::seconds(120)).await;
     let c = begin_call(&f.db, &KEY, id, 0, "h", "anthropic", "m").await.unwrap();
-    finish_call(&f.db, &KEY, &c.call_id, BatchCallState::Succeeded, Some(&serde_json::json!({})), CallUsage { input_tokens: 7, output_tokens: 3, cost_usd: Some(0.01) }, None).await.unwrap();
+    finish_call(&f.db, &KEY, &c.call_id, BatchCallState::Succeeded, Some(&serde_json::json!({"in": 7, "out": 3})), CallUsage { input_tokens: 7, output_tokens: 3, cost_usd: Some(0.01) }, None).await.unwrap();
 
-    const INSERT: &str = "INSERT INTO api_usage_log \
-         (user_id, workspace_id, session_id, timestamp, provider, model, input_tokens, output_tokens, total_tokens, \
-          cache_creation_input_tokens, cache_read_input_tokens, cost_estimate, component, provider_cost_usd) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 0, 0, $10, $11, $12)";
-    let bill = UsageBill { insert_sql: INSERT, user_id: &f.user, workspace_id: &f.ws, session_id: "s", provider: "anthropic", model: "m", component: "kyomi_watch" };
-    let amounts = |u: CallUsage| (u.cost_usd.unwrap_or(0.0) * 1.1, None);
+    let bill = UsageBill { encryption_key: &KEY, user_id: &f.user, workspace_id: &f.ws, session_id: "s" };
     let count = |db: &DbPool, ws: &str| { let (db, ws) = (db.clone(), ws.to_string()); async move { sqlx::query_as::<_, (i64,)>("SELECT COUNT(*) FROM api_usage_log WHERE workspace_id = $1").bind(ws).fetch_one(postgres_pool(&db)).await.unwrap().0 } };
 
-    assert!(!bill_run_once(&f.db, id, BillingFence::LeaseOwner("someone-else"), Utc::now(), &bill, amounts).await.unwrap());
+    assert!(!bill_run_once(&f.db, id, BillingFence::LeaseOwner("someone-else"), Utc::now(), &bill, tokens_row).await.unwrap());
     // A failed write rolls the claim back on Postgres (the whole transaction aborts).
-    let broken = UsageBill { insert_sql: "INSERT INTO no_such_table VALUES ($1)", ..UsageBill { insert_sql: INSERT, ..bill } };
-    assert!(bill_run_once(&f.db, id, BillingFence::LeaseOwner("me"), Utc::now(), &broken, amounts).await.is_err());
+    let failing = |_: &[StoredResponse]| Err(kyomi_core::Error::Internal("cannot price".into()));
+    assert!(bill_run_once(&f.db, id, BillingFence::LeaseOwner("me"), Utc::now(), &bill, failing).await.is_err());
     assert_eq!(count(&f.db, &f.ws).await, 0);
     // Concurrent billers: exactly one row, one winner.
     let mut tasks = Vec::new();
     for _ in 0..6 {
         let (db, user, ws) = (f.db.clone(), f.user.clone(), f.ws.clone());
         tasks.push(tokio::spawn(async move {
-            let bill = UsageBill { insert_sql: INSERT, user_id: &user, workspace_id: &ws, session_id: "s", provider: "anthropic", model: "m", component: "kyomi_watch" };
-            bill_run_once(&db, id, BillingFence::LeaseOwner("me"), Utc::now(), &bill, |u: CallUsage| (u.cost_usd.unwrap_or(0.0) * 1.1, None)).await.unwrap()
+            let bill = UsageBill { encryption_key: &KEY, user_id: &user, workspace_id: &ws, session_id: "s" };
+            bill_run_once(&db, id, BillingFence::LeaseOwner("me"), Utc::now(), &bill, tokens_row).await.unwrap()
         }));
     }
     let mut winners = 0;

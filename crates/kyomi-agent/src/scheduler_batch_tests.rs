@@ -624,3 +624,193 @@ async fn a_batch_run_that_fails_after_paying_for_a_call_is_still_billed_for_it_o
         .unwrap();
     assert_eq!(billed, vec![(20, 9)], "the paid call of a failed run is billed, once");
 }
+
+// ---------------------------------------------------------------------------
+// Billing through the usage ledger, at the batch price (Anthropic Message Batches)
+// ---------------------------------------------------------------------------
+
+/// A fake Anthropic Message Batches API (documented shapes). Batches are
+/// numbered `b1`, `b2`, ... and stay in progress until allowed to complete. A
+/// run is two model calls: a tool call, then the verdict. Results are batch
+/// results (`usage.service_tier` is `batch`), as the live API returns them.
+struct FakeAnthropicBatch {
+    server: FakeHttpServer,
+    complete_upto: Arc<AtomicUsize>,
+}
+
+/// Tokens of the two calls of a run: (input, output) each.
+const CALL_0: (u64, u64) = (2000, 300);
+const CALL_1: (u64, u64) = (3000, 500);
+
+impl FakeAnthropicBatch {
+    async fn start() -> Self {
+        let complete_upto = Arc::new(AtomicUsize::new(0));
+        let answers: Arc<Mutex<Vec<(String, serde_json::Value)>>> = Arc::new(Mutex::new(Vec::new()));
+        let (u, a) = (complete_upto.clone(), answers.clone());
+        let server = FakeHttpServer::start(move |req: &RecordedRequest| {
+            let path = req.path.trim_start_matches("/api.anthropic.com");
+            match (req.method.as_str(), path) {
+                ("POST", "/v1/messages/batches") => {
+                    let r0 = &req.json()["requests"][0];
+                    let after_tool = r0["params"]["messages"]
+                        .as_array()
+                        .and_then(|m| m.last())
+                        .and_then(|m| m["role"].as_str())
+                        == Some("user")
+                        && r0["params"]["messages"].as_array().is_some_and(|m| m.len() > 1);
+                    let usage = |(i, o): (u64, u64)| json!({"input_tokens": i, "output_tokens": o, "service_tier": "batch"});
+                    let message = if after_tool {
+                        json!({"id": "msg_2", "type": "message", "role": "assistant", "model": "claude-haiku-5-5",
+                               "content": [{"type": "text", "text": VERDICT}], "stop_reason": "end_turn", "usage": usage(CALL_1)})
+                    } else {
+                        json!({"id": "msg_1", "type": "message", "role": "assistant", "model": "claude-haiku-5-5",
+                               "content": [{"type": "tool_use", "id": "toolu_1", "name": "list_datasources", "input": {}}],
+                               "stop_reason": "tool_use", "usage": usage(CALL_0)})
+                    };
+                    let mut a = a.lock().unwrap();
+                    a.push((r0["custom_id"].as_str().unwrap_or_default().to_string(), message));
+                    (200, json!({"id": format!("b{}", a.len()), "processing_status": "in_progress"}).to_string())
+                }
+                ("GET", p) if p.starts_with("/v1/messages/batches/b") && p.ends_with("/results") => {
+                    let n: usize = p.trim_start_matches("/v1/messages/batches/b").trim_end_matches("/results").parse().unwrap_or(0);
+                    let (id, message) = a.lock().unwrap()[n - 1].clone();
+                    (200, json!({"custom_id": id, "result": {"type": "succeeded", "message": message}}).to_string())
+                }
+                ("GET", p) if p.starts_with("/v1/messages/batches/b") => {
+                    let n: usize = p.trim_start_matches("/v1/messages/batches/b").parse().unwrap_or(0);
+                    if n <= u.load(Ordering::SeqCst) {
+                        let host = req.headers.get("host").cloned().unwrap_or_default();
+                        (200, json!({"id": format!("b{n}"), "processing_status": "ended",
+                                     "results_url": format!("http://{host}/api.anthropic.com/v1/messages/batches/b{n}/results")}).to_string())
+                    } else {
+                        (200, json!({"id": format!("b{n}"), "processing_status": "in_progress"}).to_string())
+                    }
+                }
+                _ => (404, "{}".into()),
+            }
+        })
+        .await;
+        Self { server, complete_upto }
+    }
+
+    fn batches_submitted(&self) -> usize {
+        self.server
+            .requests()
+            .iter()
+            .filter(|r| r.method == "POST" && r.path.ends_with("/v1/messages/batches"))
+            .count()
+    }
+
+    fn realtime_calls(&self) -> usize {
+        self.server.requests().iter().filter(|r| r.path.ends_with("/v1/messages")).count()
+    }
+
+    fn config(&self) -> Arc<Config> {
+        let mut c = Config::test_config();
+        c.self_hosted = true;
+        c.llm_provider = Some("anthropic".into());
+        c.llm_api_key = Some("k".into());
+        c.llm_model = Some("claude-haiku-5-5".into());
+        c.llm_base_url = Some(format!("{}/api.anthropic.com", self.server.base_url));
+        c.llm_watch.mode = Some(WatchLlmMode::Batch);
+        c.llm_watch.batch_window_minutes = Some(60);
+        Arc::new(c)
+    }
+}
+
+/// What the ledger must bill for `calls`, at the batch tier, with Kyomi's markup.
+fn expected_batch_cost(calls: &[(u64, u64)]) -> (f64, f64) {
+    use crate::anthropic_pricing::{price_call_at, CallTokens, PriceTier};
+    let sum = |tier| -> f64 {
+        calls
+            .iter()
+            .map(|&(input, output)| {
+                price_call_at("claude-haiku-5-5", CallTokens { input, output, ..Default::default() }, tier).cost_usd
+            })
+            .sum()
+    };
+    (sum(PriceTier::Batch) * crate::usage_ledger::AI_COST_MULTIPLIER, sum(PriceTier::Standard) * crate::usage_ledger::AI_COST_MULTIPLIER)
+}
+
+async fn usage_rows(db: &DbPool) -> Vec<(i64, i64, f64, String)> {
+    sqlx::query_as("SELECT input_tokens, output_tokens, cost_estimate, extra_metadata FROM api_usage_log")
+        .fetch_all(kyomi_test_db::sqlite_pool(db))
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn a_run_resumed_across_restarts_bills_each_call_exactly_once_at_the_batch_price() {
+    let db = crate::test_support::test_pool().await;
+    crate::test_support::seed_user_and_workspace(&db).await;
+    insert_watch(&db, Utc::now() + chrono::Duration::hours(6)).await;
+    let fake = FakeAnthropicBatch::start().await;
+    let config = fake.config();
+
+    // Life 1: call 0 submitted and pending. Life 2: it finished; the replay runs
+    // the tool and submits call 1. Life 3: both finished; call 0 is answered
+    // from the cache (replayed, not billed again), call 1 from its batch.
+    let (life1, id) = start_waiting_run(&db, config.clone()).await;
+    crash(&db, life1, id).await;
+    fake.complete_upto.store(1, Ordering::SeqCst);
+    let (_s2, life2) = resume(&db, config.clone()).await;
+    until("call 1 to be submitted", || async { fake.batches_submitted() == 2 }).await;
+    until("the run to wait again", || async { status_of(&db, id).await == "waiting_batch" }).await;
+    crash(&db, life2, id).await;
+    fake.complete_upto.store(usize::MAX, Ordering::SeqCst);
+    let (_s3, life3) = resume(&db, config).await;
+    life3.await.unwrap();
+
+    assert_eq!(status_of(&db, id).await, "no_alert");
+    assert_eq!(fake.batches_submitted(), 2, "two model calls, two batches, across three process lives");
+    assert_eq!(fake.realtime_calls(), 0);
+
+    let rows = usage_rows(&db).await;
+    assert_eq!(rows.len(), 1, "one usage row for the whole run: {rows:?}");
+    let (input, output, cost, metadata) = &rows[0];
+    assert_eq!((*input, *output), ((CALL_0.0 + CALL_1.0) as i64, (CALL_0.1 + CALL_1.1) as i64), "each call once, none replayed into the total");
+    let (batch, standard) = expected_batch_cost(&[CALL_0, CALL_1]);
+    assert!((cost - batch).abs() < 1e-12, "billed {cost}, expected the batch price {batch}");
+    assert!((cost - standard * 0.5).abs() < 1e-12, "the batch price is half the standard price {standard}");
+    let metadata: serde_json::Value = serde_json::from_str(metadata).unwrap();
+    let calls = metadata["calls"].as_array().unwrap();
+    assert_eq!(calls.len(), 2, "the ledger saw exactly the run's two calls: {metadata}");
+    assert!(calls.iter().all(|c| c["service_tier"] == "batch"), "{metadata}");
+}
+
+#[tokio::test]
+async fn a_reaped_batch_run_is_billed_once_for_the_call_it_finished_at_the_batch_price() {
+    let db = crate::test_support::test_pool().await;
+    crate::test_support::seed_user_and_workspace(&db).await;
+    insert_watch(&db, Utc::now() + chrono::Duration::hours(6)).await;
+    let fake = FakeAnthropicBatch::start().await;
+    let config = fake.config();
+
+    // Call 0 finishes and is stored; call 1 is submitted and never finishes; the
+    // driver dies and its run goes far past its deadline: the reaper stops it.
+    let (life1, id) = start_waiting_run(&db, config.clone()).await;
+    crash(&db, life1, id).await;
+    fake.complete_upto.store(1, Ordering::SeqCst);
+    let (s2, life2) = resume(&db, config).await;
+    until("call 1 to be submitted", || async { fake.batches_submitted() == 2 }).await;
+    until("the run to wait again", || async { status_of(&db, id).await == "waiting_batch" }).await;
+    crash(&db, life2, id).await;
+    sqlx::query("UPDATE watch_executions SET batch_deadline_at = $1 WHERE id = $2")
+        .bind(Utc::now() - chrono::Duration::minutes(90))
+        .bind(id)
+        .execute(kyomi_test_db::sqlite_pool(&db))
+        .await
+        .unwrap();
+
+    s2.recover_orphaned_executions().await;
+    assert_eq!(status_of(&db, id).await, "error", "the reaper stops the overdue run");
+    let rows = usage_rows(&db).await;
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!((rows[0].0, rows[0].1), (CALL_0.0 as i64, CALL_0.1 as i64), "only the call that finished");
+    let (batch, _) = expected_batch_cost(&[CALL_0]);
+    assert!((rows[0].2 - batch).abs() < 1e-12, "billed {}, expected the batch price {batch}", rows[0].2);
+
+    // Reaping again (another instance, another sweep) must not bill it again.
+    s2.recover_orphaned_executions().await;
+    assert_eq!(usage_rows(&db).await.len(), 1);
+}

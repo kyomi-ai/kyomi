@@ -74,7 +74,7 @@ async fn serve() {
         match fetch_model_context_window(base_url, model).await {
             Ok(ctx) if ctx > 0 => {
                 tracing::info!(model = %model, context_window = ctx, "LLM context window resolved from provider API");
-                config.llm_context_window = ctx;
+                config.apply_fetched_context_window(ctx);
             }
             Ok(_) => {}
             Err(e) => {

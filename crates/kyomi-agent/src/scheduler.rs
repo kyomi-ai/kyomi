@@ -338,12 +338,16 @@ impl WatchScheduler {
             return;
         };
         let bill = watch_batch_service::UsageBill {
-            insert_sql: crate::execution::BATCH_RUN_USAGE_INSERT_SQL,
+            encryption_key: &self.encryption_key,
             user_id,
             workspace_id,
             session_id: run.session_id.as_deref().unwrap_or(""),
+        };
+        let model = run.llm_model.as_deref().unwrap_or("");
+        let billing = crate::batch_run::RunBilling {
+            is_byok: run.llm_workspace_billed,
             provider,
-            model: run.llm_model.as_deref().unwrap_or(""),
+            model,
             component: "kyomi_watch",
         };
         if let Err(e) = watch_batch_service::bill_run_once(
@@ -352,7 +356,7 @@ impl WatchScheduler {
             watch_batch_service::BillingFence::StoppedRun,
             Utc::now(),
             &bill,
-            crate::execution::batch_run_amounts(run.llm_workspace_billed),
+            |calls| crate::batch_run::batch_run_row(calls, &billing),
         )
         .await
         {

@@ -260,7 +260,7 @@ mod tests {
     use crate::test_support::{anthropic_text_reply, FakeHttpServer};
     use crate::watch_execution::{build_watch_agent_config, build_watch_retry_config};
     use crate::UserMessagePersistence;
-    use kyomi_core::llm_sampling::{LlmSamplingSettings, Setting};
+    use kyomi_core::llm_sampling::LlmSamplingSettings;
 
     const VALID: &str = r#"{"should_alert": false, "reason": "ok"}"#;
 
@@ -334,9 +334,9 @@ mod tests {
             ..Default::default()
         };
         c.llm_sampling = LlmSamplingSettings {
-            reasoning_effort: Some(Setting::Value("high".into())),
-            watch_reasoning_effort: Some(Setting::Value("low".into())),
-            watch_temperature: Some(Setting::Value(0.2)),
+            reasoning_effort: Some("high".into()),
+            watch_reasoning_effort: Some("low".into()),
+            watch_temperature: Some(serde_json::json!(0.2)),
             ..Default::default()
         };
         c
@@ -353,7 +353,7 @@ mod tests {
         let body = reqs[0].json();
         assert_eq!(body["model"], "watch-model");
         assert_eq!(body["output_config"]["effort"], "low");
-        assert_eq!(body["temperature"], 0.2f32 as f64);
+        assert_eq!(body["temperature"], serde_json::json!(0.2));
     }
 
     #[tokio::test]
@@ -365,7 +365,7 @@ mod tests {
         assert_eq!(watch.requests()[0].headers.get("x-api-key").map(String::as_str), Some("watch-key"));
         assert_eq!(body["model"], "watch-model");
         assert_eq!(body["output_config"]["effort"], "low");
-        assert_eq!(body["temperature"], 0.2f32 as f64);
+        assert_eq!(body["temperature"], serde_json::json!(0.2));
     }
 
     #[tokio::test]
@@ -374,7 +374,7 @@ mod tests {
         let mut c = config(true);
         c.llm_base_url = Some(main.base_url.clone());
         c.llm_sampling = LlmSamplingSettings {
-            reasoning_effort: Some(Setting::Value("high".into())),
+            reasoning_effort: Some("high".into()),
             ..Default::default()
         };
         run_turn(main_turn(), c.clone()).await;
@@ -386,7 +386,7 @@ mod tests {
             let body = r.json();
             assert_eq!(body["model"], "main-model");
             assert_eq!(body["output_config"]["effort"], "high", "watch inherits the chat effort");
-            assert_eq!(body["temperature"], 0.7f32 as f64);
+            assert!(body.get("temperature").is_none(), "nothing configured means nothing sent");
         }
     }
 
