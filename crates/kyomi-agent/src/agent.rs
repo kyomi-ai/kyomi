@@ -683,6 +683,8 @@ impl CustomAgent {
         // wrap-up call), for the exhaustion `info!`.
         let mut iterations_used: u32 = 0;
         let mut pause_continuations: u32 = 0;
+        // Whether the previous response was a `pause_turn` (so this request continues it).
+        let mut last_was_pause = false;
         // Which condition ended the loop. Overwritten if a non-iteration
         // guard fires; left at `Iterations` if the loop runs to completion.
         let mut stop_reason = StopReason::Iterations;
@@ -738,7 +740,7 @@ impl CustomAgent {
             let mut llm_messages = self.build_llm_context();
             // A `pause_turn` continuation must end with the paused assistant message
             // exactly as received: nothing may follow it.
-            let pausing = self.pause_chain_start.is_some();
+            let pausing = last_was_pause;
             if !pausing {
                 llm_messages.extend(chartml_retry_messages.iter().cloned());
                 // Budget notice last: maximum recency, immediately before the call.
@@ -840,9 +842,10 @@ impl CustomAgent {
                 self.push_assistant(
                     Message::assistant(&response.content).with_provider_content(server_activity.provider_content.clone()),
                 );
+                last_was_pause = true;
                 continue;
             }
-            self.pause_chain_start = None;
+            last_was_pause = false;
 
             // No tool calls -- this is the final response.
             if response.tool_calls.is_none() {
@@ -868,11 +871,19 @@ impl CustomAgent {
                     )
                     .await;
                     // Store as ephemeral retry context — NOT in self.state.messages.
-                    // The failed answer keeps its provider blocks: a chain's open call is
-                    // only resolved by them.
-                    chartml_retry_messages.push(
-                        Message::assistant(content).with_provider_content(server_activity.provider_content.clone()),
-                    );
+                    if self.pause_chain_start.is_some() {
+                        // The failed answer's blocks resolve the chain's open call, so
+                        // they join the chain's stored blocks (only its text is ephemeral).
+                        self.push_assistant(
+                            Message::assistant("").with_provider_content(server_activity.provider_content.clone()),
+                        );
+                        chartml_retry_messages.push(Message::assistant(content));
+                    } else {
+                        // The failed answer keeps its provider blocks on the ephemeral message.
+                        chartml_retry_messages.push(
+                            Message::assistant(content).with_provider_content(server_activity.provider_content.clone()),
+                        );
+                    }
                     chartml_retry_messages.push(Message::user(format!(
                         "\u{1f916} SYSTEM: Automatic ChartML validation failed. The user has NOT seen your response yet. \
                          Please fix the following errors and then repeat your FULL response:\n\n{error_msg}"
@@ -903,6 +914,7 @@ impl CustomAgent {
                 // and citations' encrypted_index included) so the next user turn can
                 // send them back unchanged; the displayed text carries the sources
                 // footer, the stored blocks do not.
+                self.pause_chain_start = None;
                 self.push_assistant(
                     Message::assistant(&content).with_provider_content(server_activity.provider_content.clone()),
                 );
@@ -929,6 +941,7 @@ impl CustomAgent {
             // Add assistant message with tool calls.
             // Safety: guarded by `response.tool_calls.is_none()` early-return above.
             let tool_calls = response.tool_calls.expect("guarded by is_none check above");
+            self.pause_chain_start = None;
             self.push_assistant(
                 Message::assistant_with_tool_calls(
                     if self.runtime.is_some() && has_chartml_blocks(&response.content) { String::new() } else { response.content.clone() },
@@ -3927,6 +3940,51 @@ Second chart:\n{CHARTML_STRIPPED_NOTE}\nDone."
         let error = agent.chat("go", CancellationToken::new(), None, None, None).await.expect_err("fails");
         assert!(error.to_string().contains("Web research did not finish"), "{error}");
         assert!(agent.state().messages.iter().all(|m| m.role != crate::types::MessageRole::Assistant), "limit: nothing of the chain kept");
+    }
+
+    /// A ChartML-invalid final answer after a pause chain: its blocks resolve the
+    /// chain's open call and are stored with the chain; a failure afterwards keeps
+    /// none of it.
+    #[tokio::test]
+    async fn a_chartml_retry_after_a_pause_chain_keeps_the_chain_resolved() {
+        let paused = live_pause_response();
+        let mut invalid = {
+            let raw: serde_json::Value = serde_json::from_str(
+                &std::fs::read_to_string(format!("{}/src/web/fixtures/anthropic_pause_turn_continuation_message.json", env!("CARGO_MANIFEST_DIR"))).unwrap(),
+            )
+            .unwrap();
+            crate::anthropic::AnthropicClient::parse_response("claude", &raw).unwrap()
+        };
+        invalid.content = "```\n```chartml\ntype: chart\nversion: 99".into();
+        let expected: Vec<serde_json::Value> = paused.raw_response["content"].as_array().unwrap().iter()
+            .chain(invalid.raw_response["content"].as_array().unwrap())
+            .cloned()
+            .collect();
+
+        let (mut agent, _calls) = scripted_agent_with_config(
+            fetch_agent_config(),
+            vec![Reply::Response(paused.clone()), Reply::Response(invalid.clone()), Reply::Text("Corrected answer".into())],
+            Reply::Text("unused".into()),
+        )
+        .await;
+        let answer = agent.chat("go", CancellationToken::new(), None, None, None).await.unwrap();
+        assert!(answer.starts_with("Corrected answer"), "{answer}");
+        let stored: Vec<serde_json::Value> = agent.state().messages.iter()
+            .filter(|m| m.role == crate::types::MessageRole::Assistant)
+            .filter_map(|m| m.provider_content.clone())
+            .flatten()
+            .collect();
+        assert_eq!(stored, expected, "the chain's blocks, the invalid answer's included, exactly as received");
+
+        // A failure after the invalid answer keeps nothing of the chain.
+        let (mut agent, _calls) = scripted_agent_with_config(
+            fetch_agent_config(),
+            vec![Reply::Response(paused), Reply::Response(invalid), Reply::Failure("provider down".into())],
+            Reply::Text("unused".into()),
+        )
+        .await;
+        agent.chat("go", CancellationToken::new(), None, None, None).await.expect_err("fails");
+        assert!(agent.state().messages.iter().all(|m| m.role != crate::types::MessageRole::Assistant));
     }
 
     #[tokio::test]
