@@ -390,12 +390,10 @@ impl ChatAgentAdapter {
 
         // Convert DB messages to agent Message structs.
         let state = self.agent.state_mut();
-        let first_loaded = state.messages.len();
         for msg in &db_messages {
             let agent_msg = db_message_to_agent_message(msg);
             state.messages.push(agent_msg);
         }
-        select_replayable_server_turns(&mut state.messages[first_loaded..]);
 
         // Record total message count (including the system message already in state
         // before DB messages were appended) so persist_after_chat slices correctly.
@@ -897,70 +895,62 @@ async fn persist_one_new_message(
     if msg.role == MessageRole::Assistant
         && preinserted_assistant_id.is_some_and(|id| msg.message_id.as_deref() == Some(id))
     {
-        let finalized = chat_service::finalize_assistant_placeholder(
+        chat_service::finalize_assistant_placeholder(
             db,
             encryption_key,
             msg.message_id.as_deref().expect("matched Some above"),
-            &msg.content,
-            msg.tool_call_id.as_deref(),
-            msg.name.as_deref(),
-            tool_calls_json.as_ref(),
+            &chat_service::PlaceholderResult {
+                content: &msg.content,
+                tool_call_id: msg.tool_call_id.as_deref(),
+                tool_name: msg.name.as_deref(),
+                tool_calls: tool_calls_json.as_ref(),
+                provider_content: provider_content.as_ref(),
+            },
         )
         .await?;
-        // Blocks belong to the text they came with: only when it was written.
-        if finalized && let Some(content) = &provider_content {
-            store_provider_content_best_effort(db, encryption_key, msg.message_id.as_deref().expect("matched Some above"), content).await;
-        }
         return Ok(());
     }
 
-    let stored_id = chat_service::add_message(
+    chat_service::insert_message(
         db,
         encryption_key,
         session_id,
-        role,
-        &msg.content,
-        None, // metadata
-        msg.message_id.as_deref(), // use tagged ID if set, else auto-generate
-        None, // current_time_user_tz
-        // message_source: always None here — a *user*-role message
-        // reaching this branch (an AdapterPersists row — Slack, watch; or a
-        // second user turn within one CallerPersisted run, e.g.
-        // copilot/chat mid-conversation follow-ups the loop itself
-        // injects) has its content built by `agent.chat()`'s
-        // `build_metadata_prefix`, so any source/local-time annotation is
-        // already baked into `msg.content` as literal text. Recording it
-        // again in this row's own columns would make
-        // `db_message_to_agent_message` reconstruct a *second* prefix on
-        // top of the one already there the next time this row is loaded
-        // (KYO-506). Assistant/tool messages (including copilot's, which
-        // is CallerPersisted for its one user row since KYO-554) always
-        // reach this branch too, but never carry a prefix to begin with.
-        None,
-        if msg.role == MessageRole::User {
-            msg.user_id.as_deref()
-        } else {
-            None
+        &chat_service::NewMessage {
+            role,
+            content: &msg.content,
+            metadata: None,
+            // Use the tagged ID if set, else auto-generate.
+            message_id: msg.message_id.as_deref(),
+            current_time_user_tz: None,
+            // message_source: always None here — a *user*-role message
+            // reaching this branch (an AdapterPersists row — Slack, watch; or a
+            // second user turn within one CallerPersisted run, e.g.
+            // copilot/chat mid-conversation follow-ups the loop itself
+            // injects) has its content built by `agent.chat()`'s
+            // `build_metadata_prefix`, so any source/local-time annotation is
+            // already baked into `msg.content` as literal text. Recording it
+            // again in this row's own columns would make
+            // `db_message_to_agent_message` reconstruct a *second* prefix on
+            // top of the one already there the next time this row is loaded
+            // (KYO-506). Assistant/tool messages (including copilot's, which
+            // is CallerPersisted for its one user row since KYO-554) always
+            // reach this branch too, but never carry a prefix to begin with.
+            message_source: None,
+            sent_by_user_id: if msg.role == MessageRole::User {
+                msg.user_id.as_deref()
+            } else {
+                None
+            },
+            tool_call_id: msg.tool_call_id.as_deref(),
+            tool_name: msg.name.as_deref(),
+            tool_calls: tool_calls_json.as_ref(),
+            status: chat_service::MessageStatus::Complete,
         },
-        msg.tool_call_id.as_deref(),
-        msg.name.as_deref(),
-        tool_calls_json.as_ref(),
-        chat_service::MessageStatus::Complete,
+        provider_content.as_ref(),
     )
     .await?;
-    if let Some(content) = &provider_content {
-        store_provider_content_best_effort(db, encryption_key, &stored_id, content).await;
-    }
     Ok(())
 }
-
-/// A message's stored blocks above this size are not stored, and no more than
-/// this much stored block data is replayed per request (newest first). Blocks are
-/// never truncated or edited, because the provider rejects a modified block, so
-/// the limit is a whole-message (and, for replay, whole-turn) decision. The
-/// provider counts `encrypted_content` as input tokens, so the limit also keeps a
-/// long research conversation inside the model's context window.
-const MAX_PROVIDER_CONTENT_BYTES: usize = 256 * 1024;
 
 /// The provider format of the blocks this module stores. Only Anthropic's server
 /// tools produce verbatim blocks that must be replayed; OpenRouter's run over
@@ -969,72 +959,14 @@ fn replayable_backend() -> String {
     crate::provider::ProviderKind::Anthropic.to_string()
 }
 
-/// The blocks to store for this message, if it has any and they fit.
+/// The blocks to store for this message: the provider's own content array, kept
+/// exactly as received, for an assistant message that has one.
 fn storable_provider_content(msg: &Message) -> Option<chat_service::ProviderContent> {
     if msg.role != MessageRole::Assistant {
         return None;
     }
     let blocks = msg.provider_content.as_ref().filter(|blocks| !blocks.is_empty())?;
-    let value = serde_json::Value::Array(blocks.clone());
-    let size = serde_json::to_vec(&value).map(|bytes| bytes.len()).unwrap_or(usize::MAX);
-    if size > MAX_PROVIDER_CONTENT_BYTES {
-        warn!(
-            size,
-            limit = MAX_PROVIDER_CONTENT_BYTES,
-            "Provider content blocks too large to store; this message will replay as text"
-        );
-        return None;
-    }
-    Some(chat_service::ProviderContent { backend: replayable_backend(), blocks: value })
-}
-
-/// Store a message's blocks after the message itself was written. The blocks are
-/// an optimisation with a defined fallback (the message replays as its text), so
-/// a failed write is logged and does not fail a message that is already saved.
-/// The durable path writes them in the message's own transaction instead.
-async fn store_provider_content_best_effort(
-    db: &DbPool,
-    encryption_key: &Arc<[u8; 32]>,
-    message_id: &str,
-    content: &chat_service::ProviderContent,
-) {
-    if let Err(error) = chat_service::store_provider_content(db, encryption_key, message_id, content).await {
-        warn!(%message_id, "Could not store provider content blocks; the message will replay as text: {error}");
-    }
-}
-
-/// A server-tool turn can span several consecutive assistant messages (a
-/// `pause_turn` continuation), and the provider only accepts it whole: a result
-/// without its call (an earlier part was not stored) or a call left open (the run
-/// was cut short) is a 400 on every later request. Each run of consecutive
-/// assistant messages is therefore replayed with all its stored blocks or as
-/// text: whole if its blocks pair up and, newest runs first, while the total fits
-/// [`MAX_PROVIDER_CONTENT_BYTES`]. The text of every message is always intact.
-fn select_replayable_server_turns(messages: &mut [Message]) {
-    let mut spent = 0usize;
-    let mut budget_exhausted = false;
-    for run in crate::web::server_tools::assistant_runs(messages).into_iter().rev() {
-        let blocks: Vec<&serde_json::Value> = messages[run.clone()]
-            .iter()
-            .filter_map(|m| m.provider_content.as_ref())
-            .flatten()
-            .collect();
-        if blocks.is_empty() {
-            continue;
-        }
-        let complete = crate::web::server_tools::server_turn_is_complete(blocks.iter().copied());
-        let size = serde_json::to_vec(&blocks).map(|bytes| bytes.len()).unwrap_or(usize::MAX);
-        let fits = !budget_exhausted && spent.saturating_add(size) <= MAX_PROVIDER_CONTENT_BYTES;
-        if complete && fits {
-            spent += size;
-        } else {
-            // Once one turn does not fit, every older one is text too.
-            budget_exhausted |= complete;
-            for message in &mut messages[run] {
-                message.provider_content = None;
-            }
-        }
-    }
+    Some(chat_service::ProviderContent { backend: replayable_backend(), blocks: serde_json::Value::Array(blocks.clone()) })
 }
 
 /// Drop the DB row already covered by `caller_persisted_id`

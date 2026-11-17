@@ -495,6 +495,11 @@ pub struct CustomAgent {
     web_usage: HashMap<kyomi_core::web_tools::WebToolKind, u32>,
     /// One record per metered provider web call in this run (also logged).
     web_call_log: Vec<crate::web::WebCallRecord>,
+    /// Whether this run showed provider-executed web calls as source cards, and
+    /// whether any such card failed to be recorded. The sources footer is the
+    /// fallback for runs that could not show them as cards.
+    web_cards_shown: bool,
+    web_cards_failed: bool,
 }
 
 impl CustomAgent {
@@ -518,6 +523,8 @@ impl CustomAgent {
             web_sources: Vec::new(),
             web_usage: HashMap::new(),
             web_call_log: Vec::new(),
+            web_cards_shown: false,
+            web_cards_failed: false,
         }
     }
 
@@ -795,14 +802,9 @@ impl CustomAgent {
                 && response.finish_reason == "pause_turn"
                 && pause_continuations < MAX_PAUSE_CONTINUATIONS
                 // The continuation must carry the same server tools. If they are now
-                // withheld (allowance or budget spent, restricted session), or the
-                // tool a paused call used is no longer among them, there is nothing
-                // to continue with: answer with what we have, flagged.
-                && {
-                    let offered = self.admitted_server_tools(false).await;
-                    !offered.is_empty()
-                        && crate::web::server_tools::calls_only_offered(server_activity.provider_content.iter().flatten(), &offered)
-                }
+                // withheld (allowance or budget spent, restricted session) there is
+                // nothing to continue with: answer with what we have, flagged.
+                && !self.admitted_server_tools(false).await.is_empty()
             {
                 pause_continuations += 1;
                 self.state.messages.push(
@@ -879,11 +881,10 @@ impl CustomAgent {
                 // server-tool turn keeps the provider's own blocks (encrypted_content
                 // and citations' encrypted_index included) so the next user turn can
                 // send them back unchanged; the displayed text carries the sources
-                // footer, the stored blocks do not. A research run cut short ends in an
-                // unresolved `server_tool_use` the provider would reject in a later
-                // request, so that answer keeps only its text.
-                let blocks = if cut_short { None } else { server_activity.provider_content.clone() };
-                self.state.messages.push(Message::assistant(&content).with_provider_content(blocks));
+                // footer, the stored blocks do not.
+                self.state.messages.push(
+                    Message::assistant(&content).with_provider_content(server_activity.provider_content.clone()),
+                );
                 return Ok(content);
             }
 
@@ -1231,8 +1232,8 @@ impl CustomAgent {
     }
 
     /// `allow_server_tools = false` is for calls that must not use any tool (the
-    /// forced wrap-up): provider web tools are then not sent and any server-tool
-    /// blocks in the history are replayed as plain text.
+    /// forced wrap-up): provider web tools are then not sent. The history is sent
+    /// as stored, server-tool blocks included.
     async fn call_llm_with(
         &self,
         messages: &[Message],
@@ -1244,12 +1245,12 @@ impl CustomAgent {
             context.complete(&provider, sink.as_ref(), &agent_runtime::ModelCallId(format!("model-{}", self.state.global_iteration)))
                 .await.map_err(runtime_error)
         } else {
-            let (options, messages) = self.prepare_call(messages, allow_server_tools).await;
-            self.client.complete(&messages, tools, &options, &self.user_names).await
+            let options = self.call_options(allow_server_tools).await;
+            self.client.complete(messages, tools, &options, &self.user_names).await
         }
     }
 
-    /// The request options and messages for the next LLM call.
+    /// The request options for the next LLM call.
     ///
     /// Provider-executed web tools are dropped when they must not run: the call
     /// forbids tools (`allow_server_tools == false`), a session holding
@@ -1257,25 +1258,17 @@ impl CustomAgent {
     /// rule the native tools enforce), the monthly budget is spent, or this run
     /// has used its per-turn allowance. Otherwise each tool's `max_uses` is the
     /// allowance still left for the run. Dropping the tool (rather than failing)
-    /// lets the conversation continue.
-    ///
-    /// Server-tool blocks in the history are replayed only for turns whose tools
-    /// are all sent with this request, and as plain text otherwise: the provider
-    /// rejects result blocks for a tool that is absent from the request.
-    async fn prepare_call(
-        &self,
-        messages: &[Message],
-        allow_server_tools: bool,
-    ) -> (crate::provider::RequestOptions, Vec<Message>) {
+    /// lets the conversation continue. The history is sent exactly as stored,
+    /// stored server-tool blocks included, whichever tools are offered.
+    async fn call_options(&self, allow_server_tools: bool) -> crate::provider::RequestOptions {
         let mut options = self.config.request_options();
         options.server_tools = if allow_server_tools { self.admitted_server_tools(true).await } else { Vec::new() };
-        let messages = crate::web::server_tools::replayable_provider_content(messages, &options.server_tools);
-        (options, messages)
+        options
     }
 
     #[cfg(test)]
     async fn request_options_for_call(&self) -> crate::provider::RequestOptions {
-        self.prepare_call(&[], true).await.0
+        self.call_options(true).await
     }
 
     /// The provider tools this request may carry. `log` controls the warning for
@@ -1326,6 +1319,12 @@ impl CustomAgent {
     /// answer (provider terms require citations to be displayed) and clear them.
     fn with_web_sources(&mut self, content: String) -> String {
         let sources = crate::web::server_tools::dedupe(std::mem::take(&mut self.web_sources));
+        // Runs that record events show each provider-executed call as the same
+        // source card Kyomi-executed calls get; the footer is the fallback for runs
+        // without events (Slack, copilot, watches) and for a card that failed.
+        if self.web_cards_shown && !self.web_cards_failed {
+            return content;
+        }
         crate::web::server_tools::append_footer(&content, &crate::web::server_tools::sources_footer(&sources))
     }
 
@@ -1371,7 +1370,32 @@ impl CustomAgent {
             warn!(error = %error, "provider web tool reported an error");
         }
         self.web_sources.extend(activity.sources.iter().cloned());
+        self.show_server_tool_calls(&activity).await;
         activity
+    }
+
+    /// Record each provider-executed call as a tool event carrying the normalised
+    /// sources, so the UI renders it with the same source card as a Kyomi-executed
+    /// search or fetch. No events without a runtime; a card that cannot be recorded
+    /// is logged and the sources footer is used instead.
+    async fn show_server_tool_calls(&mut self, activity: &crate::web::server_tools::ServerToolActivity) {
+        let Some((context, sink)) = &self.runtime else { return };
+        let mut failed = false;
+        for (index, call) in activity.calls.iter().enumerate() {
+            let id = call.id.clone().unwrap_or_else(|| format!("model-{}:web:{index}", self.state.global_iteration));
+            let name = call.tool.tool_name();
+            let arguments = match call.tool {
+                kyomi_core::web_tools::WebToolKind::Search => serde_json::json!({"query": call.subject}),
+                kyomi_core::web_tools::WebToolKind::Fetch => serde_json::json!({"url": call.subject}),
+            };
+            let shown = ProviderToolDisplay { text: crate::tools::web::display_output(call.tool, &call.subject, &call.sources) };
+            if let Err(error) = context.tool(sink.as_ref(), &shown, agent_runtime::ToolCallId(id), name.to_string(), arguments).await {
+                warn!(%error, tool = name, "could not record a provider web call as a source card; the answer carries a sources footer instead");
+                failed = true;
+            }
+        }
+        self.web_cards_shown |= !activity.calls.is_empty();
+        self.web_cards_failed |= failed;
     }
 
     // -----------------------------------------------------------------------
@@ -1717,9 +1741,8 @@ struct RuntimeProvider<'a> {
 impl agent_runtime::CompleteProvider for RuntimeProvider<'_> {
     type Response = crate::types::LLMResponse;
     async fn complete(&self) -> Result<(Self::Response, agent_runtime::ResponseRecord), agent_runtime::ExecutionError> {
-        let (options, messages) = self.agent.prepare_call(self.messages, self.allow_server_tools).await;
-        let response = self.agent.client.complete(&messages, self.tools, &options,
-            &self.agent.user_names).await
+        let options = self.agent.call_options(self.allow_server_tools).await;
+        let response = self.agent.client.complete(self.messages, self.tools, &options, &self.agent.user_names).await
             .map_err(|error| agent_runtime::ExecutionError::Provider(error.to_string()))?;
         let mut planning = Vec::new();
         if let Some(thought) = response.thinking_content.as_deref().and_then(crate::thinking::clean_thought) {
@@ -1745,6 +1768,22 @@ impl agent_runtime::CompleteProvider for RuntimeProvider<'_> {
         Ok((response, record))
     }
 }
+/// A provider-executed call, already finished by the provider: recording it only
+/// stores its normalised result for display; nothing runs.
+struct ProviderToolDisplay {
+    text: String,
+}
+#[async_trait::async_trait]
+impl agent_runtime::ToolExecution for ProviderToolDisplay {
+    async fn execute(&self) -> agent_runtime::ToolOutcome {
+        agent_runtime::ToolOutcome {
+            transport: agent_runtime::TransportOutcome::Completed,
+            domain: agent_runtime::DomainOutcome::Succeeded,
+            text: self.text.clone(),
+        }
+    }
+}
+
 struct RuntimeTool<'a> {
     agent: &'a CustomAgent,
     call: &'a ToolCall,
@@ -3838,18 +3877,6 @@ Second chart:\n{CHARTML_STRIPPED_NOTE}\nDone."
     }
 
     #[tokio::test]
-    async fn withheld_tool_means_server_blocks_in_history_are_replayed_as_text() {
-        let (mut agent, _calls) = scripted_agent_with_config(server_tool_agent_config(), vec![], Reply::Text("x".into())).await;
-        agent.web_usage.insert(kyomi_core::web_tools::WebToolKind::Search, 5);
-        let blocks = Some(vec![serde_json::json!({"type": "server_tool_use", "id": "srvtoolu_1", "name": "web_search", "input": {}})]);
-        let history = vec![Message::user("q"), Message::assistant("searched").with_provider_content(blocks)];
-        let (options, sent) = agent.prepare_call(&history, true).await;
-        assert!(options.server_tools.is_empty());
-        assert!(sent.iter().all(|m| m.provider_content.is_none()), "no orphaned server blocks without the tool");
-        assert_eq!(sent[1].content, "searched");
-    }
-
-    #[tokio::test]
     async fn restricted_personal_data_sessions_never_get_provider_web_tools() {
         let (mut agent, _calls) = scripted_agent_with_config(server_tool_agent_config(), vec![], Reply::Text("x".into())).await;
         assert_eq!(agent.request_options_for_call().await.server_tools.len(), 1);
@@ -3911,33 +3938,7 @@ Second chart:\n{CHARTML_STRIPPED_NOTE}\nDone."
             let calls = calls.lock().unwrap();
             assert_eq!(calls.len(), 1, "{reason}: no continuation request is sent");
             assert!(answer.contains("Web research was cut short"), "{reason}: {answer}");
-            assert!(
-                agent.state().messages.iter().all(|m| m.provider_content.is_none()),
-                "{reason}: the paused server blocks are not stored in any persisted message"
-            );
         }
-    }
-
-    /// A paused call to a tool that is no longer offered cannot be continued: the
-    /// provider rejects its result blocks without the tool in the request.
-    #[tokio::test]
-    async fn a_pause_whose_tool_is_no_longer_offered_ends_flagged() {
-        let mut config = server_tool_agent_config();
-        config.server_tools = vec![crate::web::server_tools::ServerTool {
-            kind: kyomi_core::web_tools::WebToolKind::Fetch,
-            backend: kyomi_core::web_tools::WebBackendKind::Anthropic,
-            entry: serde_json::json!({"type": "web_fetch_20250910", "name": "web_fetch", "max_uses": 5}),
-        }];
-        // The paused reply called web_search; only web_fetch is offered now.
-        let (mut agent, calls) = scripted_agent_with_config(
-            config,
-            vec![Reply::Response(server_response("pause_turn", None))],
-            Reply::Text("never reached".into()),
-        )
-        .await;
-        let answer = agent.chat("hi", CancellationToken::new(), None, None, None).await.unwrap();
-        assert_eq!(calls.lock().unwrap().len(), 1, "no continuation request is sent");
-        assert!(answer.contains("Web research was cut short"), "{answer}");
     }
 
     /// The guard that stops a pause continuation is `admitted_server_tools(false)`;

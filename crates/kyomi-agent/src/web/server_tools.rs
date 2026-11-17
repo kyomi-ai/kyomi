@@ -57,69 +57,6 @@ impl ServerTool {
     }
 }
 
-/// The index ranges of each run of consecutive assistant messages. A server-tool
-/// turn (including a `pause_turn` continuation) lives inside one such run, and
-/// the provider accepts or rejects it as a whole.
-pub fn assistant_runs(messages: &[crate::types::Message]) -> Vec<std::ops::Range<usize>> {
-    let mut runs = Vec::new();
-    let mut start = None;
-    for (index, message) in messages.iter().enumerate() {
-        let assistant = message.role == crate::types::MessageRole::Assistant;
-        match (assistant, start) {
-            (true, None) => start = Some(index),
-            (false, Some(from)) => {
-                runs.push(from..index);
-                start = None;
-            }
-            _ => {}
-        }
-    }
-    if let Some(from) = start {
-        runs.push(from..messages.len());
-    }
-    runs
-}
-
-/// What a request may replay of the stored provider blocks: a server-tool turn is
-/// kept only while every tool it called is among the `offered` server tools (the
-/// provider rejects result blocks for a tool absent from the request, e.g. after
-/// an admin moved search to another backend, or when only one tool's allowance is
-/// left). Any other turn is replayed as plain text. With nothing offered, all
-/// blocks go. A message left with neither text nor tool calls (a bare
-/// `pause_turn` shell) is dropped.
-pub fn replayable_provider_content(messages: &[crate::types::Message], offered: &[Value]) -> Vec<crate::types::Message> {
-    let mut keep = vec![true; messages.len()];
-    for run in assistant_runs(messages) {
-        let blocks: Vec<&Value> = messages[run.clone()].iter().filter_map(|m| m.provider_content.as_ref()).flatten().collect();
-        let all_offered = calls_only_offered(blocks, offered);
-        for index in run {
-            keep[index] = all_offered;
-        }
-    }
-    messages
-        .iter()
-        .zip(keep)
-        .filter_map(|(m, keep)| {
-            if keep || m.provider_content.is_none() {
-                return Some(m.clone());
-            }
-            let mut m = m.clone();
-            m.provider_content = None;
-            (!m.content.is_empty() || m.tool_calls.as_ref().is_some_and(|t| !t.is_empty())).then_some(m)
-        })
-        .collect()
-}
-
-/// Whether every server tool the blocks called is among the `offered` tool
-/// entries (matched by `name`). A call with no name counts as not offered.
-pub fn calls_only_offered<'a>(blocks: impl IntoIterator<Item = &'a Value>, offered: &[Value]) -> bool {
-    let offered: Vec<&str> = offered.iter().filter_map(|entry| entry.get("name").and_then(Value::as_str)).collect();
-    blocks
-        .into_iter()
-        .filter(|block| block.get("type").and_then(Value::as_str) == Some("server_tool_use"))
-        .all(|block| block.get("name").and_then(Value::as_str).is_some_and(|name| offered.contains(&name)))
-}
-
 pub const ANTHROPIC_SEARCH_VERSION: &str = "web_search_20250305";
 pub const ANTHROPIC_FETCH_VERSION: &str = "web_fetch_20250910";
 
@@ -204,6 +141,11 @@ pub fn parse_openrouter(raw: &Value) -> ServerToolActivity {
         }
     }
     out.sources = dedupe(sources);
+    // OpenRouter reports citations for the response as a whole (search only), not
+    // per call, and not the query: one display entry without an id or subject.
+    if !out.sources.is_empty() {
+        out.calls.push(ServerToolCall { id: None, tool: WebToolKind::Search, subject: String::new(), sources: out.sources.clone() });
+    }
     out
 }
 
@@ -221,6 +163,21 @@ pub struct ServerToolActivity {
     pub fetches: u32,
     /// Error codes the tool reported (`web_search_tool_result_error`, ...).
     pub errors: Vec<String>,
+    /// One entry per provider-executed call whose results are known, for the UI's
+    /// source cards (the same cards Kyomi-executed calls produce).
+    pub calls: Vec<ServerToolCall>,
+}
+
+/// One provider-executed search or fetch, normalised for display.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ServerToolCall {
+    /// The provider's id for the call (`srvtoolu_...`); `None` when the backend
+    /// does not give one.
+    pub id: Option<String>,
+    pub tool: WebToolKind,
+    /// The query (search) or URL (fetch) the model used; empty when not reported.
+    pub subject: String,
+    pub sources: Vec<WebSource>,
 }
 
 /// A server tool's result block type (`web_search_tool_result`, ...); the
@@ -253,40 +210,18 @@ pub fn parse_anthropic(raw: &Value) -> ServerToolActivity {
     let mut cited: Vec<WebSource> = Vec::new();
     for block in blocks {
         match block.get("type").and_then(Value::as_str) {
-            Some("web_search_tool_result") => match block.get("content") {
-                Some(Value::Array(items)) => {
-                    for item in items.iter().filter(|i| i.get("type").and_then(Value::as_str) == Some("web_search_result")) {
-                        if let Some(url) = item.get("url").and_then(Value::as_str) {
-                            results.push(WebSource {
-                                title: item.get("title").and_then(Value::as_str).unwrap_or(url).to_string(),
-                                url: url.to_string(),
-                                snippet: String::new(),
-                                score: None,
-                                published: item.get("page_age").and_then(Value::as_str).map(str::to_string),
-                            });
-                        }
-                    }
+            Some("web_search_tool_result") => {
+                // An error result carries an object with `error_code` instead of a list.
+                if let Some(code) = block.pointer("/content/error_code").and_then(Value::as_str) {
+                    out.errors.push(format!("web_search: {code}"));
                 }
-                Some(err) => {
-                    if let Some(code) = err.get("error_code").and_then(Value::as_str) {
-                        out.errors.push(format!("web_search: {code}"));
-                    }
-                }
-                None => {}
-            },
+                results.extend(result_sources(block));
+            }
             Some("web_fetch_tool_result") => {
-                let c = block.get("content");
-                if let Some(code) = c.and_then(|c| c.get("error_code")).and_then(Value::as_str) {
+                if let Some(code) = block.pointer("/content/error_code").and_then(Value::as_str) {
                     out.errors.push(format!("web_fetch: {code}"));
-                } else if let Some(url) = c.and_then(|c| c.get("url")).and_then(Value::as_str) {
-                    let title = c.and_then(|c| c.pointer("/content/title")).and_then(Value::as_str).unwrap_or(url);
-                    results.push(WebSource {
-                        title: title.to_string(),
-                        url: url.to_string(),
-                        snippet: String::new(),
-                        score: None,
-                        published: None,
-                    });
+                } else {
+                    results.extend(result_sources(block));
                 }
             }
             Some("text") => {
@@ -308,7 +243,68 @@ pub fn parse_anthropic(raw: &Value) -> ServerToolActivity {
         }
     }
     out.sources = dedupe(if cited.is_empty() { results } else { cited });
+    out.calls = anthropic_calls(blocks);
     out
+}
+
+/// Pair each `server_tool_use` block with its result block (by `tool_use_id`) and
+/// normalise the result's pages. A call whose result is an error or missing is
+/// left out: there is nothing to show.
+fn anthropic_calls(blocks: &[Value]) -> Vec<ServerToolCall> {
+    let mut calls = Vec::new();
+    for block in blocks.iter().filter(|b| b.get("type").and_then(Value::as_str) == Some("server_tool_use")) {
+        let Some(id) = block.get("id").and_then(Value::as_str) else { continue };
+        let (tool, subject) = match block.get("name").and_then(Value::as_str) {
+            Some("web_search") => (WebToolKind::Search, block.pointer("/input/query")),
+            Some("web_fetch") => (WebToolKind::Fetch, block.pointer("/input/url")),
+            _ => continue,
+        };
+        let result = blocks.iter().find(|b| {
+            b.get("tool_use_id").and_then(Value::as_str) == Some(id)
+                && b.get("type").and_then(Value::as_str).is_some_and(is_server_result_type)
+        });
+        let sources = result.map(result_sources).unwrap_or_default();
+        if sources.is_empty() {
+            continue;
+        }
+        calls.push(ServerToolCall {
+            id: Some(id.to_string()),
+            tool,
+            subject: subject.and_then(Value::as_str).unwrap_or_default().to_string(),
+            sources,
+        });
+    }
+    calls
+}
+
+/// The pages a `web_search_tool_result` / `web_fetch_tool_result` block returned.
+fn result_sources(block: &Value) -> Vec<WebSource> {
+    match block.get("type").and_then(Value::as_str) {
+        Some("web_search_tool_result") => block
+            .get("content")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter(|i| i.get("type").and_then(Value::as_str) == Some("web_search_result"))
+            .filter_map(|item| {
+                let url = item.get("url").and_then(Value::as_str)?;
+                Some(WebSource {
+                    title: item.get("title").and_then(Value::as_str).unwrap_or(url).to_string(),
+                    url: url.to_string(),
+                    snippet: String::new(),
+                    score: None,
+                    published: item.get("page_age").and_then(Value::as_str).map(str::to_string),
+                })
+            })
+            .collect(),
+        Some("web_fetch_tool_result") => {
+            let content = block.get("content");
+            let Some(url) = content.and_then(|c| c.get("url")).and_then(Value::as_str) else { return Vec::new() };
+            let title = content.and_then(|c| c.pointer("/content/title")).and_then(Value::as_str).unwrap_or(url);
+            vec![WebSource { title: title.to_string(), url: url.to_string(), snippet: String::new(), score: None, published: None }]
+        }
+        _ => Vec::new(),
+    }
 }
 
 /// Drop repeated URLs, keeping the first (cited text wins when it came first).
@@ -372,33 +368,6 @@ pub fn append_footer(content: &str, footer: &str) -> String {
         Some((marker, len)) => format!("{content}\n{}{footer}", marker.to_string().repeat(len)),
         None => format!("{content}{footer}"),
     }
-}
-
-/// Whether a run of consecutive assistant messages' blocks form complete server
-/// turns: every server tool call has its result later in the sequence, and every
-/// result follows its call. The provider rejects a request that violates this
-/// (a result with no call, or a call left open before the next user turn), so a
-/// stored turn that fails the check is replayed as text instead.
-pub fn server_turn_is_complete<'a>(blocks: impl IntoIterator<Item = &'a Value>) -> bool {
-    let mut open: std::collections::HashSet<&str> = std::collections::HashSet::new();
-    for block in blocks {
-        match block.get("type").and_then(Value::as_str) {
-            Some("server_tool_use") => match block.get("id").and_then(Value::as_str) {
-                Some(id) => {
-                    open.insert(id);
-                }
-                None => return false,
-            },
-            Some(kind) if is_server_result_type(kind) => {
-                match block.get("tool_use_id").and_then(Value::as_str) {
-                    Some(id) if open.remove(id) => {}
-                    _ => return false,
-                }
-            }
-            _ => {}
-        }
-    }
-    open.is_empty()
 }
 
 /// Recorded-response fixtures shared with other test modules.
@@ -577,31 +546,6 @@ mod tests {
         assert_eq!(a.with_max_uses(50)["max_uses"], 5, "never raised above the entry");
         let o = ServerTool { kind: WebToolKind::Fetch, backend: O, entry: openrouter_tool_entry(WebToolKind::Fetch, &cfg(O, json!({})), &caps()) };
         assert_eq!(o.with_max_uses(3)["parameters"]["max_uses"], 3);
-    }
-
-    #[test]
-    fn a_stored_turn_is_replayed_only_while_every_tool_it_called_is_offered() {
-        use crate::types::Message;
-        let search = Message::assistant("a").with_provider_content(Some(search_response()["content"].as_array().unwrap().clone()));
-        let history = vec![Message::user("q"), search, Message::user("q2")];
-        let offered = |names: &[&str]| names.iter().map(|n| json!({"type": "x", "name": n})).collect::<Vec<_>>();
-        assert!(replayable_provider_content(&history, &offered(&["web_search"]))[1].provider_content.is_some());
-        assert!(replayable_provider_content(&history, &offered(&["web_search", "web_fetch"]))[1].provider_content.is_some());
-        let only_fetch = replayable_provider_content(&history, &offered(&["web_fetch"]));
-        assert!(only_fetch[1].provider_content.is_none(), "search blocks without the search tool replay as text");
-        assert_eq!(only_fetch[1].content, "a");
-    }
-
-    #[test]
-    fn replayable_provider_content_replays_server_turns_as_text_and_drops_empty_shells() {
-        use crate::types::Message;
-        let blocks = Some(vec![json!({"type": "server_tool_use", "id": "srvtoolu_1", "name": "web_search", "input": {}})]);
-        let with_text = Message::assistant("partial").with_provider_content(blocks.clone());
-        let shell = Message::assistant("").with_provider_content(blocks);
-        let out = replayable_provider_content(&[Message::user("q"), with_text, shell, Message::assistant("plain")], &[]);
-        assert_eq!(out.len(), 3);
-        assert!(out.iter().all(|m| m.provider_content.is_none()));
-        assert_eq!(out[1].content, "partial");
     }
 
     #[test]

@@ -107,6 +107,31 @@ fn source_json(s: &WebSource) -> Option<Value> {
     Some(v)
 }
 
+/// The result payload the UI's source card reads for one search or fetch, in the
+/// same shape the Kyomi-executed tools return. Used to show a provider-executed
+/// call (whose results never pass through a Kyomi tool) with the same card.
+pub(crate) fn display_output(tool: kyomi_core::web_tools::WebToolKind, subject: &str, sources: &[WebSource]) -> String {
+    use kyomi_core::web_tools::WebToolKind;
+    match tool {
+        WebToolKind::Search => json!({
+            "tool": "web_search",
+            "available": true,
+            "query": subject,
+            "results": sources.iter().filter_map(source_json).collect::<Vec<_>>(),
+        }),
+        WebToolKind::Fetch => {
+            let page = sources.first();
+            json!({
+                "tool": "web_fetch",
+                "available": true,
+                "url": page.and_then(|p| safe_url(&p.url)).unwrap_or(subject),
+                "title": page.map(|p| fence_untrusted(&p.title)),
+            })
+        }
+    }
+    .to_string()
+}
+
 // ---------------------------------------------------------------------------
 // web_search
 // ---------------------------------------------------------------------------

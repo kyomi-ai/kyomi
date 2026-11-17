@@ -66,3 +66,39 @@ fn fetch_renders_the_page_as_one_source() {
     assert!(html.contains("Docs"), "{html}");
     assert!(html.contains("href=\"https://example.com/doc\""), "{html}");
 }
+
+/// A provider-executed call (Anthropic / OpenRouter) is recorded with the same
+/// payload shape as a Kyomi-executed one and shows as the same source card:
+/// the query, then each page as a link with its host and age.
+#[test]
+fn a_provider_executed_search_shows_the_same_source_card() {
+    let html = render(json!({
+        "tool": "web_search",
+        "input": {"query": "latest stable rust"},
+        "output": {"tool": "web_search", "available": true, "query": "latest stable rust", "results": [
+            {"title": "<untrusted_web_content>\nRust Versions\n</untrusted_web_content>", "url": "https://releases.rs/", "snippet": "<untrusted_web_content>\n\n</untrusted_web_content>", "published": "April 30, 2026"},
+            {"title": "<untrusted_web_content>\nBlog\n</untrusted_web_content>", "url": "https://blog.rust-lang.org/", "snippet": "<untrusted_web_content>\n\n</untrusted_web_content>"}
+        ]}
+    }));
+    assert!(html.contains("latest stable rust"), "{html}");
+    assert!(html.contains("Sources:"), "{html}");
+    assert!(html.contains("href=\"https://releases.rs/\""), "{html}");
+    assert!(html.contains("releases.rs · April 30, 2026"), "{html}");
+    assert!(html.contains("href=\"https://blog.rust-lang.org/\""), "{html}");
+    assert!(!html.contains("untrusted_web_content"), "{html}");
+}
+
+/// OpenRouter reports citations for the response, not the query: the card still
+/// lists the sources.
+#[test]
+fn a_provider_search_without_a_reported_query_still_lists_its_sources() {
+    let html = render(json!({
+        "tool": "web_search",
+        "input": {"query": ""},
+        "output": {"tool": "web_search", "available": true, "query": "", "results": [
+            {"title": "Rust 1.99", "url": "https://blog.rust-lang.org/x", "snippet": ""}
+        ]}
+    }));
+    assert!(html.contains("Sources:"), "{html}");
+    assert!(html.contains("href=\"https://blog.rust-lang.org/x\""), "{html}");
+}

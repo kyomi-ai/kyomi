@@ -12,9 +12,9 @@ Web content is treated as untrusted data. The agent is told not to follow instru
 
 ## Sources
 
-Answers that used the web show their sources (title and link). With `tavily`, `linkup` and `builtin`, each search or fetch also appears as a card in the conversation listing the pages it used. With `anthropic` and `openrouter` the provider runs the tool inside one model call, so there is no card; the sources are listed under **Sources** at the end of the answer instead. (OpenRouter reports citations for search only, so a fetch adds none.)
+Answers that used the web show their sources (title and link). Every backend shows each search or fetch as a card in the conversation listing the pages it used. With `tavily`, `linkup` and `builtin` the card comes from the tool call Kyomi runs. With `anthropic` and `openrouter` the provider runs the tool inside one model call, so Kyomi records that call from the provider's reply and shows the same card. Where a conversation has no card timeline (Slack, copilots, watches) the sources are listed under **Sources** at the end of the answer instead. Limits of the providers: Anthropic reports the query and pages for each call; OpenRouter reports citations for search only, as one list for the whole reply and without the query, and reports nothing for a fetch, so an OpenRouter fetch shows no card.
 
-With `anthropic`, the search results the model used are kept with the conversation (encrypted, like the messages) so follow-up questions can build on them, and are removed when the message is deleted. If they are too large, or the web tools are not available for a later request, the follow-up sees the answer text instead.
+With `anthropic`, the search results the model used are kept with the conversation (encrypted, like the messages) and sent back to the provider exactly as it returned them on later turns, so follow-up questions can build on them; they are removed when the message is deleted or edited. Earlier results count as input tokens like the rest of the history, and very long conversations are compacted as usual. If the provider rejects a request, the conversation shows the provider's error.
 
 ## Backends
 

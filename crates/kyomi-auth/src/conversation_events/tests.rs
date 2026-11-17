@@ -2407,8 +2407,132 @@ async fn postgres_lifecycle_conformance() {
         lifecycle_conformance(&scratch.db, &scratch.db).await;
         lifecycle_review_regressions(&scratch.db).await;
         lease_wait_cannot_resurrect(&scratch.db, &scratch.db).await;
+        update_message_provider_blocks(&scratch.db).await;
+        legacy_writes_store_blocks_atomically(&scratch.db).await;
     }).await;
     scratch.close().await;
+}
+
+/// KYO-969: rewriting a message's text outside a successful completion drops its
+/// stored provider blocks in the same transaction as the rewrite.
+async fn update_message_provider_blocks(db: &DbPool) {
+    let (_owner, _member, _wid, sid) = seed(db).await;
+    let blocks = serde_json::json!([{"type": "text", "text": "stored answer"}]);
+    let content = crate::chat_service::ProviderContent { backend: "anthropic".into(), blocks };
+    let count = |id: String| async move {
+        kyomi_core::db_fetch_scalar!(
+            db,
+            i64,
+            "SELECT COUNT(*) FROM chat_message_provider_content WHERE message_id=$1",
+            &id
+        )
+        .unwrap()
+    };
+    let text = |id: String| async move {
+        let encrypted: String = kyomi_core::db_fetch_scalar!(db, String, "SELECT content FROM chat_messages WHERE message_id=$1", &id).unwrap();
+        encryption::decrypt(&encrypted, &KEY).unwrap()
+    };
+    let mut ids = Vec::new();
+    for label in ["complete", "edit", "error", "atomic"] {
+        let id = crate::chat_service::add_message(
+            db, &KEY, &sid, "assistant", "answer", None, Some(&format!("{label}-{}", uuid::Uuid::new_v4())),
+            None, None, None, None, None, None, crate::chat_service::MessageStatus::Complete,
+        )
+        .await
+        .unwrap();
+        crate::chat_service::store_provider_content(db, &KEY, &id, &content).await.unwrap();
+        ids.push(id);
+    }
+    let [complete, edit, error, atomic] = [&ids[0], &ids[1], &ids[2], &ids[3]];
+    crate::chat_service::update_message(db, &KEY, complete, Some("answer"), None, Some(crate::chat_service::MessageStatus::Complete)).await.unwrap();
+    assert_eq!(count(complete.clone()).await, 1, "a successful completion keeps the blocks");
+    crate::chat_service::update_message(db, &KEY, edit, Some("edited"), None, None).await.unwrap();
+    assert_eq!(count(edit.clone()).await, 0, "an edit drops the blocks");
+    crate::chat_service::update_message(db, &KEY, error, Some("it failed"), None, Some(crate::chat_service::MessageStatus::Error)).await.unwrap();
+    assert_eq!(count(error.clone()).await, 0, "an error notice drops the blocks");
+    // The text and the blocks change together or not at all: with the blocks
+    // table unavailable the rewrite fails and the old text stays.
+    kyomi_core::db_execute!(db, "ALTER TABLE chat_message_provider_content RENAME TO chat_message_provider_content_gone").unwrap();
+    let failed = crate::chat_service::update_message(db, &KEY, atomic, Some("new text"), None, None).await;
+    kyomi_core::db_execute!(db, "ALTER TABLE chat_message_provider_content_gone RENAME TO chat_message_provider_content").unwrap();
+    assert!(failed.is_err(), "the failed clear fails the update");
+    assert_eq!(text(atomic.clone()).await, "answer", "the rewrite rolled back with it");
+    assert_eq!(count(atomic.clone()).await, 1, "old text keeps its old blocks, never new text with old blocks");
+}
+/// KYO-969 legacy write paths: the message (or the finalized placeholder text) and
+/// its provider blocks are one transaction.
+async fn legacy_writes_store_blocks_atomically(db: &DbPool) {
+    fn finish(content: &crate::chat_service::ProviderContent) -> crate::chat_service::PlaceholderResult<'_> {
+        crate::chat_service::PlaceholderResult { content: "final", tool_call_id: None, tool_name: None, tool_calls: None, provider_content: Some(content) }
+    }
+    let (_owner, _member, _wid, sid) = seed(db).await;
+    let content = crate::chat_service::ProviderContent {
+        backend: "anthropic".into(),
+        blocks: serde_json::json!([{"type": "text", "text": "stored answer"}]),
+    };
+    let rows = |id: String, table: &'static str| async move {
+        kyomi_core::db_fetch_scalar!(db, i64, &format!("SELECT COUNT(*) FROM {table} WHERE message_id=$1"), &id).unwrap()
+    };
+    let add = |id: String, provider: Option<&crate::chat_service::ProviderContent>| {
+        let sid = sid.clone();
+        let provider = provider.cloned();
+        async move {
+            crate::chat_service::insert_message(
+                db, &KEY, &sid,
+                &crate::chat_service::NewMessage {
+                    role: "assistant", content: "answer", metadata: None, message_id: Some(&id), current_time_user_tz: None,
+                    message_source: None, sent_by_user_id: None, tool_call_id: None, tool_name: None, tool_calls: None,
+                    status: crate::chat_service::MessageStatus::Complete,
+                },
+                provider.as_ref(),
+            )
+            .await
+        }
+    };
+    let plain = format!("plain-{}", uuid::Uuid::new_v4());
+    add(plain.clone(), None).await.unwrap();
+    assert_eq!(rows(plain, "chat_message_provider_content").await, 0, "no blocks, no row");
+    let stored = format!("stored-{}", uuid::Uuid::new_v4());
+    add(stored.clone(), Some(&content)).await.unwrap();
+    assert_eq!(rows(stored.clone(), "chat_messages").await, 1);
+    assert_eq!(rows(stored, "chat_message_provider_content").await, 1);
+
+    // A placeholder finalized with blocks.
+    let placeholder = crate::chat_service::add_message(
+        db, &KEY, &sid, "assistant", "", None, Some(&format!("ph-{}", uuid::Uuid::new_v4())), None, None, None, None, None, None,
+        crate::chat_service::MessageStatus::InProgress,
+    )
+    .await
+    .unwrap();
+    assert!(
+        crate::chat_service::finalize_assistant_placeholder(db, &KEY, &placeholder, &finish(&content))
+            .await
+            .unwrap()
+    );
+    assert_eq!(rows(placeholder.clone(), "chat_message_provider_content").await, 1);
+
+    // With the blocks table unavailable nothing is half-written.
+    kyomi_core::db_execute!(db, "ALTER TABLE chat_message_provider_content RENAME TO chat_message_provider_content_gone").unwrap();
+    let broken = format!("broken-{}", uuid::Uuid::new_v4());
+    let added = add(broken.clone(), Some(&content)).await;
+    let placeholder2 = crate::chat_service::add_message(
+        db, &KEY, &sid, "assistant", "", None, Some(&format!("ph2-{}", uuid::Uuid::new_v4())), None, None, None, None, None, None,
+        crate::chat_service::MessageStatus::InProgress,
+    )
+    .await
+    .unwrap();
+    let finalized = crate::chat_service::finalize_assistant_placeholder(db, &KEY, &placeholder2, &finish(&content)).await;
+    kyomi_core::db_execute!(db, "ALTER TABLE chat_message_provider_content_gone RENAME TO chat_message_provider_content").unwrap();
+    assert!(added.is_err() && finalized.is_err(), "a failed blocks write fails the whole write");
+    assert_eq!(rows(broken, "chat_messages").await, 0, "the message row rolled back");
+    let still_empty: String = kyomi_core::db_fetch_scalar!(db, String, "SELECT content FROM chat_messages WHERE message_id=$1", &placeholder2).unwrap();
+    assert_eq!(encryption::decrypt(&still_empty, &KEY).unwrap(), "", "the placeholder text rolled back");
+}
+#[tokio::test]
+async fn sqlite_provider_blocks_follow_message_writes_atomically() {
+    let db = crate::test_support::test_pool().await;
+    update_message_provider_blocks(&db).await;
+    legacy_writes_store_blocks_atomically(&db).await;
 }
 
 #[tokio::test]
