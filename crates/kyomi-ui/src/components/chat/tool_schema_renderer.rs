@@ -2236,6 +2236,96 @@ fn render_workspace_info(schema: &Value) -> impl IntoView {
     }
 }
 
+// -- Web search / fetch (KYO-969) --
+
+/// Render one web source: a titled external link with its host, or plain text
+/// when the URL is not a safe http(s) URL.
+fn web_source_row(title: String, url: String, published: Option<String>) -> AnyView {
+    let host = url
+        .split("://")
+        .nth(1)
+        .and_then(|rest| rest.split(['/', '?', '#']).next())
+        .unwrap_or("")
+        .to_string();
+    let title = kyomi_types::web_text::card_title(&kyomi_types::web_text::unfence(&title));
+    let title = if title.is_empty() { host.clone() } else { title };
+    let meta = match published {
+        Some(p) if !p.is_empty() => format!("{host} · {p}"),
+        _ => host,
+    };
+    let label = if kyomi_types::web_text::is_safe_web_url(&url) {
+        view! {
+            <a href=url target="_blank" rel="noopener noreferrer nofollow" class="text-primary hover:underline font-medium">
+                {title}
+            </a>
+        }
+        .into_any()
+    } else {
+        view! { <span class="font-medium text-foreground">{title}</span> }.into_any()
+    };
+    view! {
+        <div class="bg-card border border-border rounded p-2 text-xs">
+            <div class="truncate">{label}</div>
+            <div class="text-muted-foreground truncate">{meta}</div>
+        </div>
+    }
+    .into_any()
+}
+
+/// `web_search` / `web_fetch`: the query or URL, then the sources the agent
+/// used. Backend-neutral: it reads the normalised result shape every backend
+/// produces (`results[{title,url,published}]` / `{url,title}`), never vendor data.
+fn render_web_tool(schema: &Value) -> impl IntoView {
+    let tool = str_field(schema, "tool").unwrap_or("web_search").to_string();
+    let input = schema.get("input");
+    let output = schema.get("output");
+    let heading = if tool == "web_fetch" { "Fetching page:" } else { "Web search:" };
+    let subject = input
+        .and_then(|i| str_field(i, "query").or_else(|| str_field(i, "url")))
+        .or_else(|| output.and_then(|o| str_field(o, "query").or_else(|| str_field(o, "url"))))
+        .unwrap_or("")
+        .to_string();
+    let unavailable = output.is_some_and(|o| bool_field(o, "available") == Some(false));
+    let reason = output.and_then(|o| str_field(o, "reason")).unwrap_or("Web access is unavailable").to_string();
+    let rows: Vec<AnyView> = match output {
+        Some(o) if !unavailable => {
+            if let Some(results) = array_field(o, "results") {
+                results
+                    .iter()
+                    .take(8)
+                    .map(|r| {
+                        web_source_row(
+                            str_field(r, "title").unwrap_or("").to_string(),
+                            str_field(r, "url").unwrap_or("").to_string(),
+                            str_field(r, "published").map(String::from),
+                        )
+                    })
+                    .collect()
+            } else if let Some(url) = str_field(o, "url") {
+                vec![web_source_row(str_field(o, "title").unwrap_or("").to_string(), url.to_string(), None)]
+            } else {
+                Vec::new()
+            }
+        }
+        _ => Vec::new(),
+    };
+    view! {
+        <div class="space-y-2">
+            <div>
+                {section_label(heading)}
+                <div class="mt-1 bg-muted p-2 rounded border border-border text-xs text-foreground font-medium break-words">{subject}</div>
+            </div>
+            {unavailable.then(|| view! { <div class="text-xs text-muted-foreground">{reason}</div> })}
+            {(!rows.is_empty()).then(|| view! {
+                <div>
+                    {section_label("Sources:")}
+                    <div class="mt-1 space-y-1">{rows}</div>
+                </div>
+            })}
+        </div>
+    }
+}
+
 // -- Generic Fallback --
 
 /// Tool labels for generic tools that only need a one-line description.
@@ -2322,6 +2412,9 @@ pub fn render_tool_schema(schema: Value) -> impl IntoView {
         "validate_chartml" => render_validate_chartml(&schema).into_any(),
         "forecast_data" => render_forecast_data(&schema).into_any(),
         "get_workspace_info" => render_workspace_info(&schema).into_any(),
+
+        // Web access
+        "web_search" | "web_fetch" => render_web_tool(&schema).into_any(),
 
         // Generic fallback
         "list_knowledge_files" | "read_knowledge_file" | "write_knowledge_file"

@@ -190,6 +190,9 @@ pub(crate) enum Reply {
     /// clock (`#[tokio::test(start_paused = true)]`) rather than a real
     /// sleep.
     SlowToolCall(std::time::Duration),
+    /// A fully specified response (e.g. a provider-executed server-tool turn,
+    /// KYO-969).
+    Response(LLMResponse),
     /// A provider failure.
     Failure(String),
     /// A single tool call whose arguments the provider could not parse
@@ -228,6 +231,8 @@ pub(crate) fn tool_call_response(usage: AgentTokenUsage) -> LLMResponse {
 pub(crate) struct RecordedCall {
     pub messages: Vec<Message>,
     pub tools: Vec<Tool>,
+    /// The provider-executed tools this request carried.
+    pub server_tools: Vec<serde_json::Value>,
 }
 
 impl RecordedCall {
@@ -255,7 +260,7 @@ impl LLMProvider for ScriptedProvider {
         &self,
         messages: &[Message],
         tools: &[Tool],
-        _options: &crate::provider::RequestOptions,
+        options: &crate::provider::RequestOptions,
         _user_names: &HashMap<String, String>,
     ) -> kyomi_core::Result<LLMResponse> {
         self.calls
@@ -264,6 +269,7 @@ impl LLMProvider for ScriptedProvider {
             .push(RecordedCall {
                 messages: messages.to_vec(),
                 tools: tools.to_vec(),
+                server_tools: options.server_tools.clone(),
             });
 
         let reply = self
@@ -300,6 +306,7 @@ impl LLMProvider for ScriptedProvider {
                 tokio::time::sleep(duration).await;
                 Ok(tool_call_response(AgentTokenUsage::default()))
             }
+            Reply::Response(response) => Ok(response),
             Reply::Failure(message) => Err(kyomi_core::Error::Internal(message)),
             Reply::TruncatedToolCall => Ok(LLMResponse {
         raw_response: serde_json::Value::Null,
@@ -485,4 +492,26 @@ impl AgentTool for SucceedingTool {
         self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Ok("{\"ok\":true}".into())
     }
+}
+
+// ---------------------------------------------------------------------------
+// OpenAI-compatible HTTP fake — a real network boundary for whole-turn tests
+// ---------------------------------------------------------------------------
+
+/// Serve `reply` as the body of every `POST /chat/completions` and return the
+/// running server; point `LLM_BASE_URL` at its `uri()`. The code under test
+/// (`execute_agent_chat`) builds its real OpenAI provider and speaks real HTTP
+/// to this server; only the remote LLM is faked. Keep the server alive for the
+/// duration of the turn.
+pub(crate) async fn spawn_openai_fake(reply: serde_json::Value) -> wiremock::MockServer {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, ResponseTemplate};
+
+    let server = wiremock::MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(reply))
+        .mount(&server)
+        .await;
+    server
 }

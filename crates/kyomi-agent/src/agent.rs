@@ -142,6 +142,10 @@ pub(crate) const WRAP_UP_FAILED_MESSAGE: &str =
 /// entry as the most urgent one.
 const BUDGET_NOTICE_TENTHS: [u32; 2] = [7, 9];
 
+/// How many times one run resends a `pause_turn` assistant message before
+/// giving up and answering with what it has.
+const MAX_PAUSE_CONTINUATIONS: u32 = 8;
+
 /// Strict budget: stop a turn after this many failed tool calls, counted since
 /// the last success, that are NOT repairable rejections (see
 /// [`is_repairable_rejection`]). That is every unknown-outcome failure (the call
@@ -343,6 +347,9 @@ pub struct AgentConfig {
     pub reasoning_effort: Option<String>,
     /// Maximum tokens to generate per LLM call.
     pub max_tokens: u32,
+    /// Provider-executed web tools (KYO-969). Which of them a turn sends is decided
+    /// by [`CustomAgent::call_options`].
+    pub server_tools: Vec<crate::web::server_tools::ServerTool>,
     /// Whether to log full LLM context (for debugging).
     pub log_context: bool,
     /// Filter controlling which tools are exposed to the LLM.
@@ -356,7 +363,9 @@ pub struct AgentConfig {
 }
 
 impl AgentConfig {
-    /// The per-request generation options this config asks providers for.
+    /// The per-request generation options this config asks providers for. Does NOT
+    /// include `server_tools`: those are decided per turn by
+    /// [`CustomAgent::call_options`].
     pub fn request_options(&self) -> crate::provider::RequestOptions {
         crate::provider::RequestOptions::new(self.max_tokens)
             .with_temperature(self.temperature.clone())
@@ -376,6 +385,7 @@ impl Default for AgentConfig {
             temperature: None,
             reasoning_effort: None,
             max_tokens: 4096,
+            server_tools: Vec::new(),
             log_context: false,
             // Default: chat context — exclude copilot-only and MCP-only tools.
             // This is the safe default matching the Python backend's behaviour.
@@ -477,6 +487,22 @@ pub struct CustomAgent {
     tool_context: ToolContext,
     /// Map of user_id -> display name for message attribution.
     user_names: HashMap<String, String>,
+    /// Sources the provider's web tools used during this run (normalised);
+    /// shown to the user as a footer on the final answer.
+    web_sources: Vec<crate::web::WebSource>,
+    /// Provider-reported web calls used so far in this run, per tool: the per-turn
+    /// allowance is spent across every request of the run, not per request.
+    web_usage: HashMap<kyomi_core::web_tools::WebToolKind, u32>,
+    /// Which of the configured provider tools this turn may use (indices into
+    /// `config.server_tools`), decided once when the turn's first request is built:
+    /// the monthly budget is checked then and not mid-turn.
+    turn_server_tools: tokio::sync::OnceCell<Vec<usize>>,
+    /// The provider tools the most recent request carried: a `pause_turn`
+    /// continuation resends exactly these.
+    last_server_tools: std::sync::Mutex<Vec<serde_json::Value>>,
+    /// Where the open chain of `pause_turn` messages starts in the state (`None`
+    /// outside a chain).
+    pause_chain_start: Option<usize>,
 }
 
 impl CustomAgent {
@@ -497,6 +523,11 @@ impl CustomAgent {
             registry,
             tool_context,
             user_names,
+            web_sources: Vec::new(),
+            web_usage: HashMap::new(),
+            turn_server_tools: tokio::sync::OnceCell::new(),
+            last_server_tools: std::sync::Mutex::new(Vec::new()),
+            pause_chain_start: None,
         }
     }
 
@@ -579,6 +610,28 @@ impl CustomAgent {
         message_source: Option<&str>,
         user_id: Option<&str>,
     ) -> kyomi_core::Result<String> {
+        self.pause_chain_start = None;
+        self.web_sources.clear();
+        let result = self.run_chat(user_message, cancel_token, current_time_user_tz, message_source, user_id).await;
+        // A failed run keeps none of an open `pause_turn` chain (blocks that end in a
+        // call without its result are rejected by the provider on every later turn);
+        // everything else the run recorded stays, as for any failed run.
+        if result.is_err()
+            && let Some(start) = self.pause_chain_start.take()
+        {
+            self.state.messages.truncate(start);
+        }
+        result
+    }
+
+    async fn run_chat(
+        &mut self,
+        user_message: &str,
+        cancel_token: CancellationToken,
+        current_time_user_tz: Option<&str>,
+        message_source: Option<&str>,
+        user_id: Option<&str>,
+    ) -> kyomi_core::Result<String> {
         // Build metadata prefix.
         let metadata_prefix = build_metadata_prefix(current_time_user_tz, message_source);
 
@@ -597,6 +650,7 @@ impl CustomAgent {
         };
 
         self.state.messages.push(msg);
+        self.turn_server_tools = tokio::sync::OnceCell::new();
 
         // Ephemeral messages from ChartML validation retries.  These are
         // included in the LLM context so the model can see what it got wrong,
@@ -625,6 +679,9 @@ impl CustomAgent {
         // Number of LLM calls made in the loop below (not counting the
         // wrap-up call), for the exhaustion `info!`.
         let mut iterations_used: u32 = 0;
+        let mut pause_continuations: u32 = 0;
+        // Whether the previous response was a `pause_turn` (so this request continues it).
+        let mut last_was_pause = false;
         // Which condition ended the loop. Overwritten if a non-iteration
         // guard fires; left at `Iterations` if the loop runs to completion.
         let mut stop_reason = StopReason::Iterations;
@@ -678,10 +735,15 @@ impl CustomAgent {
             // Build LLM context (handles compaction), then append any
             // ephemeral ChartML retry messages so the LLM sees them.
             let mut llm_messages = self.build_llm_context();
-            llm_messages.extend(chartml_retry_messages.iter().cloned());
-            // Budget notice last: maximum recency, immediately before the call.
-            if let Some(ref notice) = budget_notice {
-                llm_messages.push(notice.clone());
+            // A `pause_turn` continuation must end with the paused assistant message
+            // exactly as received: nothing may follow it.
+            let pausing = last_was_pause;
+            if !pausing {
+                llm_messages.extend(chartml_retry_messages.iter().cloned());
+                // Budget notice last: maximum recency, immediately before the call.
+                if let Some(ref notice) = budget_notice {
+                    llm_messages.push(notice.clone());
+                }
             }
 
             // Get tool definitions.
@@ -697,6 +759,7 @@ impl CustomAgent {
             }
 
             // Call the LLM with cancellation support.
+            let call_started = std::time::Instant::now();
             let response = tokio::select! {
                 result = self.call_llm(&llm_messages, &tools) => result?,
                 _ = cancel_token.cancelled() => {
@@ -715,6 +778,9 @@ impl CustomAgent {
             // regardless of which branch below the response takes next
             // (return, continue, or fall through to tool execution).
             iterations_used += 1;
+
+            // Provider-executed web tools (KYO-969): usage, sources, verbatim blocks.
+            let server_activity = self.note_server_tools(&response, call_started.elapsed()).await;
 
             // Usage and cost were already accounted for inside `call_llm`, at the
             // moment the provider returned (KYO-974); only loop state is kept here.
@@ -745,6 +811,28 @@ impl CustomAgent {
                 self.progress(AgentProgress::Thinking(thinking.clone())).await;
             }
 
+            // `pause_turn`: the provider paused a long server-tool turn. Resend the
+            // paused assistant message unchanged (its blocks verbatim) to continue;
+            // the request carries the same tools as the turn's first request. The
+            // paused messages and the final one are one logical answer and are
+            // stored exactly as received. A turn still paused after the bound fails
+            // like any other failed run: nothing of its paused chain is kept.
+            if response.tool_calls.is_none() && response.finish_reason == "pause_turn" {
+                if pause_continuations >= MAX_PAUSE_CONTINUATIONS {
+                    return Err(kyomi_core::Error::Internal(format!(
+                        "Web research did not finish: the provider paused it {MAX_PAUSE_CONTINUATIONS} times. Try a narrower question."
+                    )));
+                }
+                pause_continuations += 1;
+                self.pause_chain_start.get_or_insert(self.state.messages.len());
+                self.push_assistant(
+                    Message::assistant(&response.content).with_provider_content(server_activity.provider_content.clone()),
+                );
+                last_was_pause = true;
+                continue;
+            }
+            last_was_pause = false;
+
             // No tool calls -- this is the final response.
             if response.tool_calls.is_none() {
                 let content = final_response_text(response);
@@ -769,7 +857,19 @@ impl CustomAgent {
                     )
                     .await;
                     // Store as ephemeral retry context — NOT in self.state.messages.
-                    chartml_retry_messages.push(Message::assistant(content));
+                    if self.pause_chain_start.is_some() {
+                        // The failed answer's blocks resolve the chain's open call, so
+                        // they join the chain's stored blocks (only its text is ephemeral).
+                        self.push_assistant(
+                            Message::assistant("").with_provider_content(server_activity.provider_content.clone()),
+                        );
+                        chartml_retry_messages.push(Message::assistant(content));
+                    } else {
+                        // The failed answer keeps its provider blocks on the ephemeral message.
+                        chartml_retry_messages.push(
+                            Message::assistant(content).with_provider_content(server_activity.provider_content.clone()),
+                        );
+                    }
                     chartml_retry_messages.push(Message::user(format!(
                         "\u{1f916} SYSTEM: Automatic ChartML validation failed. The user has NOT seen your response yet. \
                          Please fix the following errors and then repeat your FULL response:\n\n{error_msg}"
@@ -791,8 +891,19 @@ impl CustomAgent {
                     warn!(error = %e, "Failed to update ChartML validation retry_succeeded");
                 }
 
-                // Push final response to state so persist_after_chat saves it.
-                self.state.messages.push(Message::assistant(&content));
+                // Show the sources the provider's web tools used (provider terms
+                // require citations to be displayed).
+                let content = self.with_web_sources(content);
+
+                // Push final response to state so persist_after_chat saves it. A
+                // server-tool turn keeps the provider's own blocks (encrypted_content
+                // and citations' encrypted_index included) so the next user turn can
+                // send them back unchanged; the displayed text carries the sources
+                // footer, the stored blocks do not.
+                self.pause_chain_start = None;
+                self.push_assistant(
+                    Message::assistant(&content).with_provider_content(server_activity.provider_content.clone()),
+                );
                 return Ok(content);
             }
 
@@ -816,10 +927,14 @@ impl CustomAgent {
             // Add assistant message with tool calls.
             // Safety: guarded by `response.tool_calls.is_none()` early-return above.
             let tool_calls = response.tool_calls.expect("guarded by is_none check above");
-            self.state.messages.push(Message::assistant_with_tool_calls(
-                if self.runtime.is_some() && has_chartml_blocks(&response.content) { String::new() } else { response.content.clone() },
-                tool_calls.clone(),
-            ));
+            self.pause_chain_start = None;
+            self.push_assistant(
+                Message::assistant_with_tool_calls(
+                    if self.runtime.is_some() && has_chartml_blocks(&response.content) { String::new() } else { response.content.clone() },
+                    tool_calls.clone(),
+                )
+                .with_provider_content(server_activity.provider_content.clone()),
+            );
 
             // Complete compatibility transcript is visible before the first delayed tool.
             if self.runtime.is_some() && let Some(callback) = &self.callbacks.on_iteration_boundary {
@@ -984,10 +1099,9 @@ impl CustomAgent {
                     cb();
                 }
                 self.preparing().await?;
-                self.state
-                    .messages
-                    .push(Message::assistant(&response.content));
-                return Ok(response.content);
+                let content = self.with_web_sources(response.content);
+                self.state.messages.push(Message::assistant(&content));
+                return Ok(content);
             }
 
         }
@@ -1016,6 +1130,13 @@ impl CustomAgent {
             )
         {
             warn!(error = %e, "Failed to update ChartML validation retry_succeeded");
+        }
+
+        // A run that ends inside a `pause_turn` chain did not finish its research.
+        if self.pause_chain_start.is_some() {
+            return Err(kyomi_core::Error::Internal(
+                "Web research did not finish before the request's limits were reached. Try a narrower question.".into(),
+            ));
         }
 
         // Cancellation is checked before every other LLM call in this loop;
@@ -1050,7 +1171,7 @@ impl CustomAgent {
         self.state.global_iteration += 1;
 
         let wrap_up = tokio::select! {
-            result = self.call_llm(&wrap_up_messages, &[]) => result,
+            result = self.call_llm_with(&wrap_up_messages, &[], false) => result,
             _ = cancel_token.cancelled() => {
                 return Err(kyomi_core::Error::Internal(
                     "Request cancelled".into(),
@@ -1119,6 +1240,7 @@ impl CustomAgent {
             content
         };
 
+        let content = self.with_web_sources(content);
         self.state.messages.push(Message::assistant(&content));
         Ok(content)
     }
@@ -1133,12 +1255,25 @@ impl CustomAgent {
         messages: &[Message],
         tools: &[Tool],
     ) -> kyomi_core::Result<crate::types::LLMResponse> {
-        let provider = RuntimeProvider { agent: self, messages, tools };
+        self.call_llm_with(messages, tools, true).await
+    }
+
+    /// `allow_server_tools = false` is for calls that must not use any tool (the
+    /// forced wrap-up): provider web tools are then not sent. The history is sent
+    /// as stored, server-tool blocks included.
+    async fn call_llm_with(
+        &self,
+        messages: &[Message],
+        tools: &[Tool],
+        allow_server_tools: bool,
+    ) -> kyomi_core::Result<crate::types::LLMResponse> {
+        let provider = RuntimeProvider { agent: self, messages, tools, allow_server_tools };
         if let Some((context, sink)) = &self.runtime {
             context.complete(&provider, sink.as_ref(), &agent_runtime::ModelCallId(format!("model-{}", self.state.global_iteration)))
                 .await.map_err(runtime_error)
         } else {
-            let response = self.client.complete(messages, tools, &self.config.request_options(), &self.user_names).await?;
+            let options = self.call_options(allow_server_tools).await;
+            let response = self.client.complete(messages, tools, &options, &self.user_names).await?;
             self.account_usage(&response).await;
             Ok(response)
         }
@@ -1161,6 +1296,208 @@ impl CustomAgent {
         if let Some(ref cb) = self.callbacks.on_token_usage {
             cb(total_input, response.usage.output_tokens, response.cost);
         }
+    }
+
+    /// The request options for the next LLM call.
+    ///
+    /// Provider-executed web tools. A `pause_turn` continuation resends exactly the
+    /// tools of the request it continues (the provider rejects a continuation
+    /// without its tool). Any other request offers the tools the turn may use, each
+    /// with the per-turn allowance still left as `max_uses`: the monthly budget is
+    /// checked once, when the turn's first request is built, never mid-turn. A tool
+    /// whose allowance is used up is left out of a request that is not a
+    /// continuation. A session holding restricted personal data may not send queries
+    /// to a third party (the same rule the native tools enforce) and a tool call can
+    /// make a session restricted mid-turn, so privacy is checked on every such
+    /// request; an unknown state fails closed. `allow_server_tools = false` (the
+    /// forced wrap-up call) sends none. The history is sent exactly as stored,
+    /// stored server-tool blocks included, whichever tools are offered.
+    async fn call_options(&self, allow_server_tools: bool) -> crate::provider::RequestOptions {
+        let mut options = self.config.request_options();
+        if allow_server_tools {
+            options.server_tools = if self.pause_chain_start.is_some() {
+                self.last_server_tools.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
+            } else {
+                self.turn_request_server_tools().await
+            };
+        }
+        *self.last_server_tools.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = options.server_tools.clone();
+        options
+    }
+
+    /// The provider tools a non-continuation request of this turn carries.
+    async fn turn_request_server_tools(&self) -> Vec<serde_json::Value> {
+        let allowed = self.turn_server_tools.get_or_init(|| self.turn_start_server_tools()).await;
+        if allowed.is_empty() {
+            return Vec::new();
+        }
+        if self.session_restricted().await {
+            warn!("provider web tools withheld from this request: the session holds restricted personal data");
+            return Vec::new();
+        }
+        let caps = &self.tool_context.config.web_tools.caps;
+        allowed
+            .iter()
+            .filter_map(|&index| {
+                let tool = &self.config.server_tools[index];
+                let per_turn = match tool.kind {
+                    kyomi_core::web_tools::WebToolKind::Search => caps.per_turn_search,
+                    kyomi_core::web_tools::WebToolKind::Fetch => caps.per_turn_fetch,
+                };
+                let remaining = per_turn.saturating_sub(self.web_usage.get(&tool.kind).copied().unwrap_or(0));
+                (remaining > 0).then(|| tool.with_max_uses(remaining))
+            })
+            .collect()
+    }
+
+    /// The options of a request of the current turn, or (`new_turn`) of the first
+    /// request of a new one.
+    #[cfg(test)]
+    async fn request_options_for_call(&mut self, new_turn: bool) -> crate::provider::RequestOptions {
+        if new_turn {
+            self.turn_server_tools = tokio::sync::OnceCell::new();
+        }
+        self.call_options(true).await
+    }
+
+    /// Whether the session holds restricted personal data, so provider web tools
+    /// must not run. An unknown privacy state fails closed.
+    async fn session_restricted(&self) -> bool {
+        let ctx = &self.tool_context;
+        match ctx.session_id.as_deref() {
+            Some(session) => kyomi_auth::personal_mcp_privacy::restricted_owner(&ctx.db, session)
+                .await
+                .map(|o| o.is_some())
+                .unwrap_or(true),
+            None => false,
+        }
+    }
+
+    /// The configured provider tools this turn may use (indices into
+    /// `config.server_tools`), decided at the start of the turn: the monthly budget
+    /// and the per-turn allowance. Each tool left out is logged once.
+    async fn turn_start_server_tools(&self) -> Vec<usize> {
+        let ctx = &self.tool_context;
+        let caps = &ctx.config.web_tools.caps;
+        let mut allowed = Vec::new();
+        for (index, tool) in self.config.server_tools.iter().enumerate() {
+            let per_turn = match tool.kind {
+                kyomi_core::web_tools::WebToolKind::Search => caps.per_turn_search,
+                kyomi_core::web_tools::WebToolKind::Fetch => caps.per_turn_fetch,
+            };
+            let remaining = per_turn.saturating_sub(self.web_usage.get(&tool.kind).copied().unwrap_or(0));
+            let refusal = if remaining == 0 {
+                Some(crate::web::caps::CapRefusal::PerTurn.to_string())
+            } else {
+                match crate::web::caps::check_monthly(&ctx.kv, caps, &ctx.workspace_id, tool.kind).await {
+                    Ok(Ok(())) => None,
+                    Ok(Err(r)) => Some(r.to_string()),
+                    Err(e) => Some(format!("budget check failed: {e}")),
+                }
+            };
+            match refusal {
+                None => allowed.push(index),
+                Some(reason) => warn!(tool = tool.kind.tool_name(), reason = %reason, "provider web tool withheld from this turn"),
+            }
+        }
+        allowed
+    }
+
+    /// Append an assistant message to the state. A bare `pause_turn` message (blocks
+    /// only: no text, no tool calls) is never stored as a row of its own; its
+    /// blocks are carried, in order, into the next assistant message, so the whole
+    /// logical answer is stored exactly as the provider returned it.
+    fn push_assistant(&mut self, mut message: Message) {
+        let is_bare_pause = |m: &Message| {
+            m.role == crate::types::MessageRole::Assistant
+                && m.content.is_empty()
+                && m.tool_calls.as_ref().is_none_or(|calls| calls.is_empty())
+                && m.provider_content.is_some()
+        };
+        if self.state.messages.last().is_some_and(is_bare_pause) {
+            let carried = self.state.messages.pop().and_then(|m| m.provider_content).unwrap_or_default();
+            let own = message.provider_content.take().unwrap_or_default();
+            message.provider_content = Some(carried.into_iter().chain(own).collect());
+        }
+        self.state.messages.push(message);
+    }
+
+    /// Append the sources the provider's web tools used in this run to a final
+    /// answer (provider terms require citations to be displayed) and clear them.
+    fn with_web_sources(&mut self, content: String) -> String {
+        let sources = crate::web::server_tools::dedupe(std::mem::take(&mut self.web_sources));
+        crate::web::server_tools::append_footer(&content, &crate::web::server_tools::sources_footer(&sources))
+    }
+
+    /// Record what the provider's web tools did in one response: log it, feed
+    /// the monthly budget from the provider-reported usage, and remember the
+    /// sources for the answer footer. Returns the parsed activity.
+    async fn note_server_tools(&mut self, response: &crate::types::LLMResponse, latency: Duration) -> crate::web::server_tools::ServerToolActivity {
+        if self.config.server_tools.is_empty() {
+            return Default::default();
+        }
+        let activity = match self.config.server_tools.first().map(|t| t.backend) {
+            Some(kyomi_core::web_tools::WebBackendKind::OpenRouter) => crate::web::server_tools::parse_openrouter(&response.raw_response),
+            _ => crate::web::server_tools::parse_anthropic(&response.raw_response),
+        };
+        let ctx = &self.tool_context;
+        for (tool, calls) in [
+            (kyomi_core::web_tools::WebToolKind::Search, activity.searches),
+            (kyomi_core::web_tools::WebToolKind::Fetch, activity.fetches),
+        ] {
+            if calls == 0 {
+                continue;
+            }
+            *self.web_usage.entry(tool).or_default() += calls;
+            if let Err(e) = crate::web::caps::add_usage(&ctx.kv, &ctx.workspace_id, tool, calls).await {
+                warn!(error = %e, "failed to record web tool usage");
+            }
+            // Per call: backend, latency of the model call that ran the tool, result/citation
+            // count, and the monthly quota left (workspace / instance) after counting it.
+            let remaining = crate::web::caps::remaining_monthly(&ctx.kv, &ctx.config.web_tools.caps, &ctx.workspace_id, tool).await.ok();
+            let record = crate::web::WebCallRecord {
+                backend: self.config.server_tools.first().map(|t| t.backend.to_string()).unwrap_or_default(),
+                tool: tool.tool_name(),
+                billable_calls: calls,
+                latency_ms: latency.as_millis() as u64,
+                result_count: activity.sources.len(),
+                workspace_remaining: remaining.map(|r| r.0),
+                global_remaining: remaining.map(|r| r.1),
+            };
+            record.log();
+        }
+        for error in &activity.errors {
+            warn!(error = %error, "provider web tool reported an error");
+        }
+        // Sources shown as cards need no footer; the footer lists the rest (runs
+        // without events: Slack, copilot, watches; calls whose card could not be
+        // recorded; citations that belong to no recorded call).
+        let carded = self.show_server_tool_calls(&activity).await;
+        self.web_sources.extend(activity.sources.iter().filter(|source| !carded.contains(&source.url)).cloned());
+        activity
+    }
+
+    /// Record each provider-executed call as a tool event carrying the normalised
+    /// sources, so the UI renders it with the same source card as a Kyomi-executed
+    /// search or fetch. Returns the URLs now shown as cards: none without a
+    /// runtime, and a call that cannot be recorded is logged and not counted.
+    async fn show_server_tool_calls(&self, activity: &crate::web::server_tools::ServerToolActivity) -> std::collections::HashSet<String> {
+        let mut carded = std::collections::HashSet::new();
+        let Some((context, sink)) = &self.runtime else { return carded };
+        for (index, call) in activity.calls.iter().enumerate() {
+            let id = call.id.clone().unwrap_or_else(|| format!("model-{}:web:{index}", self.state.global_iteration));
+            let name = call.tool.tool_name();
+            let arguments = match call.tool {
+                kyomi_core::web_tools::WebToolKind::Search => serde_json::json!({"query": call.subject}),
+                kyomi_core::web_tools::WebToolKind::Fetch => serde_json::json!({"url": call.subject}),
+            };
+            let shown = ProviderToolDisplay { text: crate::tools::web::display_output(call.tool, &call.subject, &call.sources) };
+            match context.tool(sink.as_ref(), &shown, agent_runtime::ToolCallId(id), name.to_string(), arguments).await {
+                Ok(_) => carded.extend(call.sources.iter().map(|source| source.url.clone())),
+                Err(error) => warn!(%error, tool = name, "could not record a provider web call as a source card; its sources are listed in the answer instead"),
+            }
+        }
+        carded
     }
 
     // -----------------------------------------------------------------------
@@ -1500,13 +1837,14 @@ struct RuntimeProvider<'a> {
     agent: &'a CustomAgent,
     messages: &'a [Message],
     tools: &'a [Tool],
+    allow_server_tools: bool,
 }
 #[async_trait::async_trait]
 impl agent_runtime::CompleteProvider for RuntimeProvider<'_> {
     type Response = crate::types::LLMResponse;
     async fn complete(&self) -> Result<(Self::Response, agent_runtime::ResponseRecord), agent_runtime::ExecutionError> {
-        let response = self.agent.client.complete(self.messages, self.tools, &self.agent.config.request_options(),
-            &self.agent.user_names).await
+        let options = self.agent.call_options(self.allow_server_tools).await;
+        let response = self.agent.client.complete(self.messages, self.tools, &options, &self.agent.user_names).await
             .map_err(|error| agent_runtime::ExecutionError::Provider(error.to_string()))?;
         // Before persistence: a paid response is accounted even if committing it fails.
         self.agent.account_usage(&response).await;
@@ -1534,6 +1872,22 @@ impl agent_runtime::CompleteProvider for RuntimeProvider<'_> {
         Ok((response, record))
     }
 }
+/// A provider-executed call, already finished by the provider: recording it only
+/// stores its normalised result for display; nothing runs.
+struct ProviderToolDisplay {
+    text: String,
+}
+#[async_trait::async_trait]
+impl agent_runtime::ToolExecution for ProviderToolDisplay {
+    async fn execute(&self) -> agent_runtime::ToolOutcome {
+        agent_runtime::ToolOutcome {
+            transport: agent_runtime::TransportOutcome::Completed,
+            domain: agent_runtime::DomainOutcome::Succeeded,
+            text: self.text.clone(),
+        }
+    }
+}
+
 struct RuntimeTool<'a> {
     agent: &'a CustomAgent,
     call: &'a ToolCall,
@@ -3447,5 +3801,485 @@ Second chart:\n{CHARTML_STRIPPED_NOTE}\nDone."
             !result_text.contains("Missing required parameter"),
             "tool result must not read as a missing parameter: {result_text}"
         );
+    }
+
+    // -- provider-executed web tools (KYO-969) ----------------------------
+
+    fn server_tool_agent_config() -> AgentConfig {
+        AgentConfig {
+            max_iterations: 6,
+            server_tools: vec![crate::web::server_tools::ServerTool {
+                kind: kyomi_core::web_tools::WebToolKind::Search,
+                backend: kyomi_core::web_tools::WebBackendKind::Anthropic,
+                entry: serde_json::json!({"type": "web_search_20250305", "name": "web_search", "max_uses": 5}),
+            }],
+            ..Default::default()
+        }
+    }
+
+    fn server_response(finish_reason: &str, tool_calls: Option<Vec<ToolCall>>) -> crate::types::LLMResponse {
+        let raw = crate::web::server_tools::tests_support::search_response_with_stop(finish_reason);
+        crate::types::LLMResponse {
+            raw_response: raw,
+            content: "I'll search for that.".into(),
+            finish_reason: finish_reason.into(),
+            usage: Default::default(),
+            tool_calls,
+            cost: None,
+            thinking_content: None,
+            call_detail: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn pause_turn_resends_the_paused_assistant_message_verbatim_and_continues() {
+        let paused = server_response("pause_turn", None);
+        let verbatim = paused.raw_response["content"].as_array().unwrap().clone();
+        let (mut agent, calls) = scripted_agent_with_config(
+            server_tool_agent_config(),
+            vec![Reply::Response(paused)],
+            Reply::Text("final answer".into()),
+        )
+        .await;
+        let answer = agent.chat("hi", CancellationToken::new(), None, None, None).await.unwrap();
+
+        let calls = calls.lock().unwrap();
+        assert_eq!(calls.len(), 2, "pause_turn must trigger exactly one continuation call");
+        let second = &calls[1].messages;
+        let last = second.last().unwrap();
+        assert_eq!(last.role, MessageRole::Assistant, "continuation ends with the paused assistant message, no injected user turn");
+        assert_eq!(last.provider_content.as_ref().unwrap(), &verbatim, "blocks incl. encrypted_content unchanged");
+        assert!(answer.starts_with("final answer"));
+        assert!(answer.ends_with("**Sources**\n- [A](https://a.example/x)"), "sources footer: {answer}");
+    }
+
+    #[tokio::test]
+    async fn pause_turn_continuations_are_bounded() {
+        let (mut agent, calls) = scripted_agent_with_config(
+            AgentConfig { max_iterations: 50, ..server_tool_agent_config() },
+            vec![],
+            Reply::Response(server_response("pause_turn", None)),
+        )
+        .await;
+        let _ = agent.chat("hi", CancellationToken::new(), None, None, None).await;
+        assert!(calls.lock().unwrap().len() as u32 <= MAX_PAUSE_CONTINUATIONS + 1);
+    }
+
+    #[tokio::test]
+    async fn server_blocks_survive_a_following_client_tool_call_verbatim() {
+        let tool_call = ToolCall { id: "tc_1".into(), name: crate::test_support::NOOP_TOOL_NAME.into(), arguments: serde_json::json!({}), arguments_error: None };
+        let mixed = server_response("tool_use", Some(vec![tool_call]));
+        let verbatim = mixed.raw_response["content"].as_array().unwrap().clone();
+        let (mut agent, calls) = scripted_agent_with_config(
+            server_tool_agent_config(),
+            vec![Reply::Response(mixed)],
+            Reply::Text("done".into()),
+        )
+        .await;
+        agent.chat("hi", CancellationToken::new(), None, None, None).await.unwrap();
+        let calls = calls.lock().unwrap();
+        let assistant = calls[1].messages.iter().find(|m| m.role == MessageRole::Assistant).unwrap();
+        assert_eq!(assistant.provider_content.as_ref().unwrap(), &verbatim);
+        assert!(assistant.tool_calls.is_some());
+    }
+
+    #[tokio::test]
+    async fn provider_usage_feeds_the_monthly_budget() {
+        let (mut agent, _calls) = scripted_agent_with_config(
+            server_tool_agent_config(),
+            vec![Reply::Response(server_response("end_turn", None))],
+            Reply::Text("done".into()),
+        )
+        .await;
+        agent.chat("hi", CancellationToken::new(), None, None, None).await.unwrap();
+        let ctx = &agent.tool_context;
+        let caps = kyomi_core::web_tools::WebCaps { workspace_monthly: 1, ..Default::default() };
+        let refusal = crate::web::caps::check_monthly(&ctx.kv, &caps, &ctx.workspace_id, kyomi_core::web_tools::WebToolKind::Search)
+            .await
+            .unwrap();
+        assert!(refusal.is_err(), "one provider-reported search must count against a cap of 1");
+    }
+
+    #[tokio::test]
+    async fn spent_budget_withholds_the_server_tool_from_the_request() {
+        let (mut agent, _calls) = scripted_agent_with_config(server_tool_agent_config(), vec![], Reply::Text("x".into())).await;
+        assert_eq!(agent.request_options_for_call(true).await.server_tools.len(), 1);
+        let ctx = &agent.tool_context;
+        let cap = ctx.config.web_tools.caps.workspace_monthly;
+        crate::web::caps::add_usage(&ctx.kv, &ctx.workspace_id, kyomi_core::web_tools::WebToolKind::Search, cap).await.unwrap();
+        assert!(agent.request_options_for_call(true).await.server_tools.is_empty(), "spent at the start of the turn: withheld");
+    }
+
+    #[tokio::test]
+    async fn openrouter_usage_and_sources_are_recorded_from_the_live_shaped_response() {
+        let raw: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(format!("{}/src/web/fixtures/openrouter_search_chat_completion.json", env!("CARGO_MANIFEST_DIR"))).unwrap(),
+        )
+        .unwrap();
+        let response = crate::types::LLMResponse {
+            raw_response: raw,
+            content: "answer".into(),
+            finish_reason: "stop".into(),
+            usage: Default::default(),
+            tool_calls: None,
+            cost: None,
+            thinking_content: None,
+            call_detail: None,
+        };
+        let mut config = server_tool_agent_config();
+        config.server_tools[0].backend = kyomi_core::web_tools::WebBackendKind::OpenRouter;
+        let (mut agent, _calls) = scripted_agent_with_config(config, vec![Reply::Response(response)], Reply::Text("x".into())).await;
+        let answer = agent.chat("hi", CancellationToken::new(), None, None, None).await.unwrap();
+        assert!(answer.contains("**Sources**") && answer.contains("blog.rust-lang.org"), "{answer}");
+        let ctx = &agent.tool_context;
+        let caps = kyomi_core::web_tools::WebCaps { workspace_monthly: 1, ..Default::default() };
+        let refusal = crate::web::caps::check_monthly(&ctx.kv, &caps, &ctx.workspace_id, kyomi_core::web_tools::WebToolKind::Search).await.unwrap();
+        assert!(refusal.is_err());
+    }
+
+    // -- review fixes (KYO-969) -------------------------------------------
+
+    fn live_pause_response() -> crate::types::LLMResponse {
+        let raw: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(format!("{}/src/web/fixtures/anthropic_pause_turn_message.json", env!("CARGO_MANIFEST_DIR"))).unwrap(),
+        )
+        .unwrap();
+        crate::types::LLMResponse {
+            raw_response: raw,
+            content: "Fetching them one at a time.".into(),
+            finish_reason: "pause_turn".into(),
+            usage: Default::default(),
+            tool_calls: None,
+            cost: None,
+            thinking_content: None,
+            call_detail: None,
+        }
+    }
+
+    fn fetch_agent_config() -> AgentConfig {
+        let mut config = server_tool_agent_config();
+        config.server_tools[0].kind = kyomi_core::web_tools::WebToolKind::Fetch;
+        config.server_tools[0].entry = serde_json::json!({"type": "web_fetch_20250910", "name": "web_fetch", "max_uses": 5});
+        config
+    }
+
+    /// The live pause used 10 fetches (its capture request allowed 25); give the
+    /// agent's run allowance room for that so the tool is not withheld.
+    fn allow_many_fetches(agent: &mut CustomAgent) {
+        let mut config = (*agent.tool_context.config).clone();
+        config.web_tools.caps.per_turn_fetch = 50;
+        agent.tool_context.config = Arc::new(config);
+    }
+
+    #[tokio::test]
+    async fn live_captured_pause_turn_continues_with_the_paused_content_unchanged() {
+        let paused = live_pause_response();
+        let verbatim = paused.raw_response["content"].as_array().unwrap().clone();
+        let (mut agent, calls) = scripted_agent_with_config(fetch_agent_config(), vec![Reply::Response(paused)], Reply::Text("all done".into())).await;
+        allow_many_fetches(&mut agent);
+        let answer = agent.chat("go", CancellationToken::new(), None, None, None).await.unwrap();
+        let calls = calls.lock().unwrap();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[1].messages.last().unwrap().provider_content.as_ref().unwrap(), &verbatim);
+        assert!(answer.starts_with("all done"));
+    }
+
+    #[tokio::test]
+    async fn a_turn_still_paused_after_the_bound_fails_and_keeps_nothing_of_its_paused_chain() {
+        let (mut agent, calls) = scripted_agent_with_config(
+            AgentConfig { max_iterations: 50, ..fetch_agent_config() },
+            vec![],
+            Reply::Response(live_pause_response()),
+        )
+        .await;
+        allow_many_fetches(&mut agent);
+        let error = agent.chat("go", CancellationToken::new(), None, None, None).await.expect_err("the run fails");
+        assert!(error.to_string().contains("Web research did not finish"), "{error}");
+        assert_eq!(calls.lock().unwrap().len() as u32, MAX_PAUSE_CONTINUATIONS + 1);
+        assert!(
+            agent.state().messages.iter().all(|m| m.role != crate::types::MessageRole::Assistant && m.provider_content.is_none()),
+            "none of the paused messages is kept: {:?}", agent.state().messages.iter().map(|m| (m.role.clone(), m.content.len())).collect::<Vec<_>>()
+        );
+    }
+
+    /// Whatever ends a run inside a `pause_turn` chain (a provider error, the
+    /// iteration limit), the run fails and keeps none of the paused chain.
+    #[tokio::test]
+    async fn any_failure_inside_a_pause_chain_keeps_none_of_the_chain() {
+        // A provider error after two pauses.
+        let (mut agent, _calls) = scripted_agent_with_config(
+            fetch_agent_config(),
+            vec![Reply::Response(live_pause_response()), Reply::Response(live_pause_response()), Reply::Failure("provider down".into())],
+            Reply::Text("unused".into()),
+        )
+        .await;
+        let error = agent.chat("go", CancellationToken::new(), None, None, None).await.expect_err("fails");
+        assert!(error.to_string().contains("provider down"), "{error}");
+        assert!(agent.state().messages.iter().all(|m| m.role != crate::types::MessageRole::Assistant), "error: nothing of the chain kept");
+
+        // The iteration limit reached while still paused.
+        let (mut agent, _calls) = scripted_agent_with_config(
+            AgentConfig { max_iterations: 3, ..fetch_agent_config() },
+            vec![],
+            Reply::Response(live_pause_response()),
+        )
+        .await;
+        let error = agent.chat("go", CancellationToken::new(), None, None, None).await.expect_err("fails");
+        assert!(error.to_string().contains("Web research did not finish"), "{error}");
+        assert!(agent.state().messages.iter().all(|m| m.role != crate::types::MessageRole::Assistant), "limit: nothing of the chain kept");
+    }
+
+    /// A ChartML-invalid final answer after a pause chain: its blocks resolve the
+    /// chain's open call and are stored with the chain; a failure afterwards keeps
+    /// none of it.
+    #[tokio::test]
+    async fn a_chartml_retry_after_a_pause_chain_keeps_the_chain_resolved() {
+        let paused = live_pause_response();
+        let mut invalid = {
+            let raw: serde_json::Value = serde_json::from_str(
+                &std::fs::read_to_string(format!("{}/src/web/fixtures/anthropic_pause_turn_continuation_message.json", env!("CARGO_MANIFEST_DIR"))).unwrap(),
+            )
+            .unwrap();
+            crate::anthropic::AnthropicClient::parse_response("claude", &raw, None).unwrap()
+        };
+        invalid.content = "```\n```chartml\ntype: chart\nversion: 99".into();
+        let expected: Vec<serde_json::Value> = paused.raw_response["content"].as_array().unwrap().iter()
+            .chain(invalid.raw_response["content"].as_array().unwrap())
+            .cloned()
+            .collect();
+
+        let (mut agent, _calls) = scripted_agent_with_config(
+            fetch_agent_config(),
+            vec![Reply::Response(paused.clone()), Reply::Response(invalid.clone()), Reply::Text("Corrected answer".into())],
+            Reply::Text("unused".into()),
+        )
+        .await;
+        let answer = agent.chat("go", CancellationToken::new(), None, None, None).await.unwrap();
+        assert!(answer.starts_with("Corrected answer"), "{answer}");
+        let stored: Vec<serde_json::Value> = agent.state().messages.iter()
+            .filter(|m| m.role == crate::types::MessageRole::Assistant)
+            .filter_map(|m| m.provider_content.clone())
+            .flatten()
+            .collect();
+        assert_eq!(stored, expected, "the chain's blocks, the invalid answer's included, exactly as received");
+
+        // A failure after the invalid answer keeps nothing of the chain.
+        let (mut agent, _calls) = scripted_agent_with_config(
+            fetch_agent_config(),
+            vec![Reply::Response(paused), Reply::Response(invalid), Reply::Failure("provider down".into())],
+            Reply::Text("unused".into()),
+        )
+        .await;
+        agent.chat("go", CancellationToken::new(), None, None, None).await.expect_err("fails");
+        assert!(agent.state().messages.iter().all(|m| m.role != crate::types::MessageRole::Assistant));
+    }
+
+    #[tokio::test]
+    async fn a_pause_continuation_carries_the_same_tools_even_after_the_allowance_is_used() {
+        let (mut agent, calls) = scripted_agent_with_config(
+            server_tool_agent_config(),
+            vec![Reply::Response(server_response("pause_turn", None))],
+            Reply::Text("done".into()),
+        )
+        .await;
+        agent.chat("hi", CancellationToken::new(), None, None, None).await.unwrap();
+        let calls = calls.lock().unwrap();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].server_tools.len(), 1);
+        assert_eq!(calls[1].server_tools, calls[0].server_tools, "the continuation carries the first request's tools");
+    }
+
+    /// A bare `pause_turn` message (blocks, no text) is not stored as a row of its
+    /// own: its blocks are carried, in order, into the next assistant message.
+    #[tokio::test]
+    async fn a_bare_pause_message_is_carried_into_the_next_message_not_dropped() {
+        let mut paused = server_response("pause_turn", None);
+        paused.content = String::new();
+        let first_blocks = paused.raw_response["content"].as_array().unwrap().clone();
+        let (mut agent, _calls) = scripted_agent_with_config(
+            server_tool_agent_config(),
+            vec![Reply::Response(paused), Reply::Response(server_response("end_turn", None))],
+            Reply::Text("unused".into()),
+        )
+        .await;
+        agent.chat("hi", CancellationToken::new(), None, None, None).await.unwrap();
+        let assistants: Vec<_> = agent.state().messages.iter().filter(|m| m.role == crate::types::MessageRole::Assistant).collect();
+        assert_eq!(assistants.len(), 1, "the bare pause message is not a row of its own");
+        let second_blocks = server_response("end_turn", None).raw_response["content"].as_array().unwrap().clone();
+        let expected: Vec<_> = first_blocks.into_iter().chain(second_blocks).collect();
+        assert_eq!(assistants[0].provider_content.as_ref(), Some(&expected), "paused blocks first, then the final's, exactly as received");
+    }
+
+    #[tokio::test]
+    async fn a_pause_continuation_is_never_followed_by_the_budget_notice_or_retry_messages() {
+        // 10 iterations: the 70% budget notice is due by iteration 7; the pause happens late.
+        let mut script: Vec<Reply> = vec![Reply::ToolCall; 7];
+        script.push(Reply::Response(live_pause_response()));
+        let (mut agent, calls) = scripted_agent_with_config(
+            AgentConfig { max_iterations: 10, ..fetch_agent_config() },
+            script,
+            Reply::Text("done".into()),
+        )
+        .await;
+        allow_many_fetches(&mut agent);
+        agent.chat("go", CancellationToken::new(), None, None, None).await.unwrap();
+        let calls = calls.lock().unwrap();
+        let last_call = calls.last().unwrap();
+        let continuation = &calls[calls.len() - 1].messages;
+        assert!(continuation.last().unwrap().provider_content.is_some(), "ends with the paused message: {last_call:?}");
+        assert!(continuation.iter().filter(|m| m.content.contains(crate::agent::BUDGET_NOTICE_PREFIX)).count() == 0);
+    }
+
+    #[tokio::test]
+    async fn the_forced_wrap_up_call_sends_no_server_tools_and_cites_sources() {
+        // Exhaust the iteration budget with tool calls; one of them carries a server-tool search.
+        let mixed = server_response("tool_use", Some(vec![ToolCall { id: "tc_1".into(), name: crate::test_support::NOOP_TOOL_NAME.into(), arguments: serde_json::json!({}), arguments_error: None }]));
+        let seen = Arc::new(Mutex::new(Vec::<usize>::new()));
+        struct Spy(Arc<Mutex<Vec<usize>>>, ScriptedProvider);
+        #[async_trait::async_trait]
+        impl crate::provider::LLMProvider for Spy {
+            async fn complete(&self, m: &[Message], t: &[Tool], o: &crate::provider::RequestOptions, u: &HashMap<String, String>) -> kyomi_core::Result<crate::types::LLMResponse> {
+                self.0.lock().unwrap().push(o.server_tools.len());
+                self.1.complete(m, t, o, u).await
+            }
+            fn model(&self) -> &str { "spy" }
+        }
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let inner = ScriptedProvider { script: Mutex::new(vec![Reply::Response(mixed)].into()), after_script: Reply::ToolCall, calls: Arc::clone(&calls) };
+        let mut registry = ToolRegistry::new();
+        registry.register(Arc::new(NoopTool));
+        let mut agent = CustomAgent::new(
+            Box::new(Spy(Arc::clone(&seen), inner)),
+            AgentConfig { max_iterations: 3, ..server_tool_agent_config() },
+            Arc::new(registry),
+            test_tool_context().await,
+            HashMap::new(),
+        );
+        let _ = agent.chat("hi", CancellationToken::new(), None, None, None).await;
+        let seen = seen.lock().unwrap();
+        assert_eq!(*seen.last().unwrap(), 0, "wrap-up must not send provider web tools: {seen:?}");
+        assert!(seen[0] == 1, "ordinary calls do: {seen:?}");
+    }
+
+    #[tokio::test]
+    async fn the_per_turn_allowance_is_spent_across_requests_but_a_continuation_resends_its_tools() {
+        let (mut agent, _calls) = scripted_agent_with_config(server_tool_agent_config(), vec![], Reply::Text("x".into())).await;
+        let first = agent.request_options_for_call(true).await;
+        assert_eq!(first.server_tools[0]["max_uses"], 5);
+        agent.web_usage.insert(kyomi_core::web_tools::WebToolKind::Search, 3);
+        assert_eq!(agent.request_options_for_call(false).await.server_tools[0]["max_uses"], 2, "only what is left");
+        // A `pause_turn` continuation resends the tools of the request it continues,
+        // whatever the allowance now says (the provider rejects one without them).
+        agent.pause_chain_start = Some(0);
+        agent.web_usage.insert(kyomi_core::web_tools::WebToolKind::Search, 5);
+        let continuation = agent.request_options_for_call(false).await;
+        assert_eq!(continuation.server_tools[0]["max_uses"], 2, "same tools as the request being continued");
+        agent.pause_chain_start = None;
+        assert!(agent.request_options_for_call(false).await.server_tools.is_empty(), "spent: left out of an ordinary request");
+        // The next turn finds the allowance spent at its start.
+        assert!(agent.request_options_for_call(true).await.server_tools.is_empty());
+    }
+
+    #[tokio::test]
+    async fn restricted_personal_data_sessions_never_get_provider_web_tools() {
+        let (mut agent, _calls) = scripted_agent_with_config(server_tool_agent_config(), vec![], Reply::Text("x".into())).await;
+        assert_eq!(agent.request_options_for_call(false).await.server_tools.len(), 1);
+        crate::test_support::seed_user_and_workspace(&agent.tool_context.db).await;
+        kyomi_core::db_execute!(&agent.tool_context.db, "INSERT INTO chat_sessions (session_id,user_id,workspace_id) VALUES ('s-web','user-a','ws-1')").unwrap();
+        agent.tool_context.session_id = Some("s-web".into());
+        assert_eq!(agent.request_options_for_call(false).await.server_tools.len(), 1, "unrestricted session");
+        kyomi_core::db_execute!(&agent.tool_context.db, "UPDATE chat_sessions SET personal_data_owner_id='user-a' WHERE session_id='s-web'").unwrap();
+        assert!(agent.request_options_for_call(false).await.server_tools.is_empty(), "restricted session is withheld");
+    }
+
+    #[tokio::test]
+    async fn the_durable_runtime_path_keeps_the_raw_provider_response_for_blocks_usage_and_storage() {
+        use agent_runtime::CompleteProvider;
+        let paused = live_pause_response();
+        let raw = paused.raw_response.clone();
+        let (agent, _calls) = scripted_agent_with_config(fetch_agent_config(), vec![Reply::Response(paused)], Reply::Text("x".into())).await;
+        let provider = RuntimeProvider { agent: &agent, messages: &[], tools: &[], allow_server_tools: true };
+        let (response, record) = provider.complete().await.unwrap();
+        assert_eq!(response.raw_response, raw, "the loop reads server blocks, usage and sources from this");
+        assert_eq!(record.raw, raw, "the restricted store keeps the complete provider payload");
+        assert_eq!(record.continuation, raw);
+    }
+
+    /// A tool that restricts the session while the run is in progress (as a private
+    /// document read does), to exercise a restriction that appears mid-run.
+    struct RestrictSessionTool;
+    #[async_trait::async_trait]
+    impl crate::tools::AgentTool for RestrictSessionTool {
+        // A read-only native tool name: the privacy wrapper does not count it as a publication
+        // (which would itself block the restriction from being recorded).
+        fn name(&self) -> &str { "list_datasources" }
+        fn description(&self) -> &str { "restricts the session" }
+        fn parameters_schema(&self) -> serde_json::Value { serde_json::json!({"type": "object", "properties": {}}) }
+        async fn execute(&self, _args: serde_json::Value, ctx: &crate::tools::ToolContext) -> kyomi_core::Result<String> {
+            kyomi_core::db_execute!(&ctx.db, "INSERT INTO personal_mcp_private_contexts (owner_user_id,workspace_id) VALUES ('user-a','ws-1')").unwrap();
+            kyomi_auth::personal_mcp_privacy::inherit_private_document_context(&ctx.db, "user-a", "ws-1", Some("s-late"), None).await.unwrap();
+            Ok("restricted".into())
+        }
+    }
+
+    #[tokio::test]
+    async fn sources_gathered_before_a_mid_run_restriction_are_still_shown_but_later_requests_are_withheld() {
+        // Sources are inbound web data, not outbound private data: showing them discloses
+        // nothing. Only further requests are withheld.
+        let tool_call = ToolCall { id: "tc_1".into(), name: "list_datasources".into(), arguments: serde_json::json!({}), arguments_error: None };
+        let first = server_response("tool_use", Some(vec![tool_call]));
+        let seen = Arc::new(Mutex::new(Vec::<usize>::new()));
+        struct Spy(Arc<Mutex<Vec<usize>>>, ScriptedProvider);
+        #[async_trait::async_trait]
+        impl crate::provider::LLMProvider for Spy {
+            async fn complete(&self, m: &[Message], t: &[Tool], o: &crate::provider::RequestOptions, u: &HashMap<String, String>) -> kyomi_core::Result<crate::types::LLMResponse> {
+                self.0.lock().unwrap().push(o.server_tools.len());
+                self.1.complete(m, t, o, u).await
+            }
+            fn model(&self) -> &str { "spy" }
+        }
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let inner = ScriptedProvider { script: Mutex::new(vec![Reply::Response(first)].into()), after_script: Reply::Text("final".into()), calls };
+        let mut registry = ToolRegistry::new();
+        registry.register(Arc::new(RestrictSessionTool));
+        let ctx = test_tool_context().await;
+        crate::test_support::seed_user_and_workspace(&ctx.db).await;
+        kyomi_core::db_execute!(&ctx.db, "INSERT INTO chat_sessions (session_id,user_id,workspace_id,session_type) VALUES ('s-late','user-a','ws-1','chat')").unwrap();
+        let mut ctx = ctx;
+        ctx.session_id = Some("s-late".into());
+        let mut agent = CustomAgent::new(Box::new(Spy(Arc::clone(&seen), inner)), server_tool_agent_config(), Arc::new(registry), ctx, HashMap::new());
+        let answer = agent.chat("hi", CancellationToken::new(), None, None, None).await.unwrap();
+        assert_eq!(*seen.lock().unwrap(), vec![1, 0], "first request carries the tool, the one after the restriction does not");
+        assert!(answer.starts_with("final") && answer.contains("**Sources**"), "{answer}");
+    }
+
+    #[tokio::test]
+    async fn each_provider_web_call_is_logged_with_latency_result_count_and_remaining_quota() {
+        let capture = kyomi_test_tracing::capture_tracing();
+        let (mut agent, _calls) = scripted_agent_with_config(
+            server_tool_agent_config(),
+            vec![Reply::Response(server_response("end_turn", None))],
+            Reply::Text("x".into()),
+        )
+        .await;
+        agent.chat("hi", CancellationToken::new(), None, None, None).await.unwrap();
+        let caps = agent.tool_context.config.web_tools.caps.clone();
+        let line = capture
+            .events_at(tracing::Level::INFO)
+            .into_iter()
+            .map(|(_, message)| message)
+            .find(|message| message.contains("provider web tool used"))
+            .expect("one structured line per provider web call");
+        for expected in [
+            "backend=anthropic".to_string(),
+            "tool=\"web_search\"".to_string(),
+            "billable_calls=1".to_string(),
+            "result_count=1".to_string(),
+            "latency_ms=".to_string(),
+            format!("workspace_remaining=Some({})", caps.workspace_monthly - 1),
+            format!("global_remaining=Some({})", caps.global_monthly - 1),
+        ] {
+            assert!(line.contains(&expected), "{expected} in {line}");
+        }
     }
 }

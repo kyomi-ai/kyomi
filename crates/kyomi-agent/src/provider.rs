@@ -46,17 +46,28 @@ pub struct RequestOptions {
     pub reasoning_effort: Option<String>,
     /// Maximum tokens to generate (reasoning tokens count against it).
     pub max_tokens: u32,
+    /// Provider-executed server tools to add to the request (web search /
+    /// fetch, KYO-969), already in the provider's wire shape. Empty for every
+    /// ordinary call. Adapters that cannot run them ignore the field; startup
+    /// validation prevents pairing such a provider with a server-tool backend.
+    pub server_tools: Vec<serde_json::Value>,
 }
 
 impl RequestOptions {
     /// Options with no temperature and no reasoning effort.
     pub fn new(max_tokens: u32) -> Self {
-        Self { temperature: None, reasoning_effort: None, max_tokens }
+        Self { temperature: None, reasoning_effort: None, max_tokens, server_tools: Vec::new() }
     }
 
     /// Builder: set the temperature.
     pub fn with_temperature(mut self, temperature: Option<serde_json::Value>) -> Self {
         self.temperature = temperature;
+        self
+    }
+
+    /// Builder: set the provider-executed server tools.
+    pub fn with_server_tools(mut self, server_tools: Vec<serde_json::Value>) -> Self {
+        self.server_tools = server_tools;
         self
     }
 
@@ -396,6 +407,27 @@ fn build_provider_from_workspace(
     fallback_config: &kyomi_core::Config,
     requested_model: Option<&str>,
 ) -> kyomi_core::Result<Box<dyn LLMProvider>> {
+    create_provider(resolve_workspace_provider_config_for(ws_config, fallback_config, requested_model)?)
+}
+
+/// The provider configuration [`create_provider_from_workspace`] builds the
+/// client from. Public so other code that depends on *which* provider and base
+/// URL are in effect for a workspace (for example whether a provider-executed
+/// web backend can run) asks the same function instead of re-deriving the rule.
+pub fn resolve_workspace_provider_config(
+    ws_config: &kyomi_auth::workspace_ai_config::WorkspaceAiConfig,
+    fallback_config: &kyomi_core::Config,
+) -> kyomi_core::Result<LLMProviderConfig> {
+    resolve_workspace_provider_config_for(ws_config, fallback_config, None)
+}
+
+/// [`resolve_workspace_provider_config`] with an explicitly requested model, as
+/// [`create_provider_from_workspace`] documents.
+fn resolve_workspace_provider_config_for(
+    ws_config: &kyomi_auth::workspace_ai_config::WorkspaceAiConfig,
+    fallback_config: &kyomi_core::Config,
+    requested_model: Option<&str>,
+) -> kyomi_core::Result<LLMProviderConfig> {
     use kyomi_auth::workspace_ai_config::WorkspaceAiProvider;
 
     // SaaS mode: always use Kyomi-managed credentials and model.
@@ -406,10 +438,10 @@ fn build_provider_from_workspace(
         if let Some(model) = requested_model {
             config.model = Some(model.to_string());
         }
-        return create_provider(config);
+        return Ok(config);
     }
 
-    let llm_config = match ws_config.provider {
+    match ws_config.provider {
         WorkspaceAiProvider::Kyomi => {
             // Server-side keys: server controls the model entirely.
             // Workspace default_model is ignored — it may reference a
@@ -418,7 +450,7 @@ fn build_provider_from_workspace(
             if let Some(model) = requested_model {
                 config.model = Some(model.to_string());
             }
-            config
+            Ok(config)
         }
         WorkspaceAiProvider::Anthropic
         | WorkspaceAiProvider::OpenAI
@@ -435,17 +467,15 @@ fn build_provider_from_workspace(
                 WorkspaceAiProvider::Gemini => ProviderKind::Gemini,
                 WorkspaceAiProvider::Kyomi => unreachable!("handled above"),
             };
-            LLMProviderConfig {
+            Ok(LLMProviderConfig {
                 provider,
                 api_key,
                 model: requested_model.map(str::to_string).or_else(|| ws_config.model.clone()),
                 base_url: ws_config.base_url.clone(),
                 context_window: ws_config.context_window,
-            }
+            })
         }
-    };
-
-    create_provider(llm_config)
+    }
 }
 
 // ---------------------------------------------------------------------------

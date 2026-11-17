@@ -1,0 +1,402 @@
+{
+ "model": "claude-haiku-4-5-20251001",
+ "id": "msg_REDACTED",
+ "type": "message",
+ "role": "assistant",
+ "content": [
+  {
+   "type": "text",
+   "text": "I'll fetch each URL in order, one at a time."
+  },
+  {
+   "type": "server_tool_use",
+   "id": "srvtoolu_015LPTiBunrtpncZSYrNJccs",
+   "name": "web_fetch",
+   "input": {
+    "url": "https://httpbin.org/uuid"
+   }
+  },
+  {
+   "type": "web_fetch_tool_result",
+   "tool_use_id": "srvtoolu_015LPTiBunrtpncZSYrNJccs",
+   "content": {
+    "type": "web_fetch_result",
+    "url": "https://httpbin.org/uuid",
+    "retrieved_at": "2026-11-15T22:44:14+00:00",
+    "content": {
+     "type": "document",
+     "source": {
+      "type": "text",
+      "media_type": "text/plain",
+      "data": "{\n  \"uuid\": \"f1554acd-1ec0-464f-a833-bf14a6da13d1\"\n}\n"
+     },
+     "title": null,
+     "citations": {
+      "enabled": true
+     }
+    }
+   },
+   "caller": {
+    "type": "direct"
+   }
+  },
+  {
+   "type": "text",
+   "text": "1. {  \"uuid\": \"f1554acd-1ec0-464f"
+  },
+  {
+   "type": "server_tool_use",
+   "id": "srvtoolu_01JS7ZMje4FdzEx7A55FHE92",
+   "name": "web_fetch",
+   "input": {
+    "url": "https://httpbin.org/ip"
+   }
+  },
+  {
+   "type": "web_fetch_tool_result",
+   "tool_use_id": "srvtoolu_01JS7ZMje4FdzEx7A55FHE92",
+   "content": {
+    "type": "web_fetch_result",
+    "url": "https://httpbin.org/ip",
+    "retrieved_at": "2026-11-16T09:28:29+00:00",
+    "content": {
+     "type": "document",
+     "source": {
+      "type": "text",
+      "media_type": "text/plain",
+      "data": "{\n  \"origin\": \"203.0.113.7\"\n}\n"
+     },
+     "title": null,
+     "citations": {
+      "enabled": true
+     }
+    }
+   },
+   "caller": {
+    "type": "direct"
+   }
+  },
+  {
+   "type": "text",
+   "text": "2. {  \"origin\": \"203.0.113.7\""
+  },
+  {
+   "type": "server_tool_use",
+   "id": "srvtoolu_01N4hoCKV65aWS2UvH8eY7wj",
+   "name": "web_fetch",
+   "input": {
+    "url": "https://httpbin.org/user-agent"
+   }
+  },
+  {
+   "type": "web_fetch_tool_result",
+   "tool_use_id": "srvtoolu_01N4hoCKV65aWS2UvH8eY7wj",
+   "content": {
+    "type": "web_fetch_result",
+    "url": "https://httpbin.org/user-agent",
+    "retrieved_at": "2026-11-15T00:56:35+00:00",
+    "content": {
+     "type": "document",
+     "source": {
+      "type": "text",
+      "media_type": "text/plain",
+      "data": "{\n  \"user-agent\": \"Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko; compatible"
+     },
+     "title": null,
+     "citations": {
+      "enabled": true
+     }
+    }
+   },
+   "caller": {
+    "type": "direct"
+   }
+  },
+  {
+   "type": "text",
+   "text": "3. {  \"user-agent\": \"Mozilla/5.0 AppleWebK"
+  },
+  {
+   "type": "server_tool_use",
+   "id": "srvtoolu_0148wXxm9QbXPicLkNLU4giv",
+   "name": "web_fetch",
+   "input": {
+    "url": "https://httpbin.org/headers"
+   }
+  },
+  {
+   "type": "web_fetch_tool_result",
+   "tool_use_id": "srvtoolu_0148wXxm9QbXPicLkNLU4giv",
+   "content": {
+    "type": "web_fetch_result",
+    "url": "https://httpbin.org/headers",
+    "retrieved_at": "2026-11-16T03:06:01+00:00",
+    "content": {
+     "type": "document",
+     "source": {
+      "type": "text",
+      "media_type": "text/plain",
+      "data": "{\n  \"headers\": {\n    \"Accept\": \"*/*\",\n    \"Accept-Encoding\": \"gzip, deflate\",\n  "
+     },
+     "title": null,
+     "citations": {
+      "enabled": true
+     }
+    }
+   },
+   "caller": {
+    "type": "direct"
+   }
+  },
+  {
+   "type": "text",
+   "text": "4. {  \"headers\": {    \"Accept\":"
+  },
+  {
+   "type": "server_tool_use",
+   "id": "srvtoolu_01SKozt3XeC1eK2pZwVPnpQy",
+   "name": "web_fetch",
+   "input": {
+    "url": "https://httpbin.org/get?n=1"
+   }
+  },
+  {
+   "type": "web_fetch_tool_result",
+   "tool_use_id": "srvtoolu_01SKozt3XeC1eK2pZwVPnpQy",
+   "content": {
+    "type": "web_fetch_result",
+    "url": "https://httpbin.org/get?n=1",
+    "retrieved_at": "2026-11-16T10:55:05+00:00",
+    "content": {
+     "type": "document",
+     "source": {
+      "type": "text",
+      "media_type": "text/plain",
+      "data": "{\n  \"args\": {\n    \"n\": \"1\"\n  },\n  \"headers\": {\n    \"Accept\": \"*/*\",\n    \"Accept-"
+     },
+     "title": null,
+     "citations": {
+      "enabled": true
+     }
+    }
+   },
+   "caller": {
+    "type": "direct"
+   }
+  },
+  {
+   "type": "text",
+   "text": "5. {  \"args\": {    \"n\": \"1\"  },"
+  },
+  {
+   "type": "server_tool_use",
+   "id": "srvtoolu_01KxuDvLXCQZVVqK2kdYe17S",
+   "name": "web_fetch",
+   "input": {
+    "url": "https://httpbin.org/get?n=2"
+   }
+  },
+  {
+   "type": "web_fetch_tool_result",
+   "tool_use_id": "srvtoolu_01KxuDvLXCQZVVqK2kdYe17S",
+   "content": {
+    "type": "web_fetch_result",
+    "url": "https://httpbin.org/get?n=2",
+    "retrieved_at": "2026-09-22T11:59:59+00:00",
+    "content": {
+     "type": "document",
+     "source": {
+      "type": "text",
+      "media_type": "text/plain",
+      "data": "{\n  \"args\": {\n    \"n\": \"2\"\n  }, \n  \"headers\": {\n    \"Accept\": \"*/*\", \n    \"Accep"
+     },
+     "title": null,
+     "citations": {
+      "enabled": true
+     }
+    }
+   },
+   "caller": {
+    "type": "direct"
+   }
+  },
+  {
+   "type": "text",
+   "text": "6. {  \"args\": {    \"n\": \"2\"  },"
+  },
+  {
+   "type": "server_tool_use",
+   "id": "srvtoolu_01GGZm5ALhocCc4XdRF8nmiX",
+   "name": "web_fetch",
+   "input": {
+    "url": "https://httpbin.org/get?n=3"
+   }
+  },
+  {
+   "type": "web_fetch_tool_result",
+   "tool_use_id": "srvtoolu_01GGZm5ALhocCc4XdRF8nmiX",
+   "content": {
+    "type": "web_fetch_result",
+    "url": "https://httpbin.org/get?n=3",
+    "retrieved_at": "2026-10-01T00:58:27+00:00",
+    "content": {
+     "type": "document",
+     "source": {
+      "type": "text",
+      "media_type": "text/plain",
+      "data": "{\n  \"args\": {\n    \"n\": \"3\"\n  }, \n  \"headers\": {\n    \"Accept\": \"*/*\", \n    \"Accep"
+     },
+     "title": null,
+     "citations": {
+      "enabled": true
+     }
+    }
+   },
+   "caller": {
+    "type": "direct"
+   }
+  },
+  {
+   "type": "text",
+   "text": "7. {  \"args\": {    \"n\": \"3\"  },"
+  },
+  {
+   "type": "server_tool_use",
+   "id": "srvtoolu_01CDgni7Q77cu43w34ovZSuD",
+   "name": "web_fetch",
+   "input": {
+    "url": "https://httpbin.org/get?n=4"
+   }
+  },
+  {
+   "type": "web_fetch_tool_result",
+   "tool_use_id": "srvtoolu_01CDgni7Q77cu43w34ovZSuD",
+   "content": {
+    "type": "web_fetch_result",
+    "url": "https://httpbin.org/get?n=4",
+    "retrieved_at": "2026-11-16T10:55:06+00:00",
+    "content": {
+     "type": "document",
+     "source": {
+      "type": "text",
+      "media_type": "text/plain",
+      "data": "{\n  \"args\": {\n    \"n\": \"4\"\n  },\n  \"headers\": {\n    \"Accept\": \"*/*\",\n    \"Accept-"
+     },
+     "title": null,
+     "citations": {
+      "enabled": true
+     }
+    }
+   },
+   "caller": {
+    "type": "direct"
+   }
+  },
+  {
+   "type": "text",
+   "text": "8. {  \"args\": {    \"n\": \"4\"  },"
+  },
+  {
+   "type": "server_tool_use",
+   "id": "srvtoolu_01Ryf16faNoNvwnb4QWiUnDs",
+   "name": "web_fetch",
+   "input": {
+    "url": "https://httpbin.org/get?n=5"
+   }
+  },
+  {
+   "type": "web_fetch_tool_result",
+   "tool_use_id": "srvtoolu_01Ryf16faNoNvwnb4QWiUnDs",
+   "content": {
+    "type": "web_fetch_result",
+    "url": "https://httpbin.org/get?n=5",
+    "retrieved_at": "2026-11-16T10:55:07+00:00",
+    "content": {
+     "type": "document",
+     "source": {
+      "type": "text",
+      "media_type": "text/plain",
+      "data": "{\n  \"args\": {\n    \"n\": \"5\"\n  },\n  \"headers\": {\n    \"Accept\": \"*/*\",\n    \"Accept-"
+     },
+     "title": null,
+     "citations": {
+      "enabled": true
+     }
+    }
+   },
+   "caller": {
+    "type": "direct"
+   }
+  },
+  {
+   "type": "text",
+   "text": "9. {  \"args\": {    \"n\": \"5\"  },"
+  },
+  {
+   "type": "server_tool_use",
+   "id": "srvtoolu_01L7dWc8kUMeKKT9QtFwPieU",
+   "name": "web_fetch",
+   "input": {
+    "url": "https://httpbin.org/get?n=6"
+   }
+  },
+  {
+   "type": "web_fetch_tool_result",
+   "tool_use_id": "srvtoolu_01L7dWc8kUMeKKT9QtFwPieU",
+   "content": {
+    "type": "web_fetch_result",
+    "url": "https://httpbin.org/get?n=6",
+    "retrieved_at": "2026-11-16T10:55:08+00:00",
+    "content": {
+     "type": "document",
+     "source": {
+      "type": "text",
+      "media_type": "text/plain",
+      "data": "{\n  \"args\": {\n    \"n\": \"6\"\n  },\n  \"headers\": {\n    \"Accept\": \"*/*\",\n    \"Accept-"
+     },
+     "title": null,
+     "citations": {
+      "enabled": true
+     }
+    }
+   },
+   "caller": {
+    "type": "direct"
+   }
+  },
+  {
+   "type": "text",
+   "text": "10. {  \"args\": {    \"n\": \"6\"  },"
+  },
+  {
+   "type": "server_tool_use",
+   "id": "srvtoolu_012xukXbd42Crxsb9Xav9PqW",
+   "name": "web_fetch",
+   "input": {
+    "url": "https://httpbin.org/get?n=7"
+   }
+  }
+ ],
+ "container": null,
+ "stop_reason": "pause_turn",
+ "stop_sequence": null,
+ "stop_details": null,
+ "usage": {
+  "input_tokens": 34233,
+  "cache_creation_input_tokens": 0,
+  "cache_read_input_tokens": 0,
+  "cache_creation": {
+   "ephemeral_5m_input_tokens": 0,
+   "ephemeral_1h_input_tokens": 0
+  },
+  "output_tokens": 884,
+  "service_tier": "standard",
+  "inference_geo": "not_available",
+  "speed": "standard",
+  "server_tool_use": {
+   "web_search_requests": 0,
+   "web_fetch_requests": 10
+  }
+ },
+ "diagnostics": null
+}

@@ -59,6 +59,13 @@ pub struct Message {
     /// Database message ID (present when loaded from DB).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message_id: Option<String>,
+    /// The assistant `content` array exactly as the provider returned it, when
+    /// the provider executed server tools (web search / fetch) in this turn.
+    /// Replayed verbatim on the next request: the encrypted result blocks must
+    /// come back unmodified or the provider answers 400 (KYO-969). `None` for
+    /// every ordinary message.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_content: Option<Vec<serde_json::Value>>,
 }
 
 impl Message {
@@ -73,6 +80,7 @@ impl Message {
             user_id: None,
             timestamp: None,
             message_id: None,
+            provider_content: None,
         }
     }
 
@@ -87,6 +95,7 @@ impl Message {
             user_id: None,
             timestamp: None,
             message_id: None,
+            provider_content: None,
         }
     }
 
@@ -101,6 +110,7 @@ impl Message {
             user_id: Some(user_id.into()),
             timestamp: None,
             message_id: None,
+            provider_content: None,
         }
     }
 
@@ -115,6 +125,7 @@ impl Message {
             user_id: None,
             timestamp: None,
             message_id: None,
+            provider_content: None,
         }
     }
 
@@ -132,7 +143,14 @@ impl Message {
             user_id: None,
             timestamp: None,
             message_id: None,
+            provider_content: None,
         }
+    }
+
+    /// Attach the provider's verbatim assistant content (server-tool blocks).
+    pub fn with_provider_content(mut self, blocks: Option<Vec<serde_json::Value>>) -> Self {
+        self.provider_content = blocks;
+        self
     }
 
     /// Create a tool result message.
@@ -150,6 +168,7 @@ impl Message {
             user_id: None,
             timestamp: None,
             message_id: None,
+            provider_content: None,
         }
     }
 }

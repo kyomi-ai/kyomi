@@ -1088,6 +1088,54 @@ fn decode_session_messages(rows: Vec<MessageWithSenderRow>, encryption_key: &[u8
     Ok(result)
 }
 
+/// The values of one `chat_messages` INSERT; see [`insert_message_row!`].
+struct MessageRow<'a> {
+    message_id: &'a str,
+    session_id: &'a str,
+    role: &'a str,
+    encrypted_content: &'a str,
+    sent_by_user_id: Option<&'a str>,
+    created_at: chrono::DateTime<Utc>,
+    current_time_user_tz: Option<&'a str>,
+    message_source: Option<&'a str>,
+    encrypted_metadata: Option<&'a str>,
+    tool_call_id: Option<&'a str>,
+    tool_name: Option<&'a str>,
+    tool_calls: Option<&'a serde_json::Value>,
+    status: &'a str,
+}
+
+/// The one `chat_messages` INSERT, run on any sqlx executor — a pool
+/// ([`add_message`]) or an open transaction
+/// ([`add_assistant_message_with_thinking_details`]).
+macro_rules! insert_message_row {
+    ($executor:expr, $row:expr) => {{
+        let row = &$row;
+        sqlx::query(
+            "INSERT INTO chat_messages \
+             (message_id, session_id, role, content, sent_by_user_id, pinned, \
+              created_at, current_time_user_tz, message_source, extra_metadata, \
+              tool_call_id, tool_name, tool_calls, status) \
+             VALUES ($1, $2, $3, $4, $5, false, $6, $7, $8, $9, $10, $11, $12, $13)",
+        )
+        .bind(row.message_id)
+        .bind(row.session_id)
+        .bind(row.role)
+        .bind(row.encrypted_content)
+        .bind(row.sent_by_user_id)
+        .bind(row.created_at)
+        .bind(row.current_time_user_tz)
+        .bind(row.message_source)
+        .bind(row.encrypted_metadata)
+        .bind(row.tool_call_id)
+        .bind(row.tool_name)
+        .bind(row.tool_calls as Option<&serde_json::Value>)
+        .bind(row.status)
+        .execute($executor)
+        .await
+    }};
+}
+
 /// Add a message to a session. Encrypts content and metadata before storage.
 ///
 /// `message_source` (`"web"`, `"slack"`, `"mcp"`, `"Kyomi Watch"`, ...) is
@@ -1116,7 +1164,8 @@ fn decode_session_messages(rows: Vec<MessageWithSenderRow>, encryption_key: &[u8
 /// reader could see the wrong status) that this alternative would
 /// otherwise require.
 ///
-/// Returns the message_id.
+/// Returns the message_id. A thin wrapper over [`insert_message`] for callers
+/// that pass the fields one by one.
 #[allow(clippy::too_many_arguments)]
 pub async fn add_message(
     db: &DbPool,
@@ -1134,6 +1183,51 @@ pub async fn add_message(
     tool_calls: Option<&serde_json::Value>,
     status: MessageStatus,
 ) -> kyomi_core::Result<String> {
+    let message = NewMessage {
+        role,
+        content,
+        metadata,
+        message_id,
+        current_time_user_tz,
+        message_source,
+        sent_by_user_id,
+        tool_call_id,
+        tool_name,
+        tool_calls,
+        status,
+    };
+    insert_message(db, encryption_key, session_id, &message, None).await
+}
+
+/// A message to insert; the fields of [`add_message`].
+pub struct NewMessage<'a> {
+    pub role: &'a str,
+    pub content: &'a str,
+    pub metadata: Option<&'a serde_json::Value>,
+    pub message_id: Option<&'a str>,
+    pub current_time_user_tz: Option<&'a str>,
+    pub message_source: Option<&'a str>,
+    pub sent_by_user_id: Option<&'a str>,
+    pub tool_call_id: Option<&'a str>,
+    pub tool_name: Option<&'a str>,
+    pub tool_calls: Option<&'a serde_json::Value>,
+    pub status: MessageStatus,
+}
+
+/// Insert a message, with the provider's verbatim blocks for it (KYO-969) in the
+/// same transaction when given, so a message never exists with half of its replay
+/// state. Returns the message id.
+pub async fn insert_message(
+    db: &DbPool,
+    encryption_key: &[u8; 32],
+    session_id: &str,
+    message: &NewMessage<'_>,
+    provider_content: Option<&serde_json::Value>,
+) -> kyomi_core::Result<String> {
+    let NewMessage {
+        role, content, metadata, message_id, current_time_user_tz, message_source, sent_by_user_id,
+        tool_call_id, tool_name, tool_calls, status,
+    } = *message;
     let msg_id = message_id
         .map(|s| s.to_string())
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
@@ -1148,31 +1242,59 @@ pub async fn add_message(
         None => None,
     };
 
-    // Insert message.
-    kyomi_core::db_execute!(
-        db,
-        "INSERT INTO chat_messages \
-         (message_id, session_id, role, content, sent_by_user_id, pinned, \
-          created_at, current_time_user_tz, message_source, extra_metadata, \
-          tool_call_id, tool_name, tool_calls, status) \
-         VALUES ($1, $2, $3, $4, $5, false, $6, $7, $8, $9, $10, $11, $12, $13)",
-        &msg_id,
+    // Insert the message and its provider blocks in one transaction.
+    let row = MessageRow {
+        message_id: &msg_id,
         session_id,
         role,
-        &encrypted_content,
+        encrypted_content: &encrypted_content,
         sent_by_user_id,
-        now,
+        created_at: now,
         current_time_user_tz,
         message_source,
-        encrypted_metadata,
+        encrypted_metadata: encrypted_metadata.as_deref(),
         tool_call_id,
         tool_name,
-        tool_calls as Option<&serde_json::Value>,
-        status.as_str()
-    )
+        tool_calls,
+        status: status.as_str(),
+    };
+    let protected = provider_content
+        .map(|blocks| encryption::protect_json_field(blocks, encryption_key))
+        .transpose()?;
+    macro_rules! insert_in_transaction {
+        ($pool:expr) => {{
+            let mut tx = $pool.begin().await?;
+            insert_message_row!(&mut *tx, row)?;
+            if let Some(protected) = &protected {
+                sqlx::query(PROVIDER_CONTENT_UPSERT_SQL)
+                    .bind(&msg_id)
+                    .bind(protected)
+                    .execute(&mut *tx)
+                    .await?;
+            }
+            tx.commit().await?;
+            Ok::<(), sqlx::Error>(())
+        }};
+    }
+    match db {
+        DbPool::Postgres(pool) => insert_in_transaction!(pool),
+        DbPool::Sqlite(pool) => insert_in_transaction!(pool),
+    }
     .map_err(|e| kyomi_core::Error::Internal(format!("failed to add message: {e}")))?;
 
-    // Update session timestamp.
+    touch_session_after_message(db, session_id, now).await?;
+
+    Ok(msg_id)
+}
+
+/// Bump the session's `updated_at` and write its sync-log entry after a
+/// message was added (shared by [`add_message`] and
+/// [`add_assistant_message_with_thinking_details`]).
+async fn touch_session_after_message(
+    db: &DbPool,
+    session_id: &str,
+    now: chrono::DateTime<Utc>,
+) -> kyomi_core::Result<()> {
     kyomi_core::db_execute!(
         db,
         "UPDATE chat_sessions SET updated_at = $1 WHERE session_id = $2",
@@ -1184,8 +1306,7 @@ pub async fn add_message(
     // Sync log for the session metadata update — real counts, RFC3339
     // timestamps, populated created_by (KYO-491).
     write_session_metadata_sync_log(db, session_id, SyncActionType::Update, "add_message").await;
-
-    Ok(msg_id)
+    Ok(())
 }
 
 /// Update message content, metadata, and/or status (re-encrypts content and
@@ -1251,32 +1372,20 @@ pub async fn update_message(
         None => None,
     };
     let status_str: Option<&'static str> = status.map(|s| s.as_str());
-    let rows_affected = if move_terminal_assistant {
-        macro_rules! update_terminal_in_transaction {
-            ($pool:expr) => {{
-                let mut tx = $pool.begin().await?;
-                let created_at = next_terminal_created_at!(tx, message_id);
-                let mut query = sqlx::query(&sql).bind(message_id);
-                if let Some(ref enc) = encrypted_content {
-                    query = query.bind(enc);
-                }
-                if let Some(ref enc) = encrypted_metadata_dyn {
-                    query = query.bind(enc);
-                }
-                if let Some(s) = status_str {
-                    query = query.bind(s);
-                }
-                let rows = query.bind(created_at).execute(&mut *tx).await?.rows_affected();
-                tx.commit().await?;
-                Ok::<u64, sqlx::Error>(rows)
-            }};
-        }
-        match db {
-            DbPool::Postgres(pool) => update_terminal_in_transaction!(pool),
-            DbPool::Sqlite(pool) => update_terminal_in_transaction!(pool),
-        }
-    } else {
-        kyomi_core::db_with_pool!(db, |p| {
+    // Text rewritten outside a successful completion (a user edit, or an error /
+    // cancel notice on the placeholder) invalidates the provider blocks stored for
+    // the old text: they would override the new text on replay (KYO-969). The
+    // delete is in the update's own transaction, so a failure cannot leave the new
+    // text with the old blocks.
+    let clear_blocks = content.is_some() && status != Some(MessageStatus::Complete);
+    macro_rules! update_in_transaction {
+        ($pool:expr) => {{
+            let mut tx = $pool.begin().await?;
+            let created_at = if move_terminal_assistant {
+                Some(next_terminal_created_at!(tx, message_id))
+            } else {
+                None
+            };
             let mut query = sqlx::query(&sql).bind(message_id);
             if let Some(ref enc) = encrypted_content {
                 query = query.bind(enc);
@@ -1287,8 +1396,20 @@ pub async fn update_message(
             if let Some(s) = status_str {
                 query = query.bind(s);
             }
-            query.execute(p).await.map(|r| r.rows_affected())
-        })
+            if let Some(at) = created_at {
+                query = query.bind(at);
+            }
+            let rows = query.execute(&mut *tx).await?.rows_affected();
+            if rows > 0 && clear_blocks {
+                sqlx::query(PROVIDER_CONTENT_DELETE_SQL).bind(message_id).execute(&mut *tx).await?;
+            }
+            tx.commit().await?;
+            Ok::<u64, sqlx::Error>(rows)
+        }};
+    }
+    let rows_affected = match db {
+        DbPool::Postgres(pool) => update_in_transaction!(pool),
+        DbPool::Sqlite(pool) => update_in_transaction!(pool),
     }
     .map_err(|e| kyomi_core::Error::Internal(format!("failed to update message: {e}")))?;
     Ok(rows_affected > 0)
@@ -2177,7 +2298,30 @@ pub struct AgentMessage {
     /// ever fabricating a source, since `build_metadata_prefix` already
     /// omits whichever part is absent.
     pub message_source: Option<String>,
+    /// The provider's verbatim assistant content blocks (KYO-969), if stored for
+    /// this message. Encrypted in the row; the loaders decrypt it.
+    pub provider_content: Option<serde_json::Value>,
 }
+
+/// Upsert of one message's provider blocks (KYO-969); `$2` is the encrypted
+/// envelope. Shared by every write path so they cannot drift.
+pub(crate) const PROVIDER_CONTENT_UPSERT_SQL: &str = "INSERT INTO chat_message_provider_content (message_id, blocks) VALUES ($1, $2) \
+     ON CONFLICT (message_id) DO UPDATE SET blocks = EXCLUDED.blocks";
+
+/// Reads one message's stored (encrypted) provider blocks; `$1` is the message id.
+pub(crate) const PROVIDER_CONTENT_SELECT_SQL: &str = "SELECT blocks FROM chat_message_provider_content WHERE message_id = $1";
+
+/// Removes one message's stored provider blocks; `$1` is the message id.
+pub(crate) const PROVIDER_CONTENT_DELETE_SQL: &str = "DELETE FROM chat_message_provider_content WHERE message_id = $1";
+
+/// The column every agent-history query selects so no loader can forget the
+/// stored provider blocks. Expands to a string literal for `concat!`.
+macro_rules! provider_content_columns {
+    () => {
+        "(SELECT p.blocks FROM chat_message_provider_content p WHERE p.message_id = chat_messages.message_id) AS provider_content"
+    };
+}
+pub(crate) use provider_content_columns;
 
 /// Row type for agent message queries.
 #[derive(Debug, sqlx::FromRow)]
@@ -2191,6 +2335,27 @@ struct AgentMessageRow {
     sent_by_user_id: Option<String>,
     current_time_user_tz: Option<String>,
     message_source: Option<String>,
+    provider_content: Option<serde_json::Value>,
+}
+
+/// Decrypt a message's stored provider blocks (KYO-969). `None` when the message
+/// has none; a stored row that cannot be decrypted or is not an array of blocks is
+/// an error, not a silent change of what the model sees.
+pub(crate) fn restore_provider_content(
+    message_id: &str,
+    stored: Option<&serde_json::Value>,
+    encryption_key: &[u8; 32],
+) -> kyomi_core::Result<Option<serde_json::Value>> {
+    let Some(stored) = stored else { return Ok(None) };
+    let blocks = encryption::restore_json_field(stored, encryption_key).map_err(|error| {
+        kyomi_core::Error::Internal(format!("stored provider content of message {message_id} is unreadable: {error}"))
+    })?;
+    if blocks.as_array().is_none() {
+        return Err(kyomi_core::Error::Internal(format!(
+            "stored provider content of message {message_id} is not an array of blocks"
+        )));
+    }
+    Ok(Some(blocks))
 }
 
 /// Get ALL messages for agent context restoration (including tool calls and tool results).
@@ -2226,11 +2391,11 @@ pub async fn get_agent_messages(
         kyomi_core::db_fetch_all!(
             db,
             AgentMessageRow,
-            "SELECT message_id, role, content, tool_calls, tool_call_id, tool_name, \
-              sent_by_user_id, current_time_user_tz, message_source \
+            concat!("SELECT message_id, role, content, tool_calls, tool_call_id, tool_name, \
+              sent_by_user_id, current_time_user_tz, message_source, ", provider_content_columns!(), " \
              FROM chat_messages \
              WHERE session_id = $1 AND NOT EXISTS (SELECT 1 FROM conversation_runs r WHERE r.user_message_id=chat_messages.message_id AND r.state='queued' AND r.request_id IS NOT NULL AND EXISTS (SELECT 1 FROM conversation_runs active WHERE active.session_id=r.session_id AND active.state='running')) AND (created_at > $2 OR (created_at = $2 AND message_id > $3)) \
-             ORDER BY created_at ASC, message_id ASC",
+             ORDER BY created_at ASC, message_id ASC"),
             session_id,
             cutoff_row.created_at,
             after_id
@@ -2239,11 +2404,11 @@ pub async fn get_agent_messages(
         kyomi_core::db_fetch_all!(
             db,
             AgentMessageRow,
-            "SELECT message_id, role, content, tool_calls, tool_call_id, tool_name, \
-              sent_by_user_id, current_time_user_tz, message_source \
+            concat!("SELECT message_id, role, content, tool_calls, tool_call_id, tool_name, \
+              sent_by_user_id, current_time_user_tz, message_source, ", provider_content_columns!(), " \
              FROM chat_messages \
              WHERE session_id = $1 AND NOT EXISTS (SELECT 1 FROM conversation_runs r WHERE r.user_message_id=chat_messages.message_id AND r.state='queued' AND r.request_id IS NOT NULL AND EXISTS (SELECT 1 FROM conversation_runs active WHERE active.session_id=r.session_id AND active.state='running')) \
-             ORDER BY created_at ASC, message_id ASC",
+             ORDER BY created_at ASC, message_id ASC"),
             session_id
         )?
     };
@@ -2263,8 +2428,11 @@ pub async fn get_agent_messages(
             }
         };
 
-        // Skip empty assistant placeholders (no content AND no tool_calls).
-        if row.role == "assistant" && content.trim().is_empty() && row.tool_calls.is_none() {
+        let provider_content = restore_provider_content(&row.message_id, row.provider_content.as_ref(), encryption_key)?;
+
+        // Skip empty assistant placeholders (no content, no tool_calls, no stored
+        // provider blocks): a row that carries blocks is part of the history.
+        if row.role == "assistant" && content.trim().is_empty() && row.tool_calls.is_none() && provider_content.is_none() {
             continue;
         }
 
@@ -2278,6 +2446,7 @@ pub async fn get_agent_messages(
             sent_by_user_id: row.sent_by_user_id,
             current_time_user_tz: row.current_time_user_tz,
             message_source: row.message_source,
+            provider_content,
         });
     }
 
@@ -2637,6 +2806,18 @@ async fn insert_in_progress_assistant_placeholder(
     Ok(())
 }
 
+/// What [`finalize_assistant_placeholder`] writes into the placeholder.
+#[derive(Clone, Copy)]
+pub struct PlaceholderResult<'a> {
+    pub content: &'a str,
+    pub tool_call_id: Option<&'a str>,
+    pub tool_name: Option<&'a str>,
+    pub tool_calls: Option<&'a serde_json::Value>,
+    /// The provider's verbatim blocks for the text, written in the same
+    /// transaction (KYO-969).
+    pub provider_content: Option<&'a serde_json::Value>,
+}
+
 /// Finalize a pre-inserted assistant placeholder row with the agent's real
 /// first-class message fields (KYO-493).
 ///
@@ -2660,12 +2841,13 @@ pub async fn finalize_assistant_placeholder(
     db: &DbPool,
     encryption_key: &[u8; 32],
     message_id: &str,
-    content: &str,
-    tool_call_id: Option<&str>,
-    tool_name: Option<&str>,
-    tool_calls: Option<&serde_json::Value>,
+    result: &PlaceholderResult<'_>,
 ) -> kyomi_core::Result<bool> {
+    let PlaceholderResult { content, tool_call_id, tool_name, tool_calls, provider_content } = *result;
     let encrypted_content = encryption::encrypt(content, encryption_key)?;
+    let protected_blocks = provider_content
+        .map(|blocks| encryption::protect_json_field(blocks, encryption_key))
+        .transpose()?;
     macro_rules! finalize_in_transaction {
         ($pool:expr) => {{
             let mut tx = $pool.begin().await?;
@@ -2684,6 +2866,15 @@ pub async fn finalize_assistant_placeholder(
             .execute(&mut *tx)
             .await?
             .rows_affected();
+            // The blocks belong to the text just written: same transaction, and
+            // only when that text was (KYO-969).
+            if let (true, Some(protected)) = (rows > 0, &protected_blocks) {
+                sqlx::query(PROVIDER_CONTENT_UPSERT_SQL)
+                    .bind(message_id)
+                    .bind(protected)
+                    .execute(&mut *tx)
+                    .await?;
+            }
             tx.commit().await?;
             Ok::<u64, sqlx::Error>(rows)
         }};
@@ -3091,6 +3282,78 @@ pub async fn get_thinking_event_detail(
         }
         None => Ok(None),
     }
+}
+
+/// Insert a completed assistant message and, in the same transaction, copy
+/// every stored full-text reasoning row of `copy_details_from` onto it
+/// (KYO-976, "Continue in Chat"). The text is copied as ciphertext: both
+/// messages belong to one workspace and so share one encryption key. If any
+/// row fails to copy the transaction rolls back and no message is created, so
+/// a trace can never exist with only some of its full texts.
+pub async fn add_assistant_message_with_thinking_details(
+    db: &DbPool,
+    encryption_key: &[u8; 32],
+    session_id: &str,
+    message_id: &str,
+    content: &str,
+    metadata: Option<&serde_json::Value>,
+    copy_details_from: Option<&str>,
+) -> kyomi_core::Result<()> {
+    let now = Utc::now();
+    let encrypted_content = encryption::encrypt(content, encryption_key)?;
+    let encrypted_metadata: Option<String> = match metadata {
+        Some(m) => Some(encryption::encrypt_json(m, encryption_key)?),
+        None => None,
+    };
+
+    let row = MessageRow {
+        message_id,
+        session_id,
+        role: "assistant",
+        encrypted_content: &encrypted_content,
+        sent_by_user_id: None,
+        created_at: now,
+        current_time_user_tz: None,
+        message_source: None,
+        encrypted_metadata: encrypted_metadata.as_deref(),
+        tool_call_id: None,
+        tool_name: None,
+        tool_calls: None,
+        status: MessageStatus::Complete.as_str(),
+    };
+
+    let result = kyomi_core::db_with_pool!(db, |pool| async {
+        let mut tx = pool.begin().await?;
+        insert_message_row!(&mut *tx, row)?;
+        if let Some(source) = copy_details_from {
+            let rows: Vec<(String, String)> = sqlx::query_as(
+                "SELECT event_id, full_text FROM thinking_event_details WHERE message_id = $1",
+            )
+            .bind(source)
+            .fetch_all(&mut *tx)
+            .await?;
+            for (event_id, full_text) in rows {
+                sqlx::query(
+                    "INSERT INTO thinking_event_details (id, message_id, event_id, full_text) \
+                     VALUES ($1, $2, $3, $4)",
+                )
+                .bind(uuid::Uuid::new_v4().to_string())
+                .bind(message_id)
+                .bind(event_id)
+                .bind(full_text)
+                .execute(&mut *tx)
+                .await?;
+            }
+        }
+        tx.commit().await?;
+        Ok::<(), sqlx::Error>(())
+    }
+    .await);
+    result.map_err(|e| {
+        kyomi_core::Error::Internal(format!("failed to add assistant message with thinking details: {e}"))
+    })?;
+
+    touch_session_after_message(db, session_id, now).await
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
@@ -5653,7 +5916,8 @@ mod tests {
             let final_content = format!("{case} answer");
             if terminal_status == MessageStatus::Complete {
                 finalize_assistant_placeholder(
-                    &db, &key, &placeholder_id, &final_content, None, None, None,
+                    &db, &key, &placeholder_id,
+                    &PlaceholderResult { content: &final_content, tool_call_id: None, tool_name: None, tool_calls: None, provider_content: None },
                 ).await.expect("persist final answer");
                 let visible_time: chrono::DateTime<Utc> = sqlx::query_scalar(
                     "SELECT created_at FROM chat_messages WHERE message_id = $1",

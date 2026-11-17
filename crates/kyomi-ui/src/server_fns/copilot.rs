@@ -324,7 +324,7 @@ pub async fn send_copilot_message(
         // this id (see `CopilotMessagePrep::assistant_message_id`'s doc) —
         // AdapterInserts, not CallerPreInserted.
         assistant_message_persistence: kyomi_agent::AssistantMessagePersistence::AdapterInserts(
-            Some(prep.assistant_message_id.clone()),
+            prep.assistant_message_id.clone(),
         ),
         conversation_history: None,
         user_display_name: ac.auth.name.clone().unwrap_or_else(|| ac.auth.email.clone()),

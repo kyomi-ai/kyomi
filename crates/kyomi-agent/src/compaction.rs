@@ -91,6 +91,12 @@ pub fn should_compact(
     for msg in messages {
         total_chars += msg.content.len();
 
+        // Stored provider blocks (web search/fetch results) are sent with the
+        // message and count as input tokens, so they belong in the estimate (KYO-969).
+        if let Some(ref blocks) = msg.provider_content {
+            total_chars += blocks.iter().map(|block| block.to_string().len()).sum::<usize>();
+        }
+
         // Include tool call arguments in the estimate.
         if let Some(ref tool_calls) = msg.tool_calls {
             for tc in tool_calls {
@@ -243,6 +249,16 @@ mod tests {
     use super::*;
 
     // -- should_compact tests ------------------------------------------------
+
+    #[test]
+    fn the_character_estimate_counts_stored_provider_blocks() {
+        // Text alone is far below the threshold; the stored search results are not.
+        let blocks = vec![serde_json::json!({"type": "text", "text": "x".repeat(CHARS_PER_TOKEN as usize * COMPACTION_TOKEN_THRESHOLD as usize)})];
+        let plain = vec![Message::user("q"), Message::assistant("a")];
+        let with_blocks = vec![Message::user("q"), Message::assistant("a").with_provider_content(Some(blocks))];
+        assert!(!should_compact(None, &plain, 0));
+        assert!(should_compact(None, &with_blocks, 0));
+    }
 
     #[test]
     fn should_compact_returns_false_below_threshold_with_actual_tokens() {

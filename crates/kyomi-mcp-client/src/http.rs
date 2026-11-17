@@ -120,11 +120,6 @@ impl SafeHttpClient {
         let port = url
             .port_or_known_default()
             .ok_or_else(|| Error::new(K::UnsafeUrl, D::NotSent))?;
-        let addresses = if let Ok(ip) = host.parse::<IpAddr>() {
-            vec![SocketAddr::new(ip, port)]
-        } else {
-            self.resolver.resolve(host, port).await?
-        };
         #[cfg(test)]
         let test_allowed = self.test_http;
         #[cfg(not(test))]
@@ -133,25 +128,11 @@ impl SafeHttpClient {
             .policy
             .private_authorities
             .contains(&url.origin().ascii_serialization());
-        if addresses.is_empty()
-            || addresses.len() > 32
-            || addresses.iter().any(|a| {
-                a.port() != port
-                    || (!private_allowed
-                        && !is_public_address(a.ip())
-                        && !(test_allowed && a.ip().is_loopback()))
-            })
-        {
-            return Err(Error::new(K::UnsafeUrl, D::NotSent));
-        }
-        let client = reqwest::Client::builder()
-            .no_proxy()
-            .redirect(reqwest::redirect::Policy::none())
-            .connect_timeout(self.limits.connect_timeout)
-            .timeout(self.limits.deadline)
-            .retry(reqwest::retry::never())
-            .pool_max_idle_per_host(0)
-            .resolve_to_addrs(host, &addresses)
+        let addresses = validated_addresses(self.resolver.as_ref(), host, port, |ip| {
+            private_allowed || is_public_address(ip) || (test_allowed && ip.is_loopback())
+        })
+        .await?;
+        let client = pinned_client(host, &addresses, self.limits.connect_timeout, self.limits.deadline)?
             .build()
             .map_err(|_| Error::new(K::Configuration, D::NotSent))?;
         let mut headers = HeaderMap::new();
@@ -205,10 +186,7 @@ impl SafeHttpClient {
                 )
             })?;
         // Defense in depth: reject any connector that reports an unexpected actual peer.
-        if !response
-            .remote_addr()
-            .is_some_and(|peer| addresses.contains(&peer))
-        {
+        if !peer_is_pinned(&response, &addresses) {
             return Err(Error::new(K::UnsafeUrl, D::MayHaveBeenSent));
         }
         if response.status().is_redirection() {
@@ -328,6 +306,54 @@ fn checked_url(raw: &str) -> Result<Url, Error> {
     }
     Ok(url)
 }
+/// Resolve `host` (or take an IP literal as is) and require every answer to
+/// satisfy `allowed`. The shared first half of pinned egress: callers connect only
+/// to the returned addresses (see [`pinned_client`]), so a second DNS lookup at
+/// connect time cannot rebind to an internal host. Refuses an empty answer, more
+/// than 32 answers and any answer whose port differs.
+pub async fn validated_addresses(
+    resolver: &dyn Resolver,
+    host: &str,
+    port: u16,
+    allowed: impl Fn(IpAddr) -> bool,
+) -> Result<Vec<SocketAddr>, Error> {
+    let addresses = if let Ok(ip) = host.parse::<IpAddr>() {
+        vec![SocketAddr::new(ip, port)]
+    } else {
+        resolver.resolve(host, port).await?
+    };
+    if addresses.is_empty() || addresses.len() > 32 || addresses.iter().any(|a| a.port() != port || !allowed(a.ip())) {
+        return Err(Error::new(K::UnsafeUrl, D::NotSent));
+    }
+    Ok(addresses)
+}
+
+/// A client pinned to `addresses` for `host`: no proxy, no redirects, no retries,
+/// no idle connection reuse, and no DNS at connect time.
+pub fn pinned_client(
+    host: &str,
+    addresses: &[SocketAddr],
+    connect_timeout: std::time::Duration,
+    deadline: std::time::Duration,
+) -> Result<reqwest::ClientBuilder, Error> {
+    if addresses.is_empty() {
+        return Err(Error::new(K::Configuration, D::NotSent));
+    }
+    Ok(reqwest::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(connect_timeout)
+        .timeout(deadline)
+        .retry(reqwest::retry::never())
+        .pool_max_idle_per_host(0)
+        .resolve_to_addrs(host, addresses))
+}
+
+/// Defence in depth: the connected peer must be one of the validated answers.
+pub fn peer_is_pinned(response: &reqwest::Response, addresses: &[SocketAddr]) -> bool {
+    response.remote_addr().is_some_and(|peer| addresses.contains(&peer))
+}
+
 /// Conservative public-unicast predicate. IPv6 is restricted to global unicast,
 /// excluding documentation and transition ranges; mapped IPv4 uses the IPv4 rules.
 pub fn is_public_address(ip: IpAddr) -> bool {

@@ -13,6 +13,8 @@ kyomi-datasource-server = { workspace = true }
 kyomi-datasource-drivers = { workspace = true }
 kyomi-connect-protocol = { workspace = true }
 kyomi-embed = { workspace = true }
+kyomi-mcp-client = { workspace = true }
+url = { workspace = true }
 kyomi-knowledge = { workspace = true }
 tokio = { workspace = true }
 futures-util = { workspace = true }
@@ -55,6 +57,7 @@ kyomi-chart-theme = { workspace = true }
 [dev-dependencies]
 kyomi-test-db = { workspace = true }
 kyomi-test-tracing = { workspace = true }
+wiremock = { workspace = true }
 # HTML tokenizer checks attributes after entity decoding in email regressions.
 html5ever = "0.38"
 kyomi-core = { workspace = true, features = ["test-helpers"] }

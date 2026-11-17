@@ -265,6 +265,9 @@ pub struct Config {
     /// [`crate::llm_sampling`].
     pub llm_sampling: crate::llm_sampling::LlmSamplingSettings,
 
+    /// Web search / web fetch backends and caps (KYO-969). See [`crate::web_tools`].
+    pub web_tools: crate::web_tools::WebToolsSettings,
+
     // ── Stripe ──────────────────────────────────────────────────────────
     /// Stripe secret key (sk_test_ or sk_live_).
     /// Optional — server starts without it (no billing features).
@@ -508,6 +511,7 @@ impl Config {
             llm_context_window: context_window_from(|k| env::var(k).ok()),
             llm_title_model: env::var("LLM_TITLE_MODEL").ok(),
             llm_sampling: llm_sampling_from_env(),
+            web_tools: crate::web_tools::WebToolsSettings::from_env(),
             stripe_secret_key: env::var("STRIPE_SECRET_KEY").ok(),
             stripe_publishable_key: env::var("STRIPE_PUBLISHABLE_KEY").ok(),
             stripe_webhook_secret: env::var("STRIPE_WEBHOOK_SECRET").ok(),
@@ -592,6 +596,7 @@ impl Config {
             llm_context_window: 0,
             llm_title_model: None,
             llm_sampling: crate::llm_sampling::LlmSamplingSettings::default(),
+            web_tools: crate::web_tools::WebToolsSettings::default(),
             stripe_secret_key: None,
             stripe_publishable_key: None,
             stripe_webhook_secret: None,
