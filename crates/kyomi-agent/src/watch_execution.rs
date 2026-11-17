@@ -621,7 +621,7 @@ pub(crate) fn build_watch_agent_config(
         max_tokens: MAX_WATCH_OUTPUT_TOKENS,
         component: "kyomi_watch".into(),
         user_message_persistence,
-        assistant_message_persistence: AssistantMessagePersistence::AdapterInserts(None),
+        assistant_message_persistence: AssistantMessagePersistence::adapter_inserts_with_new_id(),
         conversation_history: None,
         user_display_name: "Kyomi Watch".to_string(),
         context_window: 0,
@@ -2748,3 +2748,7 @@ That concludes my analysis."#;
 #[cfg(test)]
 #[path = "watch_execution_timezone_tests.rs"]
 mod timezone_loader_tests;
+
+#[cfg(test)]
+#[path = "watch_execution_thinking_tests.rs"]
+mod thinking_trace_tests;

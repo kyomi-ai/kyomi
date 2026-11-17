@@ -15,9 +15,10 @@ use phosphor_leptos::Icon;
 use crate::components::chat::AgentThinking;
 use crate::components::chat::thinking::ThinkingEvent;
 use crate::components::dashboard::{ChartInfoModal, MarkdownRenderer};
+use crate::components::alert::{Alert, AlertVariant};
 use crate::components::{Badge, BadgeVariant, Skeleton, Spinner};
 use crate::server_fns::context::UserContext;
-use crate::server_fns::watches::get_thinking_events;
+use crate::server_fns::watches::{ThinkingEventsResponse, get_thinking_events};
 use crate::types::WatchExecutionItem;
 
 use super::ExecutionSelector;
@@ -188,6 +189,58 @@ fn format_timestamp(date_str: &str) -> String {
 // Component
 // ---------------------------------------------------------------------------
 
+/// A loaded thinking trace: the events plus the assistant message id that
+/// "more" needs to fetch full reasoning text.
+#[derive(Clone)]
+struct LoadedThinkingTrace {
+    events: Vec<ThinkingEvent>,
+    message_id: String,
+}
+
+/// Load the trace for the selected execution. A failure is logged and
+/// returned so the viewer can show an error state — it is never mapped to an
+/// empty trace (KYO-976).
+async fn load_thinking_trace(
+    exec: Option<WatchExecutionItem>,
+) -> Result<LoadedThinkingTrace, String> {
+    let empty = || LoadedThinkingTrace { events: Vec::new(), message_id: String::new() };
+    let Some(exec) = exec else {
+        return Ok(empty());
+    };
+    let Some(watch_id) = exec.watch_id else {
+        return Ok(empty());
+    };
+    resolve_thinking_trace(exec.id, get_thinking_events(watch_id, exec.id).await)
+}
+
+/// Turn the server fn's result into a trace. A failure — transport or
+/// malformed data — is logged and returned, never mapped to an empty trace.
+fn resolve_thinking_trace(
+    execution_id: i32,
+    response: Result<ThinkingEventsResponse, ServerFnError>,
+) -> Result<LoadedThinkingTrace, String> {
+    let response = response.map_err(|e| {
+        leptos::logging::error!("Failed to load thinking events for execution {execution_id}: {e}");
+        e.to_string()
+    })?;
+    parse_thinking_trace(response).map_err(|e| {
+        leptos::logging::error!("Failed to parse thinking events for execution {execution_id}: {e}");
+        e
+    })
+}
+
+/// Turn the server's response into displayable events. A malformed event is
+/// an error, not a dropped event.
+fn parse_thinking_trace(response: ThinkingEventsResponse) -> Result<LoadedThinkingTrace, String> {
+    let events = response
+        .events
+        .into_iter()
+        .map(serde_json::from_value::<ThinkingEvent>)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    Ok(LoadedThinkingTrace { events, message_id: response.message_id.unwrap_or_default() })
+}
+
 /// Shows watch execution as a chat-like conversation.
 ///
 /// Displays:
@@ -307,20 +360,7 @@ pub fn ExecutionLogViewer(
     // picks a different execution run.
     let thinking_events_resource = LocalResource::new(move || {
         let exec = selected_execution.get();
-        async move {
-            let Some(exec) = exec else {
-                return Vec::<ThinkingEvent>::new();
-            };
-            let Some(watch_id) = exec.watch_id else {
-                return Vec::new();
-            };
-            match get_thinking_events(watch_id, exec.id).await {
-                Ok(json_value) => {
-                    serde_json::from_value::<Vec<ThinkingEvent>>(json_value).unwrap_or_default()
-                }
-                Err(_) => Vec::new(),
-            }
-        }
+        async move { load_thinking_trace(exec).await }
     });
 
     view! {
@@ -426,16 +466,20 @@ pub fn ExecutionLogViewer(
                                         <Transition fallback=|| ()>
                                             {move || {
                                                 Suspend::new(async move {
-                                                    let events: Vec<ThinkingEvent> = thinking_events_resource.await.to_vec();
-                                                    if events.is_empty() {
-                                                        None
-                                                    } else {
-                                                        Some(view! {
+                                                    match thinking_events_resource.await {
+                                                        Ok(trace) if trace.events.is_empty() => None,
+                                                        Ok(trace) => Some(view! {
                                                             <AgentThinking
-                                                                thinking_events=events
+                                                                thinking_events=trace.events
+                                                                message_id=trace.message_id
                                                                 is_active=false
                                                             />
-                                                        })
+                                                        }.into_any()),
+                                                        Err(_) => Some(view! {
+                                                            <Alert variant=AlertVariant::Error class="mb-3">
+                                                                "Failed to load the agent thinking trace."
+                                                            </Alert>
+                                                        }.into_any()),
                                                     }
                                                 })
                                             }}
@@ -573,5 +617,47 @@ mod tests {
         e.llm_mode = Some("realtime".into());
         e.llm_provider = Some("openai".into());
         assert_eq!(llm_summary(&e).unwrap(), "realtime \u{b7} openai \u{b7} 120 in / 30 out tokens");
+    }
+}
+
+#[cfg(test)]
+mod thinking_trace_tests {
+    use super::*;
+
+    fn event(id: &str) -> serde_json::Value {
+        serde_json::json!({
+            "event_id": id,
+            "event_type": "agent_thought",
+            "timestamp": "2026-11-17T00:00:00Z",
+            "title": "Planning",
+            "description": "text",
+            "has_full_text": true,
+        })
+    }
+
+    #[test]
+    fn parsed_trace_carries_the_message_id_for_more() {
+        let trace = parse_thinking_trace(ThinkingEventsResponse {
+            message_id: Some("msg-1".into()),
+            events: vec![event("e1"), event("e2")],
+        })
+        .expect("well-formed events parse");
+        assert_eq!(trace.message_id, "msg-1");
+        assert_eq!(trace.events.len(), 2);
+    }
+
+    #[test]
+    fn a_failed_load_is_an_error_not_an_empty_trace() {
+        let result = resolve_thinking_trace(7, Err(ServerFnError::new("boom")));
+        assert!(result.is_err(), "a server error must not become an empty trace");
+    }
+
+    #[test]
+    fn malformed_event_is_an_error_not_a_dropped_event() {
+        let result = parse_thinking_trace(ThinkingEventsResponse {
+            message_id: Some("msg-1".into()),
+            events: vec![event("e1"), serde_json::json!({"event_type": 7})],
+        });
+        assert!(result.is_err(), "a malformed event must surface as an error");
     }
 }

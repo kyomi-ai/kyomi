@@ -754,17 +754,25 @@ pub async fn continue_alert_in_chat(execution_id: i32) -> Result<String, ServerF
     .into_sfn_core()
 }
 
-/// Get thinking events for a specific execution.
+/// Thinking events of a watch execution together with the assistant message
+/// they are saved on (KYO-976).
 ///
-/// Returns a JSON array of thinking events directly, since Leptos components
-/// consume it as-is. The now-deleted REST route this replaced
-/// (`GET /watches/{watch_id}/executions/{execution_id}/thinking-events`) wrapped
-/// the same data in an envelope object (`{ execution_id, session_id, events }`).
+/// `message_id` is what `get_thinking_event_detail` needs to fetch an event's
+/// full reasoning text. It is `None` only for old executions whose events were
+/// stored on `execution_trace`: those have no message row and no full texts.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ThinkingEventsResponse {
+    pub message_id: Option<String>,
+    pub events: Vec<serde_json::Value>,
+}
+
+/// Get the thinking events (and their assistant message id) for a specific
+/// execution.
 #[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn get_thinking_events(
     watch_id: String,
     execution_id: i32,
-) -> Result<serde_json::Value, ServerFnError> {
+) -> Result<ThinkingEventsResponse, ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
 
     let execution = kyomi_auth::watch_service::get_execution_by_id(
@@ -778,50 +786,19 @@ pub async fn get_thinking_events(
     .into_sfn_core()?
     .ok_or_else(|| ServerFnError::new("Execution not found"))?;
 
-    let mut thinking_events = serde_json::Value::Array(Vec::new());
+    let encryption_key = ac.encryption_key()?;
+    let trace = kyomi_auth::watch_service::get_execution_thinking_events(
+        ac.db(),
+        &encryption_key,
+        &execution,
+    )
+    .await
+    .into_sfn_core()?;
 
-    // Load thinking events from session messages
-    if let Some(ref session_id) = execution.session_id {
-        let encryption_key = ac.encryption_key()?;
-
-        match kyomi_auth::chat_service::get_session_messages(
-            ac.db(),
-            &encryption_key,
-            session_id,
-            1000,
-        )
-        .await
-        {
-            Ok(messages) => {
-                for msg in &messages {
-                    if msg.message_type == "assistant" && !msg.thinking_events.is_empty() {
-                        thinking_events =
-                            serde_json::Value::Array(msg.thinking_events.clone());
-                        break;
-                    }
-                }
-            }
-            Err(e) => {
-                tracing::warn!("Failed to load thinking events from session: {e}");
-            }
-        }
-    }
-
-    // Fallback for old executions that stored events in execution_trace
-    if thinking_events
-        .as_array()
-        .map(|a| a.is_empty())
-        .unwrap_or(true)
-        && let Some(events) = execution
-            .execution_trace
-            .as_ref()
-            .and_then(|t| t.get("events"))
-            .filter(|e| e.is_array())
-    {
-        thinking_events = events.clone();
-    }
-
-    Ok(thinking_events)
+    Ok(ThinkingEventsResponse {
+        message_id: trace.message_id,
+        events: trace.events,
+    })
 }
 
 // SSR-only import — placed at bottom to match `dashboards.rs` convention.
