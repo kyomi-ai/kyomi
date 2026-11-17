@@ -275,13 +275,10 @@ impl AnthropicClient {
         // thinking configuration is part of the cached prefix, so it is sent
         // on every request of a supporting model (KYO-974). Models without
         // adaptive thinking (Haiku 4.5, ...) would answer 400, so they get none.
-        // The API rejects `temperature` other than 1 while thinking is adaptive
-        // (verified live), so a configured temperature wins and no `thinking` is
-        // sent: models that think only on request (Sonnet 4.6, ...) then keep
-        // working with it. Models that think by default (5.x) reject a configured
-        // temperature other than 1 outright, so do not configure one for them.
-        let temperature_allows_thinking = options.temperature.as_ref().is_none_or(|t| t.as_f64() == Some(1.0));
-        if temperature_allows_thinking && crate::anthropic_pricing::supports_adaptive_thinking(model) {
+        // A configured temperature is sent exactly as set and never changes this: if the
+        // provider rejects the combination (it does for a temperature other than 1 with
+        // adaptive thinking) that surfaces as its own loud error.
+        if crate::anthropic_pricing::supports_adaptive_thinking(model) {
             body["thinking"] = json!({"type": "adaptive", "display": "summarized"});
         }
 
@@ -1566,21 +1563,21 @@ mod tests {
         assert!(body.get("thinking").is_none(), "{body}");
     }
 
-    /// Live finding: `temperature` other than 1 is a 400 while thinking is adaptive.
+    /// A configured temperature never changes the `thinking` parameter: both are sent as set and
+    /// the provider decides (it rejects a temperature other than 1 with adaptive thinking).
     #[test]
-    fn a_configured_temperature_other_than_one_suppresses_the_thinking_parameter() {
+    fn a_configured_temperature_neither_suppresses_nor_alters_the_thinking_parameter() {
         let msgs = || vec![json!({"role": "user", "content": "hi"})];
-        let warm = RequestOptions::new(1024).with_temperature(Some(json!(0.25)));
-        let body = AnthropicClient::build_request_body("claude-sonnet-4-6", None, msgs(), &[], &warm);
+        for temperature in [json!(0.25), json!(1), json!(1.0), json!("hot")] {
+            let opts = RequestOptions::new(1024).with_temperature(Some(temperature.clone()));
+            let body = AnthropicClient::build_request_body("claude-sonnet-4-6", None, msgs(), &[], &opts);
+            assert_eq!(body["temperature"], temperature, "sent exactly as set");
+            assert_eq!(body["thinking"], json!({"type": "adaptive", "display": "summarized"}), "{body}");
+        }
+        // The per-model rule stays: a model without adaptive thinking gets no `thinking`.
+        let opts = RequestOptions::new(1024);
+        let body = AnthropicClient::build_request_body("claude-haiku-4-5-20251001", None, msgs(), &[], &opts);
         assert!(body.get("thinking").is_none(), "{body}");
-        assert_eq!(body["temperature"], json!(0.25));
-        // Integer 1 (not just 1.0) also allows thinking.
-        let int_one = RequestOptions::new(1024).with_temperature(Some(json!(1)));
-        let body = AnthropicClient::build_request_body("claude-sonnet-4-6", None, msgs(), &[], &int_one);
-        assert!(body.get("thinking").is_some(), "{body}");
-        let one = RequestOptions::new(1024).with_temperature(Some(json!(1.0)));
-        let body = AnthropicClient::build_request_body("claude-sonnet-4-6", None, msgs(), &[], &one);
-        assert!(body.get("thinking").is_some(), "{body}");
     }
 
     #[test]
