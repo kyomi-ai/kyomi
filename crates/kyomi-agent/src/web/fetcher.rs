@@ -39,6 +39,9 @@ pub struct BuiltinFetcher {
     /// lower-cased, each matching itself and its subdomains.
     allowed_domains: Vec<String>,
     blocked_domains: Vec<String>,
+    /// How long one fetch (redirects included) may take; [`DEADLINE`] unless a test
+    /// shortens it.
+    deadline: Duration,
     /// Test seam (same precedent as `kyomi-mcp-client`): lets tests reach a
     /// loopback server. Compiled out of non-test builds.
     #[cfg(test)]
@@ -58,6 +61,7 @@ impl BuiltinFetcher {
             resolver,
             allowed_domains: Vec::new(),
             blocked_domains: Vec::new(),
+            deadline: DEADLINE,
             #[cfg(test)]
             allow_loopback: false,
         }
@@ -129,7 +133,7 @@ impl BuiltinFetcher {
         let mut url = self.check_url(&request.url)?;
         for _ in 0..=MAX_REDIRECTS {
             let (host, addresses) = self.validated_addresses(&url).await?;
-            let client = kyomi_mcp_client::pinned_client(&host, &addresses, CONNECT_TIMEOUT, DEADLINE)
+            let client = kyomi_mcp_client::pinned_client(&host, &addresses, CONNECT_TIMEOUT, self.deadline)
                 .map_err(|_| WebError::Upstream("could not build the HTTP client".into()))?
                 .build()
                 .map_err(|e| WebError::Upstream(e.to_string()))?;
@@ -205,7 +209,7 @@ impl WebFetchProvider for BuiltinFetcher {
     }
 
     async fn fetch(&self, request: &FetchRequest) -> Result<FetchedPage, WebError> {
-        tokio::time::timeout(DEADLINE + Duration::from_secs(5), self.fetch_inner(request))
+        tokio::time::timeout(self.deadline + Duration::from_secs(5), self.fetch_inner(request))
             .await
             .map_err(|_| WebError::Timeout)?
     }
@@ -378,10 +382,9 @@ mod tests {
         f
     }
 
-    /// An origin that accepts the connection and never answers. The clock is paused,
-    /// so the 20 second deadline elapses in virtual time (the runtime advances it
-    /// when everything is idle) instead of making the test wait.
-    #[tokio::test(start_paused = true)]
+    /// An origin that accepts the connection and never answers: the fetch ends in a
+    /// timeout at its deadline (shortened here; production uses [`DEADLINE`], 20 s).
+    #[tokio::test]
     async fn an_origin_that_never_answers_ends_in_a_timeout_at_the_deadline() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -391,11 +394,14 @@ mod tests {
                 sockets.push(sock);
             }
         });
-        let started = tokio::time::Instant::now();
-        let err = loopback_fetcher().fetch(&req(&format!("http://{addr}/"))).await.unwrap_err();
+        let mut fetcher = loopback_fetcher();
+        fetcher.deadline = Duration::from_millis(300);
+        let started = std::time::Instant::now();
+        let err = fetcher.fetch(&req(&format!("http://{addr}/"))).await.unwrap_err();
         assert!(matches!(err, WebError::Timeout), "{err:?}");
         let waited = started.elapsed();
-        assert!(waited >= DEADLINE && waited <= DEADLINE + Duration::from_secs(5), "ended at the deadline, not before or long after: {waited:?}");
+        assert!(waited >= Duration::from_millis(300) && waited < Duration::from_secs(5), "ended at the deadline: {waited:?}");
+        assert_eq!(DEADLINE, Duration::from_secs(20), "the production deadline is the 20 seconds the ticket sets");
         held.abort();
     }
 

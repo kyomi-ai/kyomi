@@ -2806,6 +2806,18 @@ async fn insert_in_progress_assistant_placeholder(
     Ok(())
 }
 
+/// What [`finalize_assistant_placeholder`] writes into the placeholder.
+#[derive(Clone, Copy)]
+pub struct PlaceholderResult<'a> {
+    pub content: &'a str,
+    pub tool_call_id: Option<&'a str>,
+    pub tool_name: Option<&'a str>,
+    pub tool_calls: Option<&'a serde_json::Value>,
+    /// The provider's verbatim blocks for the text, written in the same
+    /// transaction (KYO-969).
+    pub provider_content: Option<&'a serde_json::Value>,
+}
+
 /// Finalize a pre-inserted assistant placeholder row with the agent's real
 /// first-class message fields (KYO-493).
 ///
@@ -2825,18 +2837,6 @@ async fn insert_in_progress_assistant_placeholder(
 /// finalizes `status` itself — through [`update_message`] — after this call
 /// returns. Returns whether a row was actually updated, mirroring
 /// [`update_message`]'s return contract.
-/// What [`finalize_assistant_placeholder`] writes into the placeholder.
-#[derive(Clone, Copy)]
-pub struct PlaceholderResult<'a> {
-    pub content: &'a str,
-    pub tool_call_id: Option<&'a str>,
-    pub tool_name: Option<&'a str>,
-    pub tool_calls: Option<&'a serde_json::Value>,
-    /// The provider's verbatim blocks for the text, written in the same
-    /// transaction (KYO-969).
-    pub provider_content: Option<&'a serde_json::Value>,
-}
-
 pub async fn finalize_assistant_placeholder(
     db: &DbPool,
     encryption_key: &[u8; 32],
