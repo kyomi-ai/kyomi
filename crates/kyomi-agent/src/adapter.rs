@@ -202,6 +202,8 @@ pub struct DurableRun {
 impl Default for AssistantMessagePersistence {
     /// `AdapterInserts` under a freshly minted id: no pre-inserted row. The
     /// id travels with the variant, so there is no "no id" state (KYO-976).
+    /// Same value as [`AssistantMessagePersistence::adapter_inserts_with_new_id`],
+    /// which call sites that name the choice explicitly (watch, Slack) use.
     fn default() -> Self {
         Self::adapter_inserts_with_new_id()
     }

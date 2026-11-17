@@ -41,6 +41,27 @@ async fn fake_llm() -> wiremock::MockServer {
     .await
 }
 
+fn fake_llm_app_config(llm: &wiremock::MockServer) -> Arc<kyomi_core::Config> {
+    let mut app_config = kyomi_core::Config::test_config();
+    app_config.self_hosted = false;
+    app_config.llm_provider = Some("openai".into());
+    app_config.llm_api_key = Some("test-key".into());
+    app_config.llm_model = Some("fake-model".into());
+    app_config.llm_base_url = Some(llm.uri());
+    Arc::new(app_config)
+}
+
+/// The id of the first event that has stored full text.
+fn full_text_event_id(assistant: &chat_service::MessageItem) -> String {
+    assistant
+        .thinking_events
+        .iter()
+        .find(|e| e.get("has_full_text").and_then(|v| v.as_bool()) == Some(true))
+        .and_then(|e| e["event_id"].as_str())
+        .expect("a reasoning event with full text")
+        .to_string()
+}
+
 struct Run {
     _llm: wiremock::MockServer,
     db: kyomi_core::DbPool,
@@ -64,14 +85,8 @@ async fn run_watch_turn(config_for: impl FnOnce(&str) -> AgentExecutionConfig) -
     .await
     .expect("create watch session");
 
-    let mut app_config = kyomi_core::Config::test_config();
-    app_config.self_hosted = false;
-    app_config.llm_provider = Some("openai".into());
-    app_config.llm_api_key = Some("test-key".into());
-    app_config.llm_model = Some("fake-model".into());
     let llm = fake_llm().await;
-    app_config.llm_base_url = Some(llm.uri());
-    let app_config = Arc::new(app_config);
+    let app_config = fake_llm_app_config(&llm);
 
     let kv = kyomi_core::kv_store_memory::InMemoryKVStore::new_pool();
     let embedding = kyomi_embed::LazyEmbedding::new();
@@ -142,18 +157,13 @@ async fn watch_turn_stores_full_reasoning_text_retrievable_by_message_id() {
         .iter()
         .find(|m| m.message_type == "assistant")
         .expect("assistant row was saved");
-    let event = assistant
-        .thinking_events
-        .iter()
-        .find(|e| e.get("has_full_text").and_then(|v| v.as_bool()) == Some(true))
-        .expect("a reasoning event with full text");
-    let event_id = event["event_id"].as_str().expect("event_id");
+    let event_id = full_text_event_id(assistant);
 
     let full = chat_service::get_thinking_event_detail(
         &run.db,
         &KEY,
         &assistant.message_id,
-        event_id,
+        &event_id,
         "user-a",
         "ws-1",
     )
@@ -216,13 +226,7 @@ async fn execute_watch_inner_attaches_the_trace_to_the_saved_assistant_row() {
     .await
     .expect("create execution");
 
-    let mut app_config = kyomi_core::Config::test_config();
-    app_config.self_hosted = false;
-    app_config.llm_provider = Some("openai".into());
-    app_config.llm_api_key = Some("test-key".into());
-    app_config.llm_model = Some("fake-model".into());
-    app_config.llm_base_url = Some(llm.uri());
-    let app_config = Arc::new(app_config);
+    let app_config = fake_llm_app_config(&llm);
     let kv = kyomi_core::kv_store_memory::InMemoryKVStore::new_pool();
     let embedding = kyomi_embed::EmbeddingService::new().expect("load embedding model");
     let ws_manager = kyomi_auth::websocket::WebSocketManager::new(None, db.clone());
@@ -252,14 +256,9 @@ async fn execute_watch_inner_attaches_the_trace_to_the_saved_assistant_row() {
         !assistant.thinking_events.is_empty(),
         "the assistant row's thinking_events must not be empty"
     );
-    let event_id = assistant
-        .thinking_events
-        .iter()
-        .find(|e| e.get("has_full_text").and_then(|v| v.as_bool()) == Some(true))
-        .and_then(|e| e["event_id"].as_str())
-        .expect("a reasoning event with full text");
+    let event_id = full_text_event_id(assistant);
     let full = chat_service::get_thinking_event_detail(
-        &db, &KEY, &assistant.message_id, event_id, "user-a", "ws-1",
+        &db, &KEY, &assistant.message_id, &event_id, "user-a", "ws-1",
     )
     .await
     .expect("detail lookup")
