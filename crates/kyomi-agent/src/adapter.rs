@@ -857,6 +857,7 @@ async fn persist_one_new_message(
         .tool_calls
         .as_ref()
         .map(|tc| serde_json::to_value(tc).unwrap_or_default());
+    let provider_content = storable_provider_content(msg);
 
     if let Some(run) = durable_run {
         let write = kyomi_auth::conversation_events::MessageWrite {
@@ -866,6 +867,7 @@ async fn persist_one_new_message(
             tool_call_id: msg.tool_call_id.clone(),
             name: msg.name.clone(),
             tool_calls: tool_calls_json.clone(),
+            provider_content,
         };
         kyomi_auth::conversation_events::ConversationStore::new(db, encryption_key, user_id, workspace_id)
             .fenced_message(&run.conversation_id, &run.run_id, &run.lease,
@@ -888,50 +890,67 @@ async fn persist_one_new_message(
             db,
             encryption_key,
             msg.message_id.as_deref().expect("matched Some above"),
-            &msg.content,
-            msg.tool_call_id.as_deref(),
-            msg.name.as_deref(),
-            tool_calls_json.as_ref(),
+            &chat_service::PlaceholderResult {
+                content: &msg.content,
+                tool_call_id: msg.tool_call_id.as_deref(),
+                tool_name: msg.name.as_deref(),
+                tool_calls: tool_calls_json.as_ref(),
+                provider_content: provider_content.as_ref(),
+            },
         )
         .await?;
         return Ok(());
     }
 
-    chat_service::add_message(
+    chat_service::insert_message(
         db,
         encryption_key,
         session_id,
-        role,
-        &msg.content,
-        None, // metadata
-        msg.message_id.as_deref(), // use tagged ID if set, else auto-generate
-        None, // current_time_user_tz
-        // message_source: always None here — a *user*-role message
-        // reaching this branch (an AdapterPersists row — Slack, watch; or a
-        // second user turn within one CallerPersisted run, e.g.
-        // copilot/chat mid-conversation follow-ups the loop itself
-        // injects) has its content built by `agent.chat()`'s
-        // `build_metadata_prefix`, so any source/local-time annotation is
-        // already baked into `msg.content` as literal text. Recording it
-        // again in this row's own columns would make
-        // `db_message_to_agent_message` reconstruct a *second* prefix on
-        // top of the one already there the next time this row is loaded
-        // (KYO-506). Assistant/tool messages (including copilot's, which
-        // is CallerPersisted for its one user row since KYO-554) always
-        // reach this branch too, but never carry a prefix to begin with.
-        None,
-        if msg.role == MessageRole::User {
-            msg.user_id.as_deref()
-        } else {
-            None
+        &chat_service::NewMessage {
+            role,
+            content: &msg.content,
+            metadata: None,
+            // Use the tagged ID if set, else auto-generate.
+            message_id: msg.message_id.as_deref(),
+            current_time_user_tz: None,
+            // message_source: always None here — a *user*-role message
+            // reaching this branch (an AdapterPersists row — Slack, watch; or a
+            // second user turn within one CallerPersisted run, e.g.
+            // copilot/chat mid-conversation follow-ups the loop itself
+            // injects) has its content built by `agent.chat()`'s
+            // `build_metadata_prefix`, so any source/local-time annotation is
+            // already baked into `msg.content` as literal text. Recording it
+            // again in this row's own columns would make
+            // `db_message_to_agent_message` reconstruct a *second* prefix on
+            // top of the one already there the next time this row is loaded
+            // (KYO-506). Assistant/tool messages (including copilot's, which
+            // is CallerPersisted for its one user row since KYO-554) always
+            // reach this branch too, but never carry a prefix to begin with.
+            message_source: None,
+            sent_by_user_id: if msg.role == MessageRole::User {
+                msg.user_id.as_deref()
+            } else {
+                None
+            },
+            tool_call_id: msg.tool_call_id.as_deref(),
+            tool_name: msg.name.as_deref(),
+            tool_calls: tool_calls_json.as_ref(),
+            status: chat_service::MessageStatus::Complete,
         },
-        msg.tool_call_id.as_deref(),
-        msg.name.as_deref(),
-        tool_calls_json.as_ref(),
-        chat_service::MessageStatus::Complete,
+        provider_content.as_ref(),
     )
     .await?;
     Ok(())
+}
+
+/// The blocks to store for this message: the provider's own content array, kept
+/// exactly as received, for an assistant message that has one.
+fn storable_provider_content(msg: &Message) -> Option<serde_json::Value> {
+    if msg.role != MessageRole::Assistant {
+        return None;
+    }
+    let blocks = msg.provider_content.as_ref().filter(|blocks| !blocks.is_empty())?;
+    Some(serde_json::Value::Array(blocks.clone()))
 }
 
 /// Drop the DB row already covered by `caller_persisted_id`
@@ -1000,7 +1019,7 @@ fn db_message_to_agent_message(msg: &chat_service::AgentMessage) -> Message {
             }
         }
         "assistant" => {
-            if let Some(ref tc_json) = msg.tool_calls {
+            let message = if let Some(ref tc_json) = msg.tool_calls {
                 // Parse tool_calls JSON into Vec<ToolCall>.
                 let tool_calls: Vec<ToolCall> = serde_json::from_value(tc_json.clone())
                     .unwrap_or_default();
@@ -1011,7 +1030,11 @@ fn db_message_to_agent_message(msg: &chat_service::AgentMessage) -> Message {
                 }
             } else {
                 Message::assistant(&msg.content)
-            }
+            };
+            // KYO-969: the provider's own blocks for a server-tool turn, replayed
+            // exactly as stored; a message without a stored row has none.
+            let blocks = msg.provider_content.as_ref().and_then(|value| value.as_array().cloned());
+            message.with_provider_content(blocks)
         }
         "tool" => Message::tool_result(
             msg.tool_call_id.as_deref().unwrap_or(""),
@@ -1031,6 +1054,9 @@ fn db_message_to_agent_message(msg: &chat_service::AgentMessage) -> Message {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+mod provider_content_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -1046,6 +1072,7 @@ mod tests {
             sent_by_user_id: None,
             current_time_user_tz: None,
             message_source: None,
+            provider_content: None,
         };
         let result = db_message_to_agent_message(&msg);
         assert_eq!(result.role, MessageRole::User);
@@ -1064,6 +1091,7 @@ mod tests {
             sent_by_user_id: None,
             current_time_user_tz: None,
             message_source: None,
+            provider_content: None,
         };
         let result = db_message_to_agent_message(&msg);
         assert_eq!(result.role, MessageRole::Assistant);
@@ -1088,6 +1116,7 @@ mod tests {
             sent_by_user_id: None,
             current_time_user_tz: None,
             message_source: None,
+            provider_content: None,
         };
         let result = db_message_to_agent_message(&msg);
         assert_eq!(result.role, MessageRole::Assistant);
@@ -1108,6 +1137,7 @@ mod tests {
             sent_by_user_id: None,
             current_time_user_tz: None,
             message_source: None,
+            provider_content: None,
         };
         let result = db_message_to_agent_message(&msg);
         assert_eq!(result.role, MessageRole::Tool);
@@ -1127,6 +1157,7 @@ mod tests {
             sent_by_user_id: None,
             current_time_user_tz: None,
             message_source: None,
+            provider_content: None,
         };
         let result = db_message_to_agent_message(&msg);
         assert_eq!(result.role, MessageRole::System);
@@ -1144,6 +1175,7 @@ mod tests {
             sent_by_user_id: None,
             current_time_user_tz: None,
             message_source: None,
+            provider_content: None,
         };
         let result = db_message_to_agent_message(&msg);
         // Falls back to user.
@@ -1166,6 +1198,7 @@ mod tests {
             sent_by_user_id: None,
             current_time_user_tz: None,
             message_source: None,
+            provider_content: None,
         };
         let result = db_message_to_agent_message(&msg);
         assert_eq!(result.role, MessageRole::Assistant);
@@ -1190,6 +1223,7 @@ mod tests {
             sent_by_user_id: None,
             current_time_user_tz: None,
             message_source: None,
+            provider_content: None,
         };
         let result = db_message_to_agent_message(&msg);
         assert_eq!(result.role, MessageRole::Assistant);
@@ -1213,6 +1247,7 @@ mod tests {
             sent_by_user_id: None,
             current_time_user_tz: None,
             message_source: None,
+            provider_content: None,
         };
         let result = db_message_to_agent_message(&msg);
         assert_eq!(result.role, MessageRole::Tool);
@@ -1237,6 +1272,7 @@ mod tests {
             sent_by_user_id: None,
             current_time_user_tz: None,
             message_source: None,
+            provider_content: None,
         };
         let result = db_message_to_agent_message(&msg);
         assert_eq!(result.role, MessageRole::User);
@@ -1271,6 +1307,7 @@ mod tests {
             sent_by_user_id: None,
             current_time_user_tz: Some("2026-08-23T09:00:00+00:00".into()),
             message_source: Some("web".into()),
+            provider_content: None,
         };
         let result = db_message_to_agent_message(&msg);
         assert_eq!(result.role, MessageRole::User);
@@ -1300,6 +1337,7 @@ mod tests {
             sent_by_user_id: None,
             current_time_user_tz: Some("2026-08-23T09:00:00+00:00".into()),
             message_source: None,
+            provider_content: None,
         };
         let result = db_message_to_agent_message(&msg);
         assert_eq!(
@@ -1325,6 +1363,7 @@ mod tests {
             sent_by_user_id: None,
             current_time_user_tz: None,
             message_source: Some("slack".into()),
+            provider_content: None,
         };
         let result = db_message_to_agent_message(&msg);
         assert_eq!(
@@ -1350,6 +1389,7 @@ mod tests {
             sent_by_user_id: None,
             current_time_user_tz: None,
             message_source: None,
+            provider_content: None,
         };
         let result = db_message_to_agent_message(&msg);
         assert_eq!(result.content, "what was Q4 revenue");
@@ -1367,6 +1407,7 @@ mod tests {
             sent_by_user_id: Some("user-abc-12345678".into()),
             current_time_user_tz: None,
             message_source: None,
+            provider_content: None,
         };
         let result = db_message_to_agent_message(&msg);
         assert_eq!(result.role, MessageRole::User);
@@ -1385,6 +1426,7 @@ mod tests {
             sent_by_user_id: None,
             current_time_user_tz: None,
             message_source: None,
+            provider_content: None,
         };
         let result = db_message_to_agent_message(&msg);
         assert_eq!(result.role, MessageRole::User);
@@ -1407,6 +1449,7 @@ mod tests {
             sent_by_user_id: None,
             current_time_user_tz: None,
             message_source: None,
+            provider_content: None,
         };
         let result = db_message_to_agent_message(&msg);
         assert_eq!(result.role, MessageRole::Assistant);
@@ -1516,6 +1559,7 @@ mod tests {
             sent_by_user_id: None,
             current_time_user_tz: None,
             message_source: None,
+            provider_content: None,
         };
         let result = db_message_to_agent_message(&msg);
         // Falls back to user since "Assistant" != "assistant".
@@ -1535,6 +1579,7 @@ mod tests {
             sent_by_user_id: None,
             current_time_user_tz: None,
             message_source: None,
+            provider_content: None,
         };
         let result = db_message_to_agent_message(&msg);
         assert_eq!(result.role, MessageRole::User);
@@ -1653,7 +1698,7 @@ mod tests {
 
     // -- Contract: drop_pre_persisted_message (KYO-492) -----------------------
 
-    fn agent_message(message_id: &str, role: &str, content: &str) -> chat_service::AgentMessage {
+    pub(super) fn agent_message(message_id: &str, role: &str, content: &str) -> chat_service::AgentMessage {
         chat_service::AgentMessage {
             message_id: message_id.into(),
             role: role.into(),
@@ -1664,6 +1709,7 @@ mod tests {
             sent_by_user_id: None,
             current_time_user_tz: None,
             message_source: None,
+            provider_content: None,
         }
     }
 
@@ -2275,7 +2321,7 @@ mod tests {
 
     /// Legacy CallerPreInserted compatibility uses an ordinary placeholder,
     /// with no journal run. Durable fixtures must never use this variant.
-    async fn dispatch_chat_turn(
+    pub(super) async fn dispatch_chat_turn(
         db: &kyomi_core::DbPool,
         key: &Arc<[u8; 32]>,
         session_id: &str,
@@ -2295,7 +2341,7 @@ mod tests {
         (UserMessagePersistence::CallerPersisted(user_id), AssistantMessagePersistence::CallerPreInserted(assistant_id))
     }
 
-    async fn claim_durable_turn(
+    pub(super) async fn claim_durable_turn(
         db: &kyomi_core::DbPool,
         key: &Arc<[u8; 32]>,
         session_id: &str,
@@ -4198,5 +4244,4 @@ mod tests {
         assert_eq!(calls.len(),5);
         assert!(calls[3].messages.iter().filter(|message| message.role == crate::types::MessageRole::Tool).all(|message| message.content.starts_with("Error: Workspace admin access required")));
     }
-
 }

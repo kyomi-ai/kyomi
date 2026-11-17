@@ -269,6 +269,9 @@ pub struct Config {
     /// `LLM_WATCH_BATCH_ON_FAILURE`. See [`crate::watch_llm`].
     pub llm_watch: crate::watch_llm::WatchLlmSettings,
 
+    /// Web search / web fetch backends and caps (KYO-969). See [`crate::web_tools`].
+    pub web_tools: crate::web_tools::WebToolsSettings,
+
     // ── Stripe ──────────────────────────────────────────────────────────
     /// Stripe secret key (sk_test_ or sk_live_).
     /// Optional — server starts without it (no billing features).
@@ -514,6 +517,8 @@ impl Config {
             llm_sampling: llm_sampling_from_env(),
             llm_watch: crate::watch_llm::watch_llm_from_env(|k| env::var(k).ok())
                 .unwrap_or_else(|e| panic!("{e}")),
+
+            web_tools: crate::web_tools::WebToolsSettings::from_env(),
             stripe_secret_key: env::var("STRIPE_SECRET_KEY").ok(),
             stripe_publishable_key: env::var("STRIPE_PUBLISHABLE_KEY").ok(),
             stripe_webhook_secret: env::var("STRIPE_WEBHOOK_SECRET").ok(),
@@ -599,6 +604,8 @@ impl Config {
             llm_title_model: None,
             llm_sampling: crate::llm_sampling::LlmSamplingSettings::default(),
             llm_watch: crate::watch_llm::WatchLlmSettings::default(),
+
+            web_tools: crate::web_tools::WebToolsSettings::default(),
             stripe_secret_key: None,
             stripe_publishable_key: None,
             stripe_webhook_secret: None,

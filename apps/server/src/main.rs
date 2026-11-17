@@ -89,6 +89,13 @@ async fn serve() {
         panic!("{e}");
     }
 
+    // Web search / fetch backends must be compatible with the LLM provider
+    // (KYO-969). Fail fast with a clear message rather than a 400 at runtime.
+    if let Err(e) = kyomi_agent::web::validate_startup(&config) {
+        eprintln!("FATAL: invalid web search/fetch configuration: {e}");
+        std::process::exit(1);
+    }
+
     // Derive encryption key at startup (fail fast if misconfigured)
     let encryption_key = kyomi_auth::encryption::derive_key(&config.encryption_key)
         .expect("ENCRYPTION_KEY must be a valid 32-byte base64url-encoded key");

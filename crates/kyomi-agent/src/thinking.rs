@@ -40,6 +40,9 @@ pub const TOOL_FRIENDLY_NAMES: &[(&str, &str)] = &[
     ("estimate_query_cost", "Estimating query costs"),
     ("forecast_data", "Generating forecast"),
     ("get_workspace_info", "Getting workspace info"),
+    // Web access (KYO-969)
+    ("web_search", "Searching the web"),
+    ("web_fetch", "Reading a web page"),
     // Dashboards
     ("search_dashboards", "Searching dashboards"),
     ("get_dashboard_info", "Getting dashboard details"),

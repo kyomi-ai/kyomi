@@ -8,7 +8,7 @@ mod sse;
 pub use client::{McpClient, RejectedTool, Revision, RpcOutcome, ToolCatalog, ToolRejectionReason};
 pub use http::{
     DeploymentPolicy, HttpRequest, HttpResponse, HttpTransport, Resolver, SafeHttpClient,
-    SystemResolver, is_public_address,
+    SystemResolver, is_public_address, peer_is_pinned, pinned_client, validated_addresses,
 };
 use std::time::Duration;
 

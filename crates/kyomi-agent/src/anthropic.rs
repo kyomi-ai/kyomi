@@ -134,7 +134,15 @@ impl AnthropicClient {
                 }
 
                 MessageRole::Assistant => {
-                    if let Some(tool_calls) = &msg.tool_calls {
+                    if let Some(blocks) = &msg.provider_content {
+                        // Server-tool turn: replay the provider's own content
+                        // array byte-for-byte (encrypted_content / encrypted_index
+                        // must not change). It already contains any tool_use blocks.
+                        anthropic_messages.push(json!({
+                            "role": "assistant",
+                            "content": blocks
+                        }));
+                    } else if let Some(tool_calls) = &msg.tool_calls {
                         // Assistant message with tool calls: content array with
                         // text block (if non-empty) + tool_use blocks.
                         let mut content_blocks: Vec<serde_json::Value> = Vec::new();
@@ -232,8 +240,13 @@ impl AnthropicClient {
             body["system"] = system;
         }
 
-        if !tools.is_empty() {
-            body["tools"] = json!(Self::convert_tools_to_anthropic(tools));
+        if !tools.is_empty() || !options.server_tools.is_empty() {
+            let mut entries = Self::convert_tools_to_anthropic(tools);
+            // Server tools go before the function tools so the cache marker
+            // `convert_tools_to_anthropic` puts on the last function tool stays last.
+            let mut all = options.server_tools.clone();
+            all.append(&mut entries);
+            body["tools"] = json!(all);
         }
 
         if let Some(temp) = options.temperature {
@@ -396,7 +409,7 @@ impl AnthropicClient {
     }
 
     /// Parse the Anthropic API JSON response into an [`LLMResponse`].
-    fn parse_response(
+    pub(crate) fn parse_response(
         model: &str,
         response: &serde_json::Value,
     ) -> kyomi_core::Result<LLMResponse> {
@@ -1387,5 +1400,54 @@ mod reasoning_usage_tests {
     fn missing_details_means_zero_thinking_tokens() {
         let usage = AnthropicClient::parse_usage(&serde_json::json!({"usage": {"output_tokens": 5}}));
         assert_eq!(usage.reasoning_tokens, 0);
+    }
+
+    // -- provider-executed web tools (KYO-969) ----------------------------
+
+    #[test]
+    fn server_tools_are_added_to_the_request_before_function_tools() {
+        let options = RequestOptions::new(1000).with_server_tools(vec![
+            json!({"type": "web_search_20250305", "name": "web_search", "max_uses": 5}),
+        ]);
+        let tools = [Tool { name: "noop".into(), description: "d".into(), parameters: json!({"type": "object"}) }];
+        let body = AnthropicClient::build_request_body("m", None, vec![], &tools, &options);
+        let sent = body["tools"].as_array().unwrap();
+        assert_eq!(sent[0], json!({"type": "web_search_20250305", "name": "web_search", "max_uses": 5}));
+        assert_eq!(sent[1]["name"], "noop");
+        assert_eq!(sent[1]["cache_control"], json!({"type": "ephemeral"}), "cache marker stays on the last tool");
+        // Server tools alone are enough to send a `tools` key.
+        let only = AnthropicClient::build_request_body("m", None, vec![], &[], &options);
+        assert_eq!(only["tools"].as_array().unwrap().len(), 1);
+        // And with none configured the body is unchanged.
+        let none = AnthropicClient::build_request_body("m", None, vec![], &[], &RequestOptions::new(1000));
+        assert!(none.get("tools").is_none());
+    }
+
+    #[test]
+    fn server_tool_blocks_round_trip_unmodified_through_message_storage_and_replay() {
+        let raw = crate::web::server_tools::tests_support::search_response_with_stop("end_turn");
+        // Response -> raw payload keeps everything.
+        let parsed = AnthropicClient::parse_response("m", &raw).unwrap();
+        assert_eq!(parsed.raw_response, raw);
+        assert_eq!(parsed.content, "I'll search for that.Rust is great.");
+        // The agent stores the verbatim blocks on the assistant message ...
+        let blocks = crate::web::server_tools::parse_anthropic(&parsed.raw_response).provider_content;
+        let stored = Message::assistant(&parsed.content).with_provider_content(blocks);
+        // ... which survives serialisation (storage) ...
+        let restored: Message = serde_json::from_str(&serde_json::to_string(&stored).unwrap()).unwrap();
+        // ... and is replayed byte-for-byte, encrypted fields included.
+        let (_, messages) = AnthropicClient::convert_messages_to_anthropic(&[Message::user("q"), restored], &HashMap::new());
+        assert_eq!(messages[1]["role"], "assistant");
+        assert_eq!(messages[1]["content"], raw["content"]);
+        assert_eq!(messages[1]["content"][2]["content"][0]["encrypted_content"], "ENC-A==");
+        assert_eq!(messages[1]["content"][3]["citations"][0]["encrypted_index"], "IDX==");
+    }
+
+    #[test]
+    fn ordinary_assistant_messages_are_converted_as_before() {
+        let msg = Message::assistant("plain");
+        assert!(msg.provider_content.is_none());
+        let (_, messages) = AnthropicClient::convert_messages_to_anthropic(&[msg], &HashMap::new());
+        assert_eq!(messages[0]["content"], "plain");
     }
 }

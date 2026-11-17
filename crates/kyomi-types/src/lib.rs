@@ -7,6 +7,7 @@ pub mod feedback;
 pub mod permission;
 pub mod sync;
 pub mod text;
+pub mod web_text;
 pub mod websocket;
 pub use billing::{BillingLapseReason, PAYMENT_REQUIRED_CODE};
 pub use datasource_contracts::{

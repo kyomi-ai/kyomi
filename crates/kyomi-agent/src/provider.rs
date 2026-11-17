@@ -44,17 +44,28 @@ pub struct RequestOptions {
     pub reasoning_effort: Option<String>,
     /// Maximum tokens to generate (reasoning tokens count against it).
     pub max_tokens: u32,
+    /// Provider-executed server tools to add to the request (web search /
+    /// fetch, KYO-969), already in the provider's wire shape. Empty for every
+    /// ordinary call. Adapters that cannot run them ignore the field; startup
+    /// validation prevents pairing such a provider with a server-tool backend.
+    pub server_tools: Vec<serde_json::Value>,
 }
 
 impl RequestOptions {
     /// Options with no temperature and no reasoning effort.
     pub fn new(max_tokens: u32) -> Self {
-        Self { temperature: None, reasoning_effort: None, max_tokens }
+        Self { temperature: None, reasoning_effort: None, max_tokens, server_tools: Vec::new() }
     }
 
     /// Builder: set the temperature.
     pub fn with_temperature(mut self, temperature: Option<f32>) -> Self {
         self.temperature = temperature;
+        self
+    }
+
+    /// Builder: set the provider-executed server tools.
+    pub fn with_server_tools(mut self, server_tools: Vec<serde_json::Value>) -> Self {
+        self.server_tools = server_tools;
         self
     }
 
@@ -412,10 +423,12 @@ pub fn create_provider_from_workspace(
     create_provider(resolve_workspace_provider_config(ws_config, fallback_config)?)
 }
 
-/// The [`LLMProviderConfig`] [`create_provider_from_workspace`] builds from,
-/// exposed so a caller that needs a different model on the same connection
-/// (watches, KYO-973) overrides the model instead of re-deriving the
-/// SaaS / Kyomi / BYOK connection rules.
+/// The provider configuration [`create_provider_from_workspace`] builds the
+/// client from. Public so other code that depends on *which* provider and base
+/// URL are in effect for a workspace asks the same function instead of
+/// re-deriving the rule: whether a provider-executed web backend can run, and
+/// watches, which override only the model on the same connection (KYO-973)
+/// rather than re-deriving the SaaS / Kyomi / BYOK connection rules.
 pub fn resolve_workspace_provider_config(
     ws_config: &kyomi_auth::workspace_ai_config::WorkspaceAiConfig,
     fallback_config: &kyomi_core::Config,
