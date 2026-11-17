@@ -431,3 +431,38 @@ async fn the_non_durable_usage_insert_round_trips_on_postgres() {
     sqlx::query("DELETE FROM workspaces WHERE workspace_id=$1").bind(&workspace).execute(pg).await.unwrap();
     sqlx::query("DELETE FROM users WHERE user_id=$1").bind(&user).execute(pg).await.unwrap();
 }
+
+/// A `bill` future dropped mid-write (here: stuck waiting for the only database connection)
+/// puts its calls back in the ledger instead of losing them, and a later bill writes them once.
+#[tokio::test]
+async fn a_bill_dropped_mid_write_keeps_its_calls_for_the_next_bill() {
+    let db = kyomi_test_db::test_pool().await; // a single-connection pool
+    let DbPool::Sqlite(sq) = &db else { panic!("sqlite fixture") };
+    kyomi_test_db::seed_user(sq, "u1", "u1@example.com").await;
+    kyomi_test_db::seed_workspace(sq, "w1", "u1").await;
+    let client = metered("claude-sonnet-5-5", response(100));
+    call(&client).await;
+    let ledger = client.ledger();
+    let ctx = |db| BillingContext {
+        db,
+        user_id: "u1",
+        workspace_id: "w1",
+        session_id: None,
+        component: "custom_agent",
+        provider: "anthropic",
+        model: "claude-sonnet-5-5",
+        is_byok: false,
+        durable: None,
+    };
+
+    let held = sq.acquire().await.unwrap(); // the write cannot get a connection
+    let stuck = tokio::time::timeout(std::time::Duration::from_millis(100), ledger.bill(&ctx(&db))).await;
+    assert!(stuck.is_err(), "the bill is still waiting when it is dropped");
+    assert!(!ledger.is_empty(), "the dropped bill's calls are back in the ledger");
+    drop(held);
+    assert!(usage_rows(&db).await.is_empty(), "nothing was written");
+
+    ledger.bill(&ctx(&db)).await.unwrap();
+    assert_eq!(usage_rows(&db).await.len(), 1, "written exactly once by the next bill");
+    assert!(ledger.is_empty());
+}

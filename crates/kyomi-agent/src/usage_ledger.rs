@@ -365,6 +365,11 @@ impl BillingSlot {
 /// Calls taken out of a ledger for billing. If the billing future is dropped before it
 /// finishes (shutdown abort, panic) or the write is refused, the calls go back into the
 /// ledger rather than vanishing, so whoever owns the ledger next still sees them.
+///
+/// The trade-off is at-least-once: a future dropped after the row committed but before
+/// `settled` restores calls that were in fact written. A durable run cannot double-bill
+/// (`fenced_api_usage` writes at most one row per run id); a non-durable bill has no such
+/// key, but a drop in that tiny window is far less costly than a lost row.
 struct Taken<'a> {
     ledger: &'a UsageLedger,
     calls: Option<Vec<CallRecord>>,
