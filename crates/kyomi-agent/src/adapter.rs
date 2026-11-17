@@ -173,9 +173,11 @@ pub enum AssistantMessagePersistence {
     /// placeholder, see `kyomi_auth::copilot_service::prepare_copilot_message`),
     /// Slack, and watch execution. `Some(id)` stamps the row with a
     /// caller-chosen id (kept in sync with the id already used for
-    /// WebSocket streaming / thinking-tracker attribution); `None` lets the
-    /// database layer generate one.
-    AdapterInserts(Option<String>),
+    /// WebSocket streaming / thinking-tracker attribution). The id is
+    /// mandatory (KYO-976): the thinking tracker, the terminal metadata write
+    /// and the full-text rows are all keyed by it, so the row must be saved
+    /// under exactly this id.
+    AdapterInserts(String),
     /// The caller already INSERTed an empty placeholder row for this id
     /// before the agent ran, with `status = 'in_progress'` (KYO-493 —
     /// `kyomi_auth::chat_service::prepare_chat_dispatch`).
@@ -199,17 +201,19 @@ pub struct DurableRun {
 }
 
 impl Default for AssistantMessagePersistence {
-    /// `AdapterInserts(None)` — no pre-inserted row, no caller-chosen id.
-    /// Pre-KYO-493 behaviour: the adapter both generates and inserts the
-    /// message id itself.
+    /// `AdapterInserts` under a freshly minted id. The id travels with the
+    /// variant, so whoever reads the persistence (tracker, terminal metadata
+    /// write, full-text rows) and the adapter that inserts the row always see
+    /// the same one — there is no "no id" state (KYO-976).
     fn default() -> Self {
-        Self::AdapterInserts(None)
+        Self::AdapterInserts(uuid::Uuid::new_v4().to_string())
     }
 }
 
 impl AssistantMessagePersistence {
-    /// The id to stamp on the final assistant message in agent state, if
-    /// any — fires for either variant whenever a concrete id is available.
+    /// The id to stamp on the final assistant message in agent state. Every
+    /// variant carries one, so this is always `Some`; it stays an `Option`
+    /// only for the call sites that already handle the tagged/untagged case.
     /// This is what keeps the id used for WebSocket streaming / the
     /// thinking tracker in sync with the id ultimately written to the DB.
     ///
@@ -218,7 +222,7 @@ impl AssistantMessagePersistence {
     /// `AgentExecutionResult`, before `ChatParams` is even built.
     pub(crate) fn tag_id(&self) -> Option<&str> {
         match self {
-            Self::AdapterInserts(id) => id.as_deref(),
+            Self::AdapterInserts(id) => Some(id.as_str()),
             Self::CallerPreInserted(id) => Some(id.as_str()),
             Self::Durable { message_id, .. } => Some(message_id.as_str()),
         }
@@ -2056,10 +2060,10 @@ mod tests {
         // prepare_copilot_message already wrote.
         let persistence = UserMessagePersistence::CallerPersisted(prep.user_message_id.clone());
         // Exactly the persistence choice send_copilot_message configures:
-        // AdapterInserts(Some(id)) — copilot mints the assistant id but
+        // AdapterInserts(id) — copilot mints the assistant id but
         // (KYO-572) deliberately never pre-inserts a placeholder for it.
         let assistant_persistence =
-            AssistantMessagePersistence::AdapterInserts(Some(prep.assistant_message_id.clone()));
+            AssistantMessagePersistence::AdapterInserts(prep.assistant_message_id.clone());
         adapter
             .chat(ChatParams {
                 message: &prep.user_message,
@@ -2158,7 +2162,7 @@ mod tests {
 
         let persistence = UserMessagePersistence::CallerPersisted(prep.user_message_id.clone());
         let assistant_persistence =
-            AssistantMessagePersistence::AdapterInserts(Some(prep.assistant_message_id.clone()));
+            AssistantMessagePersistence::AdapterInserts(prep.assistant_message_id.clone());
         adapter
             .chat(ChatParams {
                 message: &prep.user_message,
@@ -2749,7 +2753,9 @@ mod tests {
                 message_source: Some("Kyomi Watch"),
                 user_id: Some("user-a"),
                 user_message_persistence: &watch_dispatch.user_message_persistence,
-                assistant_message_persistence: &AssistantMessagePersistence::AdapterInserts(None),
+                assistant_message_persistence: &AssistantMessagePersistence::AdapterInserts(
+                    uuid::Uuid::new_v4().to_string(),
+                ),
             })
             .await
             .expect("chat() should succeed");
@@ -3200,7 +3206,7 @@ mod tests {
 
         let user_persistence = UserMessagePersistence::AdapterPersists(None);
         let assistant_persistence =
-            AssistantMessagePersistence::AdapterInserts(Some(assistant_message_id.clone()));
+            AssistantMessagePersistence::AdapterInserts(assistant_message_id.clone());
 
         let result = adapter
             .chat(ChatParams {

@@ -2081,6 +2081,73 @@ pub async fn bulk_mark_alerts_unread(
     Ok(count)
 }
 
+// ─── Thinking trace of an execution ──────────────────────────────────────────
+
+/// The thinking events saved on a watch execution session's assistant
+/// message, with the id of that message (KYO-976). The id is what
+/// `get_thinking_event_detail` needs to fetch an event's full reasoning text.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SessionThinkingTrace {
+    pub message_id: String,
+    pub events: Vec<serde_json::Value>,
+}
+
+/// The first assistant message of `session_id` that carries thinking events.
+///
+/// `chat_service::get_session_messages` filters only on `session_id`, so the
+/// caller must already have authorised access to the session (see the notes
+/// in [`create_chat_session_from_alert`]).
+pub async fn load_session_thinking_trace(
+    db: &DbPool,
+    encryption_key: &[u8; 32],
+    session_id: &str,
+) -> Result<Option<SessionThinkingTrace>> {
+    let messages = chat_service::get_session_messages(db, encryption_key, session_id, 1000).await?;
+    Ok(messages
+        .into_iter()
+        .find(|m| m.message_type == "assistant" && !m.thinking_events.is_empty())
+        .map(|m| SessionThinkingTrace {
+            message_id: m.message_id,
+            events: m.thinking_events,
+        }))
+}
+
+/// Thinking events of an execution for the log viewer. `message_id` is `None`
+/// only for old executions whose events were stored on `execution_trace`:
+/// they have no message row and so no full-text details.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExecutionThinkingEvents {
+    pub message_id: Option<String>,
+    pub events: Vec<serde_json::Value>,
+}
+
+/// Load the thinking events of `execution` (already authorised by the
+/// caller). Errors loading the session's messages are returned, not hidden.
+pub async fn get_execution_thinking_events(
+    db: &DbPool,
+    encryption_key: &[u8; 32],
+    execution: &kyomi_core::models::WatchExecution,
+) -> Result<ExecutionThinkingEvents> {
+    if let Some(session_id) = &execution.session_id
+        && let Some(trace) = load_session_thinking_trace(db, encryption_key, session_id).await?
+    {
+        return Ok(ExecutionThinkingEvents {
+            message_id: Some(trace.message_id),
+            events: trace.events,
+        });
+    }
+
+    // Fallback for old executions that stored events in execution_trace.
+    let events = execution
+        .execution_trace
+        .as_ref()
+        .and_then(|t| t.get("events"))
+        .and_then(|e| e.as_array())
+        .cloned()
+        .unwrap_or_default();
+    Ok(ExecutionThinkingEvents { message_id: None, events })
+}
+
 // ─── Alert → Chat orchestration ───────────────────────────────────────────────
 
 /// Create a new chat session seeded with the context and results from a watch
@@ -2162,18 +2229,17 @@ pub async fn create_chat_session_from_alert(
     // other than the gated `execution` row, it must get its own ownership
     // check — do not assume get_session_messages is safe on its own.
     let mut thinking_events: Option<serde_json::Value> = None;
+    // The source assistant message, whose full-text details are copied to the
+    // new message in step 8 so "more" keeps working in the continued chat.
+    let mut source_message_id: Option<String> = None;
 
     if let Some(ref session_id) = execution.session_id {
-        match chat_service::get_session_messages(db, encryption_key, session_id, 1000).await {
-            Ok(messages) => {
-                for msg in &messages {
-                    if msg.message_type == "assistant" && !msg.thinking_events.is_empty() {
-                        thinking_events =
-                            Some(serde_json::Value::Array(msg.thinking_events.clone()));
-                        break;
-                    }
-                }
+        match load_session_thinking_trace(db, encryption_key, session_id).await {
+            Ok(Some(trace)) => {
+                thinking_events = Some(serde_json::Value::Array(trace.events));
+                source_message_id = Some(trace.message_id);
             }
+            Ok(None) => {}
             Err(e) => {
                 tracing::warn!("Failed to load thinking events from session: {e}");
             }
@@ -2240,6 +2306,7 @@ pub async fn create_chat_session_from_alert(
         .as_ref()
         .map(|events| serde_json::json!({ "thinking_events": events }));
 
+    let assistant_message_id = uuid::Uuid::new_v4().to_string();
     chat_service::add_message(
         db,
         encryption_key,
@@ -2247,7 +2314,7 @@ pub async fn create_chat_session_from_alert(
         "assistant",
         execution.agent_response.as_deref().unwrap_or(""),
         metadata.as_ref(),
-        None, // message_id
+        Some(&assistant_message_id),
         None, // current_time_user_tz
         None, // message_source
         None, // sent_by_user_id
@@ -2257,6 +2324,13 @@ pub async fn create_chat_session_from_alert(
         chat_service::MessageStatus::Complete,
     )
     .await?;
+
+    // Carry the full reasoning texts over to the new message (same workspace
+    // key, so the ciphertext is copied as is).
+    if let Some(source_message_id) = &source_message_id {
+        chat_service::copy_thinking_event_details(db, source_message_id, &assistant_message_id)
+            .await?;
+    }
 
     // 9. Persist agent state so the user can continue where the watch left off.
     if let Some(mut state_val) = agent_state {
@@ -3717,6 +3791,106 @@ mod privacy_tests {
                 .any(|m| m.content.contains("Revenue is stable this week")),
             "owner's session must contain the alert's agent_response"
         );
+    }
+
+    // ── Thinking trace of an execution (KYO-976) ────────────────────────
+
+    const LONG_REASONING: &str = "Full untruncated reasoning that is far longer than the display limit.";
+
+    /// A finished watch execution whose session holds an assistant message
+    /// with one reasoning event whose full text is stored. Returns
+    /// `(execution_id, source_message_id, event_id)`.
+    async fn seed_execution_with_trace(pool: &DbPool, watch_id: &str) -> (i32, String, String) {
+        let key = &[0u8; 32];
+        let session_id = uuid::Uuid::new_v4().to_string();
+        chat_service::create_session_with_id(
+            pool, "user-a", "ws-1", &session_id, Some("Watch: t"), "watch_execution", None,
+        )
+        .await
+        .expect("create execution session");
+
+        let event_id = "evt-reasoning-1".to_string();
+        let events = serde_json::json!([
+            {"event_id": event_id, "event_type": "agent_thought", "title": "Planning",
+             "description": "Full untruncated…", "has_full_text": true},
+            {"event_id": "evt-done", "event_type": "agent_completed", "title": "Done"},
+        ]);
+        let metadata = serde_json::json!({ "thinking_events": events });
+        let message_id = chat_service::add_message(
+            pool, key, &session_id, "assistant", "all clear", Some(&metadata), None, None, None,
+            None, None, None, None, chat_service::MessageStatus::Complete,
+        )
+        .await
+        .expect("add assistant message");
+        let texts = std::collections::HashMap::from([(event_id.clone(), LONG_REASONING.to_string())]);
+        chat_service::store_thinking_event_details(pool, key, &message_id, &texts)
+            .await
+            .expect("store full text");
+
+        let execution_id =
+            insert_triggered_alert_with_content(pool, watch_id, "user-a", "all clear", "p", "t")
+                .await;
+        let sq = sqlite_pool(pool);
+        sqlx::query("UPDATE watch_executions SET session_id = $1 WHERE id = $2")
+            .bind(&session_id)
+            .bind(execution_id)
+            .execute(sq)
+            .await
+            .expect("link session to execution");
+        (execution_id, message_id, event_id)
+    }
+
+    /// Test 3: the log viewer's source returns the assistant message id with
+    /// the non-empty events.
+    #[tokio::test]
+    async fn execution_thinking_events_carry_the_assistant_message_id() {
+        let pool = test_pool().await;
+        seed_two_users_one_workspace(sqlite_pool(&pool), "a@test.local", "b@test.local").await;
+        let watch = create_test_watch(&pool, "user-a", "Trace Watch").await;
+        let (execution_id, message_id, _) = seed_execution_with_trace(&pool, &watch.watch_id).await;
+
+        let execution = get_execution_by_id(&pool, &watch.watch_id, execution_id, "ws-1", "user-a")
+            .await
+            .expect("load execution")
+            .expect("execution exists");
+        let trace = get_execution_thinking_events(&pool, &[0u8; 32], &execution)
+            .await
+            .expect("load thinking events");
+
+        assert_eq!(trace.message_id.as_deref(), Some(message_id.as_str()));
+        assert_eq!(trace.events.len(), 2, "{:?}", trace.events);
+    }
+
+    /// Test 4: "Continue in Chat" yields an assistant message whose events and
+    /// full texts both resolve for the new message id.
+    #[tokio::test]
+    async fn continue_in_chat_keeps_thinking_events_and_full_text() {
+        let pool = test_pool().await;
+        seed_two_users_one_workspace(sqlite_pool(&pool), "a@test.local", "b@test.local").await;
+        let watch = create_test_watch(&pool, "user-a", "Trace Watch").await;
+        let (execution_id, source_message_id, event_id) =
+            seed_execution_with_trace(&pool, &watch.watch_id).await;
+        let key = &[0u8; 32];
+
+        let new_session =
+            create_chat_session_from_alert(&pool, key, "user-a", "ws-1", execution_id)
+                .await
+                .expect("continue in chat");
+
+        let trace = load_session_thinking_trace(&pool, key, &new_session)
+            .await
+            .expect("load new session trace")
+            .expect("new session has a trace");
+        assert_ne!(trace.message_id, source_message_id, "a new assistant message");
+        assert_eq!(trace.events.len(), 2);
+
+        let full = chat_service::get_thinking_event_detail(
+            &pool, key, &trace.message_id, &event_id, "user-a", "ws-1",
+        )
+        .await
+        .expect("detail lookup")
+        .expect("full text resolves for the new message id");
+        assert_eq!(full, LONG_REASONING);
     }
 
     // ── Alert mutation IDOR guards (KYO-204) ─────────────────────────────

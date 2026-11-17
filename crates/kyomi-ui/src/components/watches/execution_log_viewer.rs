@@ -158,6 +158,43 @@ fn format_timestamp(date_str: &str) -> String {
 // Component
 // ---------------------------------------------------------------------------
 
+/// A loaded thinking trace: the events plus the assistant message id that
+/// "more" needs to fetch full reasoning text.
+#[derive(Clone)]
+struct LoadedThinkingTrace {
+    events: Vec<ThinkingEvent>,
+    message_id: String,
+}
+
+/// Load the trace for the selected execution. A failure is logged and
+/// returned so the viewer can show an error state — it is never mapped to an
+/// empty trace (KYO-976).
+async fn load_thinking_trace(
+    exec: Option<WatchExecutionItem>,
+) -> Result<LoadedThinkingTrace, String> {
+    let empty = || LoadedThinkingTrace { events: Vec::new(), message_id: String::new() };
+    let Some(exec) = exec else {
+        return Ok(empty());
+    };
+    let Some(watch_id) = exec.watch_id else {
+        return Ok(empty());
+    };
+    let response = get_thinking_events(watch_id, exec.id).await.map_err(|e| {
+        leptos::logging::error!("Failed to load thinking events for execution {}: {e}", exec.id);
+        e.to_string()
+    })?;
+    let events = response
+        .events
+        .into_iter()
+        .map(serde_json::from_value::<ThinkingEvent>)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| {
+            leptos::logging::error!("Failed to parse thinking events for execution {}: {e}", exec.id);
+            e.to_string()
+        })?;
+    Ok(LoadedThinkingTrace { events, message_id: response.message_id.unwrap_or_default() })
+}
+
 /// Shows watch execution as a chat-like conversation.
 ///
 /// Displays:
@@ -277,20 +314,7 @@ pub fn ExecutionLogViewer(
     // picks a different execution run.
     let thinking_events_resource = LocalResource::new(move || {
         let exec = selected_execution.get();
-        async move {
-            let Some(exec) = exec else {
-                return Vec::<ThinkingEvent>::new();
-            };
-            let Some(watch_id) = exec.watch_id else {
-                return Vec::new();
-            };
-            match get_thinking_events(watch_id, exec.id).await {
-                Ok(json_value) => {
-                    serde_json::from_value::<Vec<ThinkingEvent>>(json_value).unwrap_or_default()
-                }
-                Err(_) => Vec::new(),
-            }
-        }
+        async move { load_thinking_trace(exec).await }
     });
 
     view! {
@@ -385,16 +409,20 @@ pub fn ExecutionLogViewer(
                                         <Transition fallback=|| ()>
                                             {move || {
                                                 Suspend::new(async move {
-                                                    let events: Vec<ThinkingEvent> = thinking_events_resource.await.to_vec();
-                                                    if events.is_empty() {
-                                                        None
-                                                    } else {
-                                                        Some(view! {
+                                                    match thinking_events_resource.await {
+                                                        Ok(trace) if trace.events.is_empty() => None,
+                                                        Ok(trace) => Some(view! {
                                                             <AgentThinking
-                                                                thinking_events=events
+                                                                thinking_events=trace.events
+                                                                message_id=trace.message_id
                                                                 is_active=false
                                                             />
-                                                        })
+                                                        }.into_any()),
+                                                        Err(_) => Some(view! {
+                                                            <div class="mb-3 p-3 bg-error/10 border border-error-border rounded-lg text-sm text-error-foreground">
+                                                                "Failed to load the agent thinking trace."
+                                                            </div>
+                                                        }.into_any()),
                                                     }
                                                 })
                                             }}

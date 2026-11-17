@@ -3093,6 +3093,48 @@ pub async fn get_thinking_event_detail(
     }
 }
 
+/// Copy every stored full-text reasoning row of `from_message_id` to
+/// `to_message_id` (KYO-976, "Continue in Chat"). The text is copied as
+/// ciphertext: both messages belong to the same workspace and so share one
+/// encryption key. Returns how many rows were copied. Any failure is an
+/// error — a half-copied trace would silently turn "more" into
+/// "Full text not available".
+pub async fn copy_thinking_event_details(
+    db: &DbPool,
+    from_message_id: &str,
+    to_message_id: &str,
+) -> kyomi_core::Result<usize> {
+    #[derive(sqlx::FromRow)]
+    struct Row {
+        event_id: String,
+        full_text: String,
+    }
+    let rows = kyomi_core::db_fetch_all!(
+        db,
+        Row,
+        "SELECT event_id, full_text FROM thinking_event_details WHERE message_id = $1",
+        from_message_id
+    )
+    .map_err(|e| kyomi_core::Error::Internal(format!("failed to read thinking details: {e}")))?;
+
+    for row in &rows {
+        let id = uuid::Uuid::new_v4().to_string();
+        kyomi_core::db_execute!(
+            db,
+            "INSERT INTO thinking_event_details (id, message_id, event_id, full_text) \
+             VALUES ($1, $2, $3, $4)",
+            &id,
+            to_message_id,
+            row.event_id.as_str(),
+            row.full_text.as_str()
+        )
+        .map_err(|e| {
+            kyomi_core::Error::Internal(format!("failed to copy thinking detail: {e}"))
+        })?;
+    }
+    Ok(rows.len())
+}
+
 // ─── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
