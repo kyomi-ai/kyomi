@@ -476,60 +476,20 @@ impl AgentTool for SucceedingTool {
 // OpenAI-compatible HTTP fake — a real network boundary for whole-turn tests
 // ---------------------------------------------------------------------------
 
-/// Serve `reply` as the body of every `POST /chat/completions` on a loopback
-/// port and return the base URL to configure as `LLM_BASE_URL`. The code
-/// under test (`execute_agent_chat`) builds its real OpenAI provider and
-/// speaks real HTTP to this server; only the remote LLM is faked.
-pub(crate) async fn spawn_openai_fake(reply: serde_json::Value) -> String {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+/// Serve `reply` as the body of every `POST /chat/completions` and return the
+/// running server; point `LLM_BASE_URL` at its `uri()`. The code under test
+/// (`execute_agent_chat`) builds its real OpenAI provider and speaks real HTTP
+/// to this server; only the remote LLM is faked. Keep the server alive for the
+/// duration of the turn.
+pub(crate) async fn spawn_openai_fake(reply: serde_json::Value) -> wiremock::MockServer {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, ResponseTemplate};
 
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind loopback listener");
-    let addr = listener.local_addr().expect("listener address");
-    let body = reply.to_string();
-    tokio::spawn(async move {
-        loop {
-            let Ok((mut stream, _)) = listener.accept().await else {
-                return;
-            };
-            let body = body.clone();
-            tokio::spawn(async move {
-                let mut buf = Vec::new();
-                let mut chunk = [0u8; 4096];
-                // Read the request head, then exactly Content-Length body bytes.
-                let (head_len, content_len) = loop {
-                    let n = stream.read(&mut chunk).await.unwrap_or(0);
-                    if n == 0 {
-                        return;
-                    }
-                    buf.extend_from_slice(&chunk[..n]);
-                    if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
-                        let head = String::from_utf8_lossy(&buf[..pos]).to_lowercase();
-                        let len = head
-                            .lines()
-                            .find_map(|l| l.strip_prefix("content-length:"))
-                            .and_then(|v| v.trim().parse::<usize>().ok())
-                            .unwrap_or(0);
-                        break (pos + 4, len);
-                    }
-                };
-                while buf.len() < head_len + content_len {
-                    let n = stream.read(&mut chunk).await.unwrap_or(0);
-                    if n == 0 {
-                        return;
-                    }
-                    buf.extend_from_slice(&chunk[..n]);
-                }
-                let response = format!(
-                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
-                    body.len(),
-                    body
-                );
-                let _ = stream.write_all(response.as_bytes()).await;
-                let _ = stream.shutdown().await;
-            });
-        }
-    });
-    format!("http://{addr}")
+    let server = wiremock::MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(reply))
+        .mount(&server)
+        .await;
+    server
 }

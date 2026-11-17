@@ -6447,6 +6447,7 @@ dependencies = [
  "typst-pdf",
  "uuid",
  "web-push-native",
+ "wiremock",
 ]
 
 [[package]]

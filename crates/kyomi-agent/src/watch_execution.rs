@@ -596,9 +596,7 @@ fn build_watch_retry_config(
         max_tokens: MAX_WATCH_OUTPUT_TOKENS,
         component: "kyomi_watch".into(),
         user_message_persistence: UserMessagePersistence::AdapterPersists(None),
-        assistant_message_persistence: AssistantMessagePersistence::AdapterInserts(
-            uuid::Uuid::new_v4().to_string(),
-        ),
+        assistant_message_persistence: AssistantMessagePersistence::adapter_inserts_with_new_id(),
         conversation_history: None,
         user_display_name: "Kyomi Watch".to_string(),
         context_window: 0,
@@ -1224,9 +1222,7 @@ async fn execute_watch_inner(
         // that in-flight message as the same row already on disk and skips
         // writing it again.
         user_message_persistence: watch_dispatch.user_message_persistence,
-        assistant_message_persistence: AssistantMessagePersistence::AdapterInserts(
-            uuid::Uuid::new_v4().to_string(),
-        ),
+        assistant_message_persistence: AssistantMessagePersistence::adapter_inserts_with_new_id(),
         conversation_history: None,
         user_display_name: "Kyomi Watch".to_string(),
         context_window: 0,

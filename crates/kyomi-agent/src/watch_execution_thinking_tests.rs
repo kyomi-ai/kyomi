@@ -25,7 +25,7 @@ fn long_reasoning() -> String {
     .to_string()
 }
 
-async fn fake_llm() -> String {
+async fn fake_llm() -> wiremock::MockServer {
     spawn_openai_fake(serde_json::json!({
         "model": "fake-model",
         "choices": [{
@@ -42,6 +42,7 @@ async fn fake_llm() -> String {
 }
 
 struct Run {
+    _llm: wiremock::MockServer,
     db: kyomi_core::DbPool,
     session_id: String,
     result: crate::execution::AgentExecutionResult,
@@ -68,7 +69,8 @@ async fn run_watch_turn(config_for: impl FnOnce(&str) -> AgentExecutionConfig) -
     app_config.llm_provider = Some("openai".into());
     app_config.llm_api_key = Some("test-key".into());
     app_config.llm_model = Some("fake-model".into());
-    app_config.llm_base_url = Some(fake_llm().await);
+    let llm = fake_llm().await;
+    app_config.llm_base_url = Some(llm.uri());
     let app_config = Arc::new(app_config);
 
     let kv = kyomi_core::kv_store_memory::InMemoryKVStore::new_pool();
@@ -88,7 +90,7 @@ async fn run_watch_turn(config_for: impl FnOnce(&str) -> AgentExecutionConfig) -
     let result = crate::execution::execute_agent_chat(config_for(&session_id), env)
         .await
         .expect("watch turn completes");
-    Run { db, session_id, result }
+    Run { _llm: llm, db, session_id, result }
 }
 
 fn watch_config(session_id: &str) -> AgentExecutionConfig {
@@ -190,5 +192,26 @@ async fn terminal_update_matching_no_row_is_logged_at_error_level() {
             && msg.contains(&run.session_id)
             && msg.contains(&missing_id)),
         "an unmatched terminal update must be logged at error level with both ids: {errors:?}"
+    );
+}
+
+/// A cancelled watch turn saves no assistant row, so there is nothing for the
+/// full-text rows to reference: they must be skipped, not attempted and
+/// reported as a failed store.
+#[tokio::test]
+async fn cancelled_watch_turn_does_not_attempt_to_store_thinking_details() {
+    let logs = capture_tracing();
+    let run = run_watch_turn(|session_id| {
+        let config = watch_config(session_id);
+        config.cancel_token.cancel();
+        config
+    })
+    .await;
+
+    assert_eq!(run.result.status, "cancelled");
+    assert!(
+        !logs.has_message_containing(tracing::Level::WARN, "Failed to store thinking event details"),
+        "a turn with no saved row must not try to store details: {:?}",
+        logs.events()
     );
 }

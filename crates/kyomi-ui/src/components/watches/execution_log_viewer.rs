@@ -15,9 +15,10 @@ use phosphor_leptos::Icon;
 use crate::components::chat::AgentThinking;
 use crate::components::chat::thinking::ThinkingEvent;
 use crate::components::dashboard::{ChartInfoModal, MarkdownRenderer};
+use crate::components::alert::{Alert, AlertVariant};
 use crate::components::{Badge, BadgeVariant, Skeleton, Spinner};
 use crate::server_fns::context::UserContext;
-use crate::server_fns::watches::get_thinking_events;
+use crate::server_fns::watches::{ThinkingEventsResponse, get_thinking_events};
 use crate::types::WatchExecutionItem;
 
 use super::ExecutionSelector;
@@ -183,15 +184,21 @@ async fn load_thinking_trace(
         leptos::logging::error!("Failed to load thinking events for execution {}: {e}", exec.id);
         e.to_string()
     })?;
+    parse_thinking_trace(response).map_err(|e| {
+        leptos::logging::error!("Failed to parse thinking events for execution {}: {e}", exec.id);
+        e
+    })
+}
+
+/// Turn the server's response into displayable events. A malformed event is
+/// an error, not a dropped event.
+fn parse_thinking_trace(response: ThinkingEventsResponse) -> Result<LoadedThinkingTrace, String> {
     let events = response
         .events
         .into_iter()
         .map(serde_json::from_value::<ThinkingEvent>)
         .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| {
-            leptos::logging::error!("Failed to parse thinking events for execution {}: {e}", exec.id);
-            e.to_string()
-        })?;
+        .map_err(|e| e.to_string())?;
     Ok(LoadedThinkingTrace { events, message_id: response.message_id.unwrap_or_default() })
 }
 
@@ -406,7 +413,7 @@ pub fn ExecutionLogViewer(
                                 <div class="flex flex-col items-start">
                                     <div class="w-full px-6 py-4 bg-card border border-border rounded-2xl shadow-sm overflow-hidden">
                                         // Agent thinking trace (above the response markdown)
-                                        <Transition fallback=|| ()>
+                                        <Suspense fallback=|| ()>
                                             {move || {
                                                 Suspend::new(async move {
                                                     match thinking_events_resource.await {
@@ -419,14 +426,14 @@ pub fn ExecutionLogViewer(
                                                             />
                                                         }.into_any()),
                                                         Err(_) => Some(view! {
-                                                            <div class="mb-3 p-3 bg-error/10 border border-error-border rounded-lg text-sm text-error-foreground">
+                                                            <Alert variant=AlertVariant::Error class="mb-3">
                                                                 "Failed to load the agent thinking trace."
-                                                            </div>
+                                                            </Alert>
                                                         }.into_any()),
                                                     }
                                                 })
                                             }}
-                                        </Transition>
+                                        </Suspense>
                                         {if let Some(response) = agent_response {
                                             // KYO-119: Pass workspace_id so `MarkdownRenderer`
                                             // can register `KyomiDatasourceProvider` on its
@@ -516,5 +523,41 @@ fn ExecutionLogSkeleton() -> impl IntoView {
                 </div>
             </div>
         </div>
+    }
+}
+
+#[cfg(test)]
+mod thinking_trace_tests {
+    use super::*;
+
+    fn event(id: &str) -> serde_json::Value {
+        serde_json::json!({
+            "event_id": id,
+            "event_type": "agent_thought",
+            "timestamp": "2026-11-17T00:00:00Z",
+            "title": "Planning",
+            "description": "text",
+            "has_full_text": true,
+        })
+    }
+
+    #[test]
+    fn parsed_trace_carries_the_message_id_for_more() {
+        let trace = parse_thinking_trace(ThinkingEventsResponse {
+            message_id: Some("msg-1".into()),
+            events: vec![event("e1"), event("e2")],
+        })
+        .expect("well-formed events parse");
+        assert_eq!(trace.message_id, "msg-1");
+        assert_eq!(trace.events.len(), 2);
+    }
+
+    #[test]
+    fn malformed_event_is_an_error_not_a_dropped_event() {
+        let result = parse_thinking_trace(ThinkingEventsResponse {
+            message_id: Some("msg-1".into()),
+            events: vec![event("e1"), serde_json::json!({"event_type": 7})],
+        });
+        assert!(result.is_err(), "a malformed event must surface as an error");
     }
 }

@@ -1172,7 +1172,19 @@ pub async fn add_message(
     )
     .map_err(|e| kyomi_core::Error::Internal(format!("failed to add message: {e}")))?;
 
-    // Update session timestamp.
+    touch_session_after_message(db, session_id, now).await?;
+
+    Ok(msg_id)
+}
+
+/// Bump the session's `updated_at` and write its sync-log entry after a
+/// message was added (shared by [`add_message`] and
+/// [`add_assistant_message_with_thinking_details`]).
+async fn touch_session_after_message(
+    db: &DbPool,
+    session_id: &str,
+    now: chrono::DateTime<Utc>,
+) -> kyomi_core::Result<()> {
     kyomi_core::db_execute!(
         db,
         "UPDATE chat_sessions SET updated_at = $1 WHERE session_id = $2",
@@ -1184,8 +1196,7 @@ pub async fn add_message(
     // Sync log for the session metadata update — real counts, RFC3339
     // timestamps, populated created_by (KYO-491).
     write_session_metadata_sync_log(db, session_id, SyncActionType::Update, "add_message").await;
-
-    Ok(msg_id)
+    Ok(())
 }
 
 /// Update message content, metadata, and/or status (re-encrypts content and
@@ -3093,46 +3104,77 @@ pub async fn get_thinking_event_detail(
     }
 }
 
-/// Copy every stored full-text reasoning row of `from_message_id` to
-/// `to_message_id` (KYO-976, "Continue in Chat"). The text is copied as
-/// ciphertext: both messages belong to the same workspace and so share one
-/// encryption key. Returns how many rows were copied. Any failure is an
-/// error — a half-copied trace would silently turn "more" into
-/// "Full text not available".
-pub async fn copy_thinking_event_details(
+/// Insert a completed assistant message and, in the same transaction, copy
+/// every stored full-text reasoning row of `copy_details_from` onto it
+/// (KYO-976, "Continue in Chat"). The text is copied as ciphertext: both
+/// messages belong to one workspace and so share one encryption key. If any
+/// row fails to copy the transaction rolls back and no message is created, so
+/// a trace can never exist with only some of its full texts.
+pub async fn add_assistant_message_with_thinking_details(
     db: &DbPool,
-    from_message_id: &str,
-    to_message_id: &str,
-) -> kyomi_core::Result<usize> {
-    #[derive(sqlx::FromRow)]
-    struct Row {
-        event_id: String,
-        full_text: String,
-    }
-    let rows = kyomi_core::db_fetch_all!(
-        db,
-        Row,
-        "SELECT event_id, full_text FROM thinking_event_details WHERE message_id = $1",
-        from_message_id
-    )
-    .map_err(|e| kyomi_core::Error::Internal(format!("failed to read thinking details: {e}")))?;
+    encryption_key: &[u8; 32],
+    session_id: &str,
+    message_id: &str,
+    content: &str,
+    metadata: Option<&serde_json::Value>,
+    copy_details_from: Option<&str>,
+) -> kyomi_core::Result<()> {
+    let now = Utc::now();
+    let encrypted_content = encryption::encrypt(content, encryption_key)?;
+    let encrypted_metadata: Option<String> = match metadata {
+        Some(m) => Some(encryption::encrypt_json(m, encryption_key)?),
+        None => None,
+    };
 
-    for row in &rows {
-        let id = uuid::Uuid::new_v4().to_string();
-        kyomi_core::db_execute!(
-            db,
-            "INSERT INTO thinking_event_details (id, message_id, event_id, full_text) \
-             VALUES ($1, $2, $3, $4)",
-            &id,
-            to_message_id,
-            row.event_id.as_str(),
-            row.full_text.as_str()
-        )
-        .map_err(|e| {
-            kyomi_core::Error::Internal(format!("failed to copy thinking detail: {e}"))
-        })?;
+    macro_rules! insert_in_transaction {
+        ($pool:expr) => {{
+            let mut tx = $pool.begin().await?;
+            sqlx::query(
+                "INSERT INTO chat_messages \
+                 (message_id, session_id, role, content, pinned, created_at, extra_metadata, status) \
+                 VALUES ($1, $2, 'assistant', $3, false, $4, $5, $6)",
+            )
+            .bind(message_id)
+            .bind(session_id)
+            .bind(&encrypted_content)
+            .bind(now)
+            .bind(&encrypted_metadata)
+            .bind(MessageStatus::Complete.as_str())
+            .execute(&mut *tx)
+            .await?;
+            if let Some(source) = copy_details_from {
+                let rows: Vec<(String, String)> = sqlx::query_as(
+                    "SELECT event_id, full_text FROM thinking_event_details WHERE message_id = $1",
+                )
+                .bind(source)
+                .fetch_all(&mut *tx)
+                .await?;
+                for (event_id, full_text) in rows {
+                    sqlx::query(
+                        "INSERT INTO thinking_event_details (id, message_id, event_id, full_text) \
+                         VALUES ($1, $2, $3, $4)",
+                    )
+                    .bind(uuid::Uuid::new_v4().to_string())
+                    .bind(message_id)
+                    .bind(event_id)
+                    .bind(full_text)
+                    .execute(&mut *tx)
+                    .await?;
+                }
+            }
+            tx.commit().await?;
+            Ok::<(), sqlx::Error>(())
+        }};
     }
-    Ok(rows.len())
+    let result = match db {
+        DbPool::Postgres(pool) => insert_in_transaction!(pool),
+        DbPool::Sqlite(pool) => insert_in_transaction!(pool),
+    };
+    result.map_err(|e| {
+        kyomi_core::Error::Internal(format!("failed to add assistant message with thinking details: {e}"))
+    })?;
+
+    touch_session_after_message(db, session_id, now).await
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────

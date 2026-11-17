@@ -2092,7 +2092,11 @@ pub struct SessionThinkingTrace {
     pub events: Vec<serde_json::Value>,
 }
 
-/// The first assistant message of `session_id` that carries thinking events.
+/// The last assistant message of `session_id` that carries thinking events.
+///
+/// A watch run that fails validation is retried in the same session, so the
+/// session can hold several assistant messages with events. The last one is
+/// the turn that produced the stored answer, so its trace is the one shown.
 ///
 /// `chat_service::get_session_messages` filters only on `session_id`, so the
 /// caller must already have authorised access to the session (see the notes
@@ -2105,6 +2109,7 @@ pub async fn load_session_thinking_trace(
     let messages = chat_service::get_session_messages(db, encryption_key, session_id, 1000).await?;
     Ok(messages
         .into_iter()
+        .rev()
         .find(|m| m.message_type == "assistant" && !m.thinking_events.is_empty())
         .map(|m| SessionThinkingTrace {
             message_id: m.message_id,
@@ -2228,23 +2233,12 @@ pub async fn create_chat_session_from_alert(
     // user's execution. If this session_id is ever sourced from anywhere
     // other than the gated `execution` row, it must get its own ownership
     // check — do not assume get_session_messages is safe on its own.
-    let mut thinking_events: Option<serde_json::Value> = None;
+    let trace = get_execution_thinking_events(db, encryption_key, &execution).await?;
     // The source assistant message, whose full-text details are copied to the
     // new message in step 8 so "more" keeps working in the continued chat.
-    let mut source_message_id: Option<String> = None;
-
-    if let Some(ref session_id) = execution.session_id {
-        match load_session_thinking_trace(db, encryption_key, session_id).await {
-            Ok(Some(trace)) => {
-                thinking_events = Some(serde_json::Value::Array(trace.events));
-                source_message_id = Some(trace.message_id);
-            }
-            Ok(None) => {}
-            Err(e) => {
-                tracing::warn!("Failed to load thinking events from session: {e}");
-            }
-        }
-    }
+    let source_message_id = trace.message_id;
+    let thinking_events =
+        (!trace.events.is_empty()).then_some(serde_json::Value::Array(trace.events));
 
     // 5. Load agent_state from the execution trace.
     let mut agent_state: Option<serde_json::Value> = None;
@@ -2254,13 +2248,6 @@ pub async fn create_chat_session_from_alert(
         .and_then(|t| t.as_object())
     {
         agent_state = obj.get("agent_state").cloned();
-
-        // Fallback for old executions that stored events in execution_trace.
-        if thinking_events.is_none()
-            && let Some(events) = obj.get("events").filter(|e| e.is_array())
-        {
-            thinking_events = Some(events.clone());
-        }
     }
 
     // 6. Create the new chat session.
@@ -2306,31 +2293,19 @@ pub async fn create_chat_session_from_alert(
         .as_ref()
         .map(|events| serde_json::json!({ "thinking_events": events }));
 
+    // Created together with the copied full reasoning texts (same workspace
+    // key, so the ciphertext is copied as is), in one transaction.
     let assistant_message_id = uuid::Uuid::new_v4().to_string();
-    chat_service::add_message(
+    chat_service::add_assistant_message_with_thinking_details(
         db,
         encryption_key,
         &session_id,
-        "assistant",
+        &assistant_message_id,
         execution.agent_response.as_deref().unwrap_or(""),
         metadata.as_ref(),
-        Some(&assistant_message_id),
-        None, // current_time_user_tz
-        None, // message_source
-        None, // sent_by_user_id
-        None, // tool_call_id
-        None, // tool_name
-        None, // tool_calls
-        chat_service::MessageStatus::Complete,
+        source_message_id.as_deref(),
     )
     .await?;
-
-    // Carry the full reasoning texts over to the new message (same workspace
-    // key, so the ciphertext is copied as is).
-    if let Some(source_message_id) = &source_message_id {
-        chat_service::copy_thinking_event_details(db, source_message_id, &assistant_message_id)
-            .await?;
-    }
 
     // 9. Persist agent state so the user can continue where the watch left off.
     if let Some(mut state_val) = agent_state {
@@ -3797,19 +3772,16 @@ mod privacy_tests {
 
     const LONG_REASONING: &str = "Full untruncated reasoning that is far longer than the display limit.";
 
-    /// A finished watch execution whose session holds an assistant message
-    /// with one reasoning event whose full text is stored. Returns
-    /// `(execution_id, source_message_id, event_id)`.
-    async fn seed_execution_with_trace(pool: &DbPool, watch_id: &str) -> (i32, String, String) {
+    /// Add an assistant message with one reasoning event (full text stored)
+    /// and a completion event to `session_id`. Returns `(message_id, event_id)`.
+    async fn add_traced_assistant_message(
+        pool: &DbPool,
+        session_id: &str,
+        event_id: &str,
+        full_text: &str,
+    ) -> (String, String) {
         let key = &[0u8; 32];
-        let session_id = uuid::Uuid::new_v4().to_string();
-        chat_service::create_session_with_id(
-            pool, "user-a", "ws-1", &session_id, Some("Watch: t"), "watch_execution", None,
-        )
-        .await
-        .expect("create execution session");
-
-        let event_id = "evt-reasoning-1".to_string();
+        let event_id = event_id.to_string();
         let events = serde_json::json!([
             {"event_id": event_id, "event_type": "agent_thought", "title": "Planning",
              "description": "Full untruncated…", "has_full_text": true},
@@ -3817,15 +3789,32 @@ mod privacy_tests {
         ]);
         let metadata = serde_json::json!({ "thinking_events": events });
         let message_id = chat_service::add_message(
-            pool, key, &session_id, "assistant", "all clear", Some(&metadata), None, None, None,
+            pool, key, session_id, "assistant", "all clear", Some(&metadata), None, None, None,
             None, None, None, None, chat_service::MessageStatus::Complete,
         )
         .await
         .expect("add assistant message");
-        let texts = std::collections::HashMap::from([(event_id.clone(), LONG_REASONING.to_string())]);
+        let texts = std::collections::HashMap::from([(event_id.clone(), full_text.to_string())]);
         chat_service::store_thinking_event_details(pool, key, &message_id, &texts)
             .await
             .expect("store full text");
+        (message_id, event_id)
+    }
+
+    /// A finished watch execution whose session holds one traced assistant
+    /// message. Returns `(execution_id, session_id, message_id, event_id)`.
+    async fn seed_execution_with_trace(
+        pool: &DbPool,
+        watch_id: &str,
+    ) -> (i32, String, String, String) {
+        let session_id = uuid::Uuid::new_v4().to_string();
+        chat_service::create_session_with_id(
+            pool, "user-a", "ws-1", &session_id, Some("Watch: t"), "watch_execution", None,
+        )
+        .await
+        .expect("create execution session");
+        let (message_id, event_id) =
+            add_traced_assistant_message(pool, &session_id, "evt-reasoning-1", LONG_REASONING).await;
 
         let execution_id =
             insert_triggered_alert_with_content(pool, watch_id, "user-a", "all clear", "p", "t")
@@ -3837,7 +3826,7 @@ mod privacy_tests {
             .execute(sq)
             .await
             .expect("link session to execution");
-        (execution_id, message_id, event_id)
+        (execution_id, session_id, message_id, event_id)
     }
 
     /// Test 3: the log viewer's source returns the assistant message id with
@@ -3847,7 +3836,7 @@ mod privacy_tests {
         let pool = test_pool().await;
         seed_two_users_one_workspace(sqlite_pool(&pool), "a@test.local", "b@test.local").await;
         let watch = create_test_watch(&pool, "user-a", "Trace Watch").await;
-        let (execution_id, message_id, _) = seed_execution_with_trace(&pool, &watch.watch_id).await;
+        let (execution_id, _, message_id, _) = seed_execution_with_trace(&pool, &watch.watch_id).await;
 
         let execution = get_execution_by_id(&pool, &watch.watch_id, execution_id, "ws-1", "user-a")
             .await
@@ -3868,7 +3857,7 @@ mod privacy_tests {
         let pool = test_pool().await;
         seed_two_users_one_workspace(sqlite_pool(&pool), "a@test.local", "b@test.local").await;
         let watch = create_test_watch(&pool, "user-a", "Trace Watch").await;
-        let (execution_id, source_message_id, event_id) =
+        let (execution_id, _, source_message_id, event_id) =
             seed_execution_with_trace(&pool, &watch.watch_id).await;
         let key = &[0u8; 32];
 
@@ -3891,6 +3880,73 @@ mod privacy_tests {
         .expect("detail lookup")
         .expect("full text resolves for the new message id");
         assert_eq!(full, LONG_REASONING);
+    }
+
+    /// A watch run that failed validation is retried in the same session, so
+    /// the session holds two traced assistant messages. The trace (and the
+    /// message id that "more" uses) must belong to the last one — the turn
+    /// that produced the stored answer.
+    #[tokio::test]
+    async fn execution_trace_is_the_turn_that_produced_the_answer() {
+        let pool = test_pool().await;
+        seed_two_users_one_workspace(sqlite_pool(&pool), "a@test.local", "b@test.local").await;
+        let watch = create_test_watch(&pool, "user-a", "Retry Watch").await;
+        let (execution_id, session_id, first_message_id, _) =
+            seed_execution_with_trace(&pool, &watch.watch_id).await;
+        let retry_text = "Reasoning of the retry turn, which produced the stored answer.";
+        let (retry_message_id, retry_event_id) =
+            add_traced_assistant_message(&pool, &session_id, "evt-retry-1", retry_text).await;
+        assert_ne!(first_message_id, retry_message_id);
+
+        let execution = get_execution_by_id(&pool, &watch.watch_id, execution_id, "ws-1", "user-a")
+            .await
+            .expect("load execution")
+            .expect("execution exists");
+        let key = &[0u8; 32];
+        let trace = get_execution_thinking_events(&pool, key, &execution)
+            .await
+            .expect("load thinking events");
+
+        assert_eq!(trace.message_id.as_deref(), Some(retry_message_id.as_str()));
+        let full = chat_service::get_thinking_event_detail(
+            &pool, key, &retry_message_id, &retry_event_id, "user-a", "ws-1",
+        )
+        .await
+        .expect("detail lookup");
+        assert_eq!(full.as_deref(), Some(retry_text));
+    }
+
+    /// If copying a detail row fails, no assistant message is left behind in
+    /// the continued chat: message and details are created together or not at
+    /// all. The failure is injected with a trigger on the details table.
+    #[tokio::test]
+    async fn continue_in_chat_leaves_no_message_when_the_detail_copy_fails() {
+        let pool = test_pool().await;
+        seed_two_users_one_workspace(sqlite_pool(&pool), "a@test.local", "b@test.local").await;
+        let watch = create_test_watch(&pool, "user-a", "Trace Watch").await;
+        let (execution_id, _, source_message_id, _) =
+            seed_execution_with_trace(&pool, &watch.watch_id).await;
+        let sq = sqlite_pool(&pool);
+        sqlx::query(
+            "CREATE TRIGGER fail_detail_copy BEFORE INSERT ON thinking_event_details \
+             BEGIN SELECT RAISE(ABORT, 'injected copy failure'); END",
+        )
+        .execute(sq)
+        .await
+        .expect("install failure trigger");
+
+        let result =
+            create_chat_session_from_alert(&pool, &[0u8; 32], "user-a", "ws-1", execution_id).await;
+        assert!(result.is_err(), "the failed copy must fail the call: {result:?}");
+
+        let stray: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM chat_messages WHERE role = 'assistant' AND message_id != $1",
+        )
+        .bind(&source_message_id)
+        .fetch_one(sq)
+        .await
+        .expect("count assistant messages");
+        assert_eq!(stray.0, 0, "no assistant message may survive a failed detail copy");
     }
 
     // ── Alert mutation IDOR guards (KYO-204) ─────────────────────────────
