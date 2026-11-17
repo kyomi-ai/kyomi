@@ -51,7 +51,7 @@ pub fn resolve_watch_selection(
         ),
         None => (
             resolve_workspace_provider_config(ws_config, app_config)?,
-            ws_config.is_byok() && app_config.self_hosted,
+            crate::execution::is_byok(ws_config, app_config),
         ),
     };
     // A model belongs to the connection it was configured with; without a

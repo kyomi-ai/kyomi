@@ -40,9 +40,6 @@ CREATE TABLE IF NOT EXISTS watch_batch_calls (
     state varchar(20) NOT NULL,
     response_encrypted text,
     error_message text,
-    input_tokens integer NOT NULL DEFAULT 0,
-    output_tokens integer NOT NULL DEFAULT 0,
-    cost_usd double precision,
     submitted_at timestamp with time zone NOT NULL DEFAULT now(),
     completed_at timestamp with time zone,
     UNIQUE (execution_id, call_index)

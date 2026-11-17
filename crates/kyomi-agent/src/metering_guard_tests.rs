@@ -103,6 +103,7 @@ fn usage_rows_and_prices_have_one_source() {
                 "crates/kyomi-agent/src/usage_ledger.rs",
                 "crates/kyomi-agent/src/anthropic_billing_tests.rs",
                 "crates/kyomi-agent/src/scheduler_batch_tests.rs",
+                "crates/kyomi-agent/src/batch_run.rs", // its unit tests state the expected markup
             ],
         ),
         // Prices are computed by `anthropic_pricing` and applied when a response is parsed.
@@ -112,6 +113,7 @@ fn usage_rows_and_prices_have_one_source() {
                 "crates/kyomi-agent/src/anthropic_pricing.rs",
                 "crates/kyomi-agent/src/anthropic.rs",
                 "crates/kyomi-agent/src/scheduler_batch_tests.rs",
+                "crates/kyomi-agent/src/batch_run.rs", // its unit tests state the expected price
                 "crates/kyomi-agent/src/metering_guard_tests.rs",
             ],
         ),

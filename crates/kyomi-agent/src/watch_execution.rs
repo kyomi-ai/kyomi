@@ -1064,21 +1064,20 @@ async fn bill_batch_run(db: &DbPool, encryption_key: &[u8; 32], watch: &Watch, e
         session_id: &session_id,
     };
     let billing = crate::batch_run::RunBilling { is_byok, provider: &provider, model: &model, component: "kyomi_watch" };
-    match watch_batch_service::bill_run_once(
+    match crate::batch_run::bill_run(
         db,
         execution_id,
         watch_batch_service::BillingFence::LeaseOwner(crate::batch_run::instance_id()),
-        Utc::now(),
         &bill,
-        |calls| crate::batch_run::batch_run_row(calls, &billing),
+        &billing,
     )
     .await
     {
         Ok(true) => {}
         // Already billed by an earlier step of this run, or no longer ours.
         Ok(false) => info!(execution_id, "Batch run usage was not billed here (already billed, or the lease is no longer held)"),
-        // The transaction rolled back: nothing was claimed or written.
-        Err(e) => warn!(execution_id, error = %e, "Failed to bill a batch run"),
+        // The transaction rolled back: nothing was claimed or written, so the run is not billed.
+        Err(e) => error!(execution_id, error = %e, "BILLING ROW LOST: failed to bill a batch run"),
     }
 }
 

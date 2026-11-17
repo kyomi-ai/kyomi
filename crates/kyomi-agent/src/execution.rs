@@ -365,7 +365,7 @@ fn effective_provider_kind(
 }
 
 /// BYOK workspaces (their own key, self-hosted only) cost Kyomi credits nothing.
-fn is_byok(
+pub(crate) fn is_byok(
     ws_config: &kyomi_auth::workspace_ai_config::WorkspaceAiConfig,
     app_config: &kyomi_core::Config,
 ) -> bool {

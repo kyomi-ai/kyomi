@@ -350,13 +350,12 @@ impl WatchScheduler {
             model,
             component: "kyomi_watch",
         };
-        if let Err(e) = watch_batch_service::bill_run_once(
+        if let Err(e) = crate::batch_run::bill_run(
             &self.db,
             run.id,
             watch_batch_service::BillingFence::StoppedRun,
-            Utc::now(),
             &bill,
-            |calls| crate::batch_run::batch_run_row(calls, &billing),
+            &billing,
         )
         .await
         {

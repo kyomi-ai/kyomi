@@ -85,15 +85,13 @@ async fn postgres_call_cache_lease_resume_and_reap() {
     assert_eq!((a.call_id.clone(), again.request_hash), (again.call_id, "h1".to_string()));
     mark_submitted(&f.db, &a.call_id, "msgbatch_1").await.unwrap();
     let body = serde_json::json!({"content": [{"text": "secret-finding"}]});
-    assert!(finish_call(&f.db, &KEY, &a.call_id, BatchCallState::Succeeded, Some(&body), CallUsage { input_tokens: 20, output_tokens: 9, cost_usd: Some(0.002) }, None).await.unwrap());
-    assert!(!finish_call(&f.db, &KEY, &a.call_id, BatchCallState::Abandoned, None, CallUsage::default(), None).await.unwrap(), "a final call is not overwritten");
+    assert!(finish_call(&f.db, &KEY, &a.call_id, BatchCallState::Succeeded, Some(&body), None).await.unwrap());
+    assert!(!finish_call(&f.db, &KEY, &a.call_id, BatchCallState::Abandoned, None, None).await.unwrap(), "a final call is not overwritten");
     assert_eq!(find_call(&f.db, &KEY, id, 0).await.unwrap().unwrap().response, Some(body));
     let b = begin_call(&f.db, &KEY, id, 1, "h2", "anthropic", "m").await.unwrap();
-    finish_call(&f.db, &KEY, &b.call_id, BatchCallState::Abandoned, None, CallUsage::default(), Some("deadline")).await.unwrap();
-    assert!(attach_fallback_response(&f.db, &KEY, &b.call_id, &serde_json::json!({"x": 1}), CallUsage { input_tokens: 15, output_tokens: 5, cost_usd: None }).await.unwrap());
-    assert!(!attach_fallback_response(&f.db, &KEY, &b.call_id, &serde_json::json!({"x": 2}), CallUsage::default()).await.unwrap());
-    let total = run_usage(&f.db, id).await.unwrap();
-    assert_eq!((total.input_tokens, total.output_tokens, total.cost_usd), (35, 14, Some(0.002)));
+    finish_call(&f.db, &KEY, &b.call_id, BatchCallState::Abandoned, None, Some("deadline")).await.unwrap();
+    assert!(attach_fallback_response(&f.db, &KEY, &b.call_id, &serde_json::json!({"x": 1})).await.unwrap());
+    assert!(!attach_fallback_response(&f.db, &KEY, &b.call_id, &serde_json::json!({"x": 2})).await.unwrap());
     sync_batch_ids(&f.db, id).await.unwrap();
     assert_eq!(batch_ids(&f.db, id).await.unwrap(), vec!["msgbatch_1"]);
 
@@ -147,7 +145,7 @@ async fn postgres_billing_is_one_atomic_lease_fenced_transaction() {
     let Some(f) = fixture("postgres_billing_is_one_atomic_lease_fenced_transaction").await else { return };
     let id = f.run("me", Duration::seconds(120)).await;
     let c = begin_call(&f.db, &KEY, id, 0, "h", "anthropic", "m").await.unwrap();
-    finish_call(&f.db, &KEY, &c.call_id, BatchCallState::Succeeded, Some(&serde_json::json!({"in": 7, "out": 3})), CallUsage { input_tokens: 7, output_tokens: 3, cost_usd: Some(0.01) }, None).await.unwrap();
+    finish_call(&f.db, &KEY, &c.call_id, BatchCallState::Succeeded, Some(&serde_json::json!({"in": 7, "out": 3})), None).await.unwrap();
 
     let bill = UsageBill { encryption_key: &KEY, user_id: &f.user, workspace_id: &f.ws, session_id: "s" };
     let count = |db: &DbPool, ws: &str| { let (db, ws) = (db.clone(), ws.to_string()); async move { sqlx::query_as::<_, (i64,)>("SELECT COUNT(*) FROM api_usage_log WHERE workspace_id = $1").bind(ws).fetch_one(postgres_pool(&db)).await.unwrap().0 } };

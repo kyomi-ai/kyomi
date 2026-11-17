@@ -204,7 +204,7 @@ impl BatchingProvider {
         // keep one without the other and a second driver's answer to the same
         // position is neither kept nor billed.
         if let Some(call) = call {
-            match store::attach_fallback_response(&self.ctx.db, &self.ctx.encryption_key, &call.call_id, &response.raw_response, usage_of(&response)).await {
+            match store::attach_fallback_response(&self.ctx.db, &self.ctx.encryption_key, &call.call_id, &response.raw_response).await {
                 Ok(true) => {}
                 // Another driver answered this position first; its answer and
                 // usage are the ones kept (this driver is being displaced).
@@ -253,7 +253,7 @@ impl BatchingProvider {
         let reason = "batch not finished before the next scheduled run was due; \
                       cancelled and re-run in realtime"
             .to_string();
-        store::finish_call(&self.ctx.db, &self.ctx.encryption_key, &call.call_id, BatchCallState::Abandoned, None, store::CallUsage::default(), Some(&reason)).await?;
+        store::finish_call(&self.ctx.db, &self.ctx.encryption_key, &call.call_id, BatchCallState::Abandoned, None, Some(&reason)).await?;
         if let Some(vendor_id) = &call.vendor_batch_id
             && let Err(e) = batch.cancel(vendor_id).await
         {
@@ -264,17 +264,19 @@ impl BatchingProvider {
     }
 }
 
-/// What a call used, as the turn tracker counts it: input includes the cache
-/// tokens, so the billed usage agrees with the execution's own totals.
-fn usage_of(response: &LLMResponse) -> store::CallUsage {
-    let input = u64::from(response.usage.input_tokens)
-        + u64::from(response.usage.cache_creation_input_tokens)
-        + u64::from(response.usage.cache_read_input_tokens);
-    store::CallUsage {
-        input_tokens: i32::try_from(input).unwrap_or(i32::MAX),
-        output_tokens: i32::try_from(response.usage.output_tokens).unwrap_or(i32::MAX),
-        cost_usd: response.cost,
-    }
+/// Bill a batch run once, through the claim-then-insert transaction (`bill_run_once`),
+/// with the row built by [`batch_run_row`]. The one place a run is billed: the
+/// driver calls it with the lease fence when the run ends, the reaper with the
+/// stopped-run fence. A failure rolls the whole claim back (nothing is billed)
+/// and is returned for the caller to log.
+pub(crate) async fn bill_run(
+    db: &kyomi_core::DbPool,
+    execution_id: i32,
+    fence: store::BillingFence<'_>,
+    who: &store::UsageBill<'_>,
+    billing: &RunBilling<'_>,
+) -> kyomi_core::Result<bool> {
+    store::bill_run_once(db, execution_id, fence, chrono::Utc::now(), who, |calls| batch_run_row(calls, billing)).await
 }
 
 /// Who a batch run's one usage row is for.
@@ -379,7 +381,7 @@ impl LLMProvider for BatchingProvider {
                     let reason = "run reached its batch deadline; remaining calls ran in realtime";
                     store::note_fallback(&self.ctx.db, self.ctx.execution_id, reason).await?;
                     let row = store::begin_call(&self.ctx.db, key, self.ctx.execution_id, index, &hash, &self.provider_name, self.inner.model()).await?;
-                    store::finish_call(&self.ctx.db, key, &row.call_id, BatchCallState::Abandoned, None, store::CallUsage::default(), Some(reason)).await?;
+                    store::finish_call(&self.ctx.db, key, &row.call_id, BatchCallState::Abandoned, None, Some(reason)).await?;
                     return self.realtime_and_keep(Some(&row), messages, tools, options, user_names).await;
                 }
                 store::begin_call(&self.ctx.db, key, self.ctx.execution_id, index, &hash, &self.provider_name, self.inner.model()).await?
@@ -400,7 +402,7 @@ impl LLMProvider for BatchingProvider {
                 }
                 Err(e) => {
                     // Never submitted: no vendor batch to wait for.
-                    store::finish_call(&self.ctx.db, key, &call.call_id, BatchCallState::Failed, None, store::CallUsage::default(), Some(&e.to_string())).await?;
+                    store::finish_call(&self.ctx.db, key, &call.call_id, BatchCallState::Failed, None, Some(&e.to_string())).await?;
                     return self
                         .on_batch_failure(&call, format!("batch submit failed: {e}"), messages, tools, options, user_names)
                         .await;
@@ -437,7 +439,7 @@ impl LLMProvider for BatchingProvider {
         match outcome {
             Some(BatchPoll::Succeeded(response)) => match batch.parse_response(&response) {
                 Ok(parsed) => {
-                    if !store::finish_call(&self.ctx.db, key, &call.call_id, BatchCallState::Succeeded, Some(&response), usage_of(&parsed), None).await? {
+                    if !store::finish_call(&self.ctx.db, key, &call.call_id, BatchCallState::Succeeded, Some(&response), None).await? {
                         warn!(execution_id = self.ctx.execution_id, call_id = %call.call_id, "batch result not stored: the call was already decided");
                     }
                     Ok(parsed)
@@ -446,17 +448,17 @@ impl LLMProvider for BatchingProvider {
                     // A result that cannot be read is a failed batch, with the
                     // run's failure policy applied; it is not stored as a success.
                     let reason = format!("unreadable batch result: {e}");
-                    store::finish_call(&self.ctx.db, key, &call.call_id, BatchCallState::Failed, None, store::CallUsage::default(), Some(&reason)).await?;
+                    store::finish_call(&self.ctx.db, key, &call.call_id, BatchCallState::Failed, None, Some(&reason)).await?;
                     self.on_batch_failure(&call, reason, messages, tools, options, user_names).await
                 }
             },
             Some(BatchPoll::Failed(reason)) => {
-                store::finish_call(&self.ctx.db, key, &call.call_id, BatchCallState::Failed, None, store::CallUsage::default(), Some(&reason)).await?;
+                store::finish_call(&self.ctx.db, key, &call.call_id, BatchCallState::Failed, None, Some(&reason)).await?;
                 self.on_batch_failure(&call, reason, messages, tools, options, user_names).await
             }
             Some(BatchPoll::Expired) => {
                 let reason = "the provider batch expired before completing".to_string();
-                store::finish_call(&self.ctx.db, key, &call.call_id, BatchCallState::Expired, None, store::CallUsage::default(), Some(&reason)).await?;
+                store::finish_call(&self.ctx.db, key, &call.call_id, BatchCallState::Expired, None, Some(&reason)).await?;
                 self.on_batch_failure(&call, reason, messages, tools, options, user_names).await
             }
             Some(BatchPoll::Pending) => unreachable!("pending never breaks the poll loop"),
@@ -655,7 +657,7 @@ mod tests {
         let body = crate::batch::BatchLLMProvider::build_body(&b, &msgs(), &[], &RequestOptions::new(256), &HashMap::new());
         let c = store::begin_call(&f.db, &KEY, f.execution_id, 0, &request_hash(&body), "anthropic", "claude-x").await.unwrap();
         store::mark_submitted(&f.db, &c.call_id, "msgbatch_old").await.unwrap();
-        store::finish_call(&f.db, &KEY, &c.call_id, BatchCallState::Succeeded, Some(&serde_json::from_str(&anthropic_text_reply("from the first life")).unwrap()), store::CallUsage::default(), None).await.unwrap();
+        store::finish_call(&f.db, &KEY, &c.call_id, BatchCallState::Succeeded, Some(&serde_json::from_str(&anthropic_text_reply("from the first life")).unwrap()), None).await.unwrap();
 
         let server = FakeHttpServer::start(|_| (500, "{}".into())).await;
         let p = provider(&server, ctx(&f, chrono::Duration::hours(1), BatchFailurePolicy::RealtimeRetry));
@@ -858,27 +860,105 @@ mod tests {
         .expect("the heartbeat never noticed the takeover");
     }
 
+    /// The run's billing row as the ledger builds it from the calls stored so far.
+    async fn run_row(f: &Fixture, calls: i32) -> Option<kyomi_core::models::ApiUsageInsert> {
+        let mut stored = Vec::new();
+        for i in 0..calls {
+            if let Some(c) = store::find_call(&f.db, &KEY, f.execution_id, i).await.unwrap()
+                && let Some(response) = c.response
+            {
+                stored.push(store::StoredResponse { provider: c.provider, model: c.model, response });
+            }
+        }
+        let billing = RunBilling { is_byok: false, provider: "anthropic", model: "claude-x", component: "kyomi_watch" };
+        batch_run_row(&stored, &billing).unwrap()
+    }
+
     #[tokio::test]
-    async fn each_live_call_records_its_usage_on_its_row_and_a_replay_records_nothing_more() {
+    async fn each_live_call_is_in_the_runs_row_once_and_a_replay_adds_nothing() {
         let f = fixture().await;
         let (handler, _) = anthropic_batches(0, "");
         let server = FakeHttpServer::start(handler).await;
         // Position 0: a realtime answer (past the deadline); usage 11 in / 7 out.
         let p = provider(&server, ctx(&f, chrono::Duration::seconds(-1), BatchFailurePolicy::RealtimeRetry));
         call(&p).await.unwrap();
-        let first = store::run_usage(&f.db, f.execution_id).await.unwrap();
+        let first = run_row(&f, 1).await.unwrap();
         assert_eq!((first.input_tokens, first.output_tokens), (11, 7));
 
-        // A restart replays position 0 from its row: the run's usage is unchanged.
+        // A restart replays position 0 from its row: the run's row is unchanged.
         let p2 = provider(&server, ctx(&f, chrono::Duration::seconds(-1), BatchFailurePolicy::RealtimeRetry));
         call(&p2).await.unwrap();
-        assert_eq!(store::run_usage(&f.db, f.execution_id).await.unwrap(), first, "a replayed call must not add usage");
+        assert_eq!(run_row(&f, 1).await.unwrap(), first, "a replayed call must not add usage");
 
         // A new position adds its own.
         let other = vec![Message::system("sys"), Message::user("second")];
         p2.complete(&other, &[], &RequestOptions::new(256), &HashMap::new()).await.unwrap();
-        let both = store::run_usage(&f.db, f.execution_id).await.unwrap();
+        let both = run_row(&f, 2).await.unwrap();
         assert_eq!((both.input_tokens, both.output_tokens), (22, 14));
+    }
+
+    fn anthropic_message(tier: Option<&str>, input: u64, output: u64) -> store::StoredResponse {
+        let mut usage = json!({"input_tokens": input, "output_tokens": output});
+        if let Some(t) = tier {
+            usage["service_tier"] = json!(t);
+        }
+        store::StoredResponse {
+            provider: "anthropic".into(),
+            model: "claude-haiku-5-5".into(),
+            response: json!({"id": "m", "type": "message", "role": "assistant", "model": "claude-haiku-5-5",
+                             "content": [{"type": "text", "text": "x"}], "stop_reason": "end_turn", "usage": usage}),
+        }
+    }
+
+    fn billing() -> RunBilling<'static> {
+        RunBilling { is_byok: false, provider: "anthropic", model: "claude-haiku-5-5", component: "kyomi_watch" }
+    }
+
+    /// A run that mixes a batch result with the realtime answer that replaced a
+    /// failed batch is billed once, each at its own tier: the batch call at half
+    /// price, the realtime fallback at the standard price.
+    #[test]
+    fn a_batch_call_and_a_realtime_fallback_are_each_billed_once_at_their_own_tier() {
+        use crate::anthropic_pricing::{price_call, CallTokens};
+        let calls = [anthropic_message(Some("batch"), 1000, 200), anthropic_message(Some("standard"), 1000, 200)];
+        let row = batch_run_row(&calls, &billing()).unwrap().unwrap();
+        assert_eq!((row.input_tokens, row.output_tokens), (2000, 400));
+        let one = price_call("claude-haiku-5-5", CallTokens { input: 1000, output: 200, ..Default::default() }).cost_usd;
+        let expected = (one * 0.5 + one) * crate::usage_ledger::AI_COST_MULTIPLIER;
+        assert!((row.cost_estimate - expected).abs() < 1e-12, "{} vs {expected}", row.cost_estimate);
+        let metadata: Value = serde_json::from_str(row.extra_metadata.as_deref().unwrap()).unwrap();
+        let tiers: Vec<_> = metadata["calls"].as_array().unwrap().iter().map(|c| c["service_tier"].clone()).collect();
+        assert_eq!(tiers, vec![json!("batch"), json!("standard")]);
+        // A run with no stored response has nothing to bill.
+        assert!(batch_run_row(&[], &billing()).unwrap().is_none());
+    }
+
+    #[test]
+    fn an_openrouter_result_is_billed_at_the_cost_the_provider_reported() {
+        let call = store::StoredResponse {
+            provider: "openai".into(),
+            model: "anthropic/claude-haiku-5.5".into(),
+            response: json!({"choices": [{"message": {"content": "x"}, "finish_reason": "stop"}],
+                             "usage": {"prompt_tokens": 20, "completion_tokens": 9, "cost": 0.01}}),
+        };
+        let row = batch_run_row(&[call], &billing()).unwrap().unwrap();
+        assert_eq!((row.input_tokens, row.output_tokens), (20, 9));
+        assert!((row.cost_estimate - 0.01 * crate::usage_ledger::AI_COST_MULTIPLIER).abs() < 1e-12);
+        let byok = RunBilling { is_byok: true, ..billing() };
+        let call = store::StoredResponse {
+            provider: "openai".into(),
+            model: "m".into(),
+            response: json!({"choices": [{"message": {"content": "x"}, "finish_reason": "stop"}], "usage": {"prompt_tokens": 20, "completion_tokens": 9, "cost": 0.01}}),
+        };
+        let row = batch_run_row(&[call], &byok).unwrap().unwrap();
+        assert_eq!((row.cost_estimate, row.provider_cost_usd), (0.0, Some(0.01)), "a workspace's own key costs Kyomi credits nothing");
+    }
+
+    #[test]
+    fn a_stored_response_from_a_provider_with_no_parser_is_an_error_never_a_free_run() {
+        let call = store::StoredResponse { provider: "gemini".into(), model: "m".into(), response: json!({}) };
+        let err = batch_run_row(&[call], &billing()).unwrap_err();
+        assert!(err.to_string().contains("cannot price"), "{err}");
     }
 
     #[tokio::test]
