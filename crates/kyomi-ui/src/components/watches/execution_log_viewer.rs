@@ -413,7 +413,7 @@ pub fn ExecutionLogViewer(
                                 <div class="flex flex-col items-start">
                                     <div class="w-full px-6 py-4 bg-card border border-border rounded-2xl shadow-sm overflow-hidden">
                                         // Agent thinking trace (above the response markdown)
-                                        <Suspense fallback=|| ()>
+                                        <Transition fallback=|| ()>
                                             {move || {
                                                 Suspend::new(async move {
                                                     match thinking_events_resource.await {
@@ -433,7 +433,7 @@ pub fn ExecutionLogViewer(
                                                     }
                                                 })
                                             }}
-                                        </Suspense>
+                                        </Transition>
                                         {if let Some(response) = agent_response {
                                             // KYO-119: Pass workspace_id so `MarkdownRenderer`
                                             // can register `KyomiDatasourceProvider` on its

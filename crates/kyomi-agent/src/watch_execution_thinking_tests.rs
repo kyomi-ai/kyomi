@@ -210,6 +210,11 @@ async fn cancelled_watch_turn_does_not_attempt_to_store_thinking_details() {
 
     assert_eq!(run.result.status, "cancelled");
     assert!(
+        logs.has_message_containing(tracing::Level::ERROR, "matched no row"),
+        "the lost terminal update must be reported at error level: {:?}",
+        logs.events()
+    );
+    assert!(
         !logs.has_message_containing(tracing::Level::WARN, "Failed to store thinking event details"),
         "a turn with no saved row must not try to store details: {:?}",
         logs.events()

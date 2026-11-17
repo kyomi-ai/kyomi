@@ -739,9 +739,10 @@ pub async fn execute_agent_chat(
     //     call is the only place it's persisted — the exact gap KYO-493's
     //     ticket describes ("today an in-loop error is streamed to the
     //     client but never persisted").
-    // Whether step 14 found the assistant row. Step 15b writes rows that
-    // reference it by foreign key, so it only runs when the row is there.
-    let mut assistant_row_exists = false;
+    // Set when step 14 finds no row for the assistant message id. Step 15b's
+    // rows reference that row by foreign key, so they are skipped in that case
+    // (the error logged below already reports that they were not saved).
+    let mut assistant_row_missing = false;
     if config.assistant_message_persistence.durable_run().is_none() {
         let metadata = serde_json::json!({
             "model": model_name,
@@ -768,18 +769,19 @@ pub async fn execute_agent_chat(
         )
         .await
         {
-            Ok(true) => assistant_row_exists = true,
+            Ok(true) => {}
             // No row carries this id: the thinking events, token usage and
             // terminal status went nowhere. Either the row was saved under a
             // different id (the KYO-976 defect) or this turn ended before any
             // reply was saved (error/cancel on `AdapterInserts`); both lose
             // data, so it must be loud, not a silent `false`.
             Ok(false) => {
+                assistant_row_missing = true;
                 error!(
                     session_id = %config.session_id,
                     assistant_message_id = %assistant_message_id,
                     "Terminal assistant message update matched no row — thinking events, \
-                     token usage and status were not saved"
+                     full reasoning texts, token usage and status were not saved"
                 );
             }
             Err(e) if content.is_some() => {
@@ -806,7 +808,7 @@ pub async fn execute_agent_chat(
         ).await.map_err(|e| kyomi_core::Error::ServiceUnavailable(e.to_string()))?;
     }
     if config.assistant_message_persistence.durable_run().is_none()
-        && assistant_row_exists
+        && !assistant_row_missing
         && !full_texts.is_empty()
         && let Err(e) = chat_service::store_thinking_event_details(
             db,

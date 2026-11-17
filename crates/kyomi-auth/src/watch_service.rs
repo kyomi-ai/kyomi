@@ -3949,6 +3949,32 @@ mod privacy_tests {
         assert_eq!(stray.0, 0, "no assistant message may survive a failed detail copy");
     }
 
+    /// Continue in Chat fails, and creates nothing, when the execution's
+    /// trace cannot be loaded; it no longer carries on without the events.
+    #[tokio::test]
+    async fn continue_in_chat_fails_when_the_trace_cannot_be_loaded() {
+        let pool = test_pool().await;
+        seed_two_users_one_workspace(sqlite_pool(&pool), "a@test.local", "b@test.local").await;
+        let watch = create_test_watch(&pool, "user-a", "Trace Watch").await;
+        let (execution_id, _, _, _) = seed_execution_with_trace(&pool, &watch.watch_id).await;
+        // Make reading the session's messages fail with a database error.
+        sqlx::query("ALTER TABLE chat_messages RENAME TO chat_messages_unavailable")
+            .execute(sqlite_pool(&pool))
+            .await
+            .expect("make messages unreadable");
+
+        let result =
+            create_chat_session_from_alert(&pool, &[0u8; 32], "user-a", "ws-1", execution_id).await;
+        assert!(result.is_err(), "an unloadable trace must fail the call: {result:?}");
+        let sessions: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM chat_sessions WHERE session_type = 'chat'",
+        )
+        .fetch_one(sqlite_pool(&pool))
+        .await
+        .expect("count chat sessions");
+        assert_eq!(sessions.0, 0, "no chat session may be created");
+    }
+
     // ── Alert mutation IDOR guards (KYO-204) ─────────────────────────────
     //
     // `mark_alert_read`, `mark_alert_unread`, `delete_alert`, `restore_alert`,

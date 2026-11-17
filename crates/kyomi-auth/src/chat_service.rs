@@ -3126,6 +3126,10 @@ pub async fn add_assistant_message_with_thinking_details(
         None => None,
     };
 
+    // The INSERT below mirrors the column set `add_message` writes for a
+    // completed assistant message; it is a separate statement only because
+    // `add_message` cannot run inside a caller's transaction. Keep the two in
+    // step if the `chat_messages` columns change.
     macro_rules! insert_in_transaction {
         ($pool:expr) => {{
             let mut tx = $pool.begin().await?;
