@@ -152,26 +152,8 @@ pub(crate) async fn edit_workspace_settings(
     }
 }
 
-/// Remove a single key from `settings.custom_settings`, leaving all other
-/// keys intact. Returns the modified settings JSON.
-///
-/// If the key is absent, or `custom_settings` does not exist, the settings
-/// are returned unchanged (so callers need not pre-check).
 #[cfg(feature = "ssr")]
-pub(crate) fn clear_custom_settings_key(
-    settings: &Option<serde_json::Value>,
-    key: &str,
-) -> serde_json::Value {
-    let mut s = settings
-        .clone()
-        .unwrap_or_else(|| serde_json::json!({}));
-
-    if let Some(cs) = s.get_mut("custom_settings").and_then(|v| v.as_object_mut()) {
-        cs.remove(key);
-    }
-
-    s
-}
+pub(crate) use kyomi_auth::workspace_ai_config::clear_custom_settings_key;
 
 /// Merge a key-value pair into `settings.custom_settings`.
 #[cfg(feature = "ssr")]

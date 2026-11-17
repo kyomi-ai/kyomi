@@ -677,7 +677,7 @@ fn merge_custom_settings_key(
         s = serde_json::json!({});
     }
 
-    if s.get("custom_settings").is_none()
+    if !s.get("custom_settings").is_some_and(serde_json::Value::is_object)
         && let Some(obj) = s.as_object_mut()
     {
         obj.insert("custom_settings".to_string(), serde_json::json!({}));
@@ -690,8 +690,9 @@ fn merge_custom_settings_key(
     s
 }
 
-/// Internal helper: remove `settings.custom_settings[key]`; unchanged when absent.
-fn clear_custom_settings_key(settings: &Option<serde_json::Value>, key: &str) -> serde_json::Value {
+/// Remove `settings.custom_settings[key]`; the settings are returned unchanged when the
+/// key or `custom_settings` is absent.
+pub fn clear_custom_settings_key(settings: &Option<serde_json::Value>, key: &str) -> serde_json::Value {
     let mut s = settings.clone().unwrap_or_else(|| serde_json::json!({}));
     if let Some(cs) = s.get_mut("custom_settings").and_then(|v| v.as_object_mut()) {
         cs.remove(key);
@@ -1227,6 +1228,14 @@ mod tests {
                 assert_eq!(provider, "anthropic");
             }
             other => panic!("expected MissingApiKey, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn merge_replaces_a_non_object_custom_settings_instead_of_dropping_the_write() {
+        for existing in [serde_json::json!({"custom_settings": null}), serde_json::json!({"custom_settings": 3}), serde_json::json!(7)] {
+            let merged = merge_custom_settings_key(&Some(existing), "mode", "batch");
+            assert_eq!(merged["custom_settings"]["mode"], "batch");
         }
     }
 }
