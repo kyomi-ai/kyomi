@@ -14,6 +14,7 @@ use leptos::tachys::view::any_view::AnyView;
 
 use crate::chartml_provider::configured_chartml;
 use crate::components::dashboard::chart_header_bar::ChartHeaderBar;
+use crate::components::dashboard::kyomi_chart::chart_card_type_until_rendered;
 use crate::components::dashboard::markdown_renderer::{
     apply_spec_overrides, chart_col_span_class, extract_chart_mode, extract_chart_orientation,
     extract_chart_type, extract_col_span, split_chartml_block,
@@ -282,6 +283,9 @@ fn render_one_chart(
         None => initial_mode_stored.try_get_value().flatten(),
     });
 
+    // KYO-977: tag the card with its type until the chart first renders.
+    let (card_type_tag, mark_rendered) = chart_card_type_until_rendered(current_chart_type);
+
     // Derive effective YAML spec with overrides applied
     let yaml_for_spec = yaml.clone();
     let effective_spec = Memo::new(move |_| {
@@ -405,7 +409,7 @@ fn render_one_chart(
         // Resize container — `position: relative` so the ghost overlay and
         // handles can be positioned relative to the chart block.
         <div class="chartml-resize-container">
-            <div class="chart-card">
+            <div class="chart-card" data-chart-type=move || card_type_tag.try_get().flatten()>
                 // Reactive header bar — re-renders when type/orientation/mode change
                 {move || {
                     let ct = current_chart_type.get();
@@ -440,6 +444,7 @@ fn render_one_chart(
                 <ChartMLChart
                     spec=Signal::derive(move || effective_spec.get())
                     chartml=chartml
+                    on_refreshed=Callback::new(move |_: f64| mark_rendered.run(()))
                 />
             </div>
             // ── Resize handles ─────────────────────────────────────────────

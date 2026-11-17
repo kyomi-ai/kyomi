@@ -10,8 +10,8 @@
 //!
 //! # Responsibilities
 //!
-//! - YAML parsing for initial `chart_type`, `chart_orientation`, `chart_mode`,
-//!   `chart_height_px` (per-type default fallback via
+//! - YAML parsing for initial `chart_type`, `chart_orientation`, `chart_mode`.
+//! - `chart_height_px` from the effective spec (per-type default fallback via
 //!   [`default_chart_height_for_type`]).
 //! - Override signals (`chart_type_override`, `chart_orientation_override`,
 //!   `chart_mode_override`) for the header bar selectors.
@@ -42,6 +42,40 @@ use crate::components::dashboard::markdown_renderer::{
     apply_spec_overrides, default_chart_height_for_type, extract_chart_height, extract_chart_mode,
     extract_chart_orientation, extract_chart_type, substitute_params,
 };
+
+// ---------------------------------------------------------------------------
+// Card type tag (KYO-977)
+// ---------------------------------------------------------------------------
+
+/// The chart type to tag a `.chart-card` with via `data-chart-type`, and the
+/// callback that ends the tagging (pass it to `ChartMLChart::on_refreshed`).
+///
+/// The stylesheet drops a table card's padding and chart title with
+/// `:has(.chartml-table)`, which only matches once the table has rendered. For
+/// the first load there is no table yet, so the card is tagged with the type
+/// the chart WILL render (`data-chart-type="table"` is matched by the same
+/// rules) and is the same height loading and rendered. After the first render
+/// the tag is removed: from then on the card's styling follows the content on
+/// screen, so changing the type does not restyle the old chart before the new
+/// one has rendered. The tag ends at the first SUCCESSFUL render (that is when
+/// `on_refreshed` fires), so a card whose first load fails stays tagged until a
+/// retry renders.
+pub(crate) fn chart_card_type_until_rendered(
+    current_type: Memo<Option<String>>,
+) -> (Signal<Option<String>>, Callback<()>) {
+    let (rendered, set_rendered) = signal(false);
+    let tag = Signal::derive(move || {
+        if rendered.try_get().unwrap_or(true) {
+            None
+        } else {
+            current_type.try_get().flatten()
+        }
+    });
+    let mark_rendered = Callback::new(move |()| {
+        set_rendered.try_set(true);
+    });
+    (tag, mark_rendered)
+}
 
 // ---------------------------------------------------------------------------
 // Component
@@ -118,16 +152,6 @@ pub fn KyomiChart(
     let initial_chart_type = parsed_spec.as_ref().and_then(extract_chart_type);
     let initial_orientation = parsed_spec.as_ref().and_then(extract_chart_orientation);
     let initial_mode = parsed_spec.as_ref().and_then(extract_chart_mode);
-
-    // Reserve the rendered chart's height on the outer wrapper so the
-    // ChartMLChart loading placeholder doesn't cause a layout shift when data
-    // arrives. Falls back to chartml's per-type default (150px for metric
-    // cards, 400px for cartesian / pie / scatter / table) when the spec omits
-    // an explicit height. (Parity fix #11 / #23 / #29.)
-    let chart_height_px = parsed_spec
-        .as_ref()
-        .and_then(extract_chart_height)
-        .unwrap_or_else(|| default_chart_height_for_type(initial_chart_type.as_deref()));
 
     // ------------------------------------------------------------------
     // 2. Override signals
@@ -210,6 +234,22 @@ pub fn KyomiChart(
 
     let spec_signal = Signal::derive(move || effective_yaml.try_get().unwrap_or_default());
 
+    // Height the tile keeps when ChartMLChart shows an error instead of a
+    // chart (the error block has no reserved height of its own): explicit
+    // `visualize.style.height`, else the per-type default (150px metric, 400px
+    // otherwise). Derived from the EFFECTIVE spec so a type override changes it
+    // together with chartml's own reservation instead of disagreeing with it.
+    let chart_height_px = Memo::new(move |_| {
+        let spec: Option<serde_json::Value> = serde_yaml::from_str(&effective_yaml.try_get()?).ok();
+        Some(
+            spec.as_ref()
+                .and_then(extract_chart_height)
+                .unwrap_or_else(|| {
+                    default_chart_height_for_type(spec.as_ref().and_then(extract_chart_type).as_deref())
+                }),
+        )
+    });
+
     // ------------------------------------------------------------------
     // 6. Last-refreshed timestamp (parity fix #18)
     // ------------------------------------------------------------------
@@ -217,8 +257,10 @@ pub fn KyomiChart(
     // fetch + transform + render completes. On cache hits this reflects
     // when the data was originally fetched from the server, not "now".
     let (last_refreshed, set_last_refreshed) = signal(None::<f64>);
+    let (card_type_tag, mark_rendered) = chart_card_type_until_rendered(current_chart_type);
     let on_refreshed_cb = Callback::new(move |ms: f64| {
         set_last_refreshed.try_set(Some(ms));
+        mark_rendered.run(());
     });
 
     // ------------------------------------------------------------------
@@ -324,7 +366,7 @@ pub fn KyomiChart(
     // 10. View — chart-card wrapper, header bar, chart (with height reserve)
     // ------------------------------------------------------------------
     view! {
-        <div class="chart-card">
+        <div class="chart-card" data-chart-type=move || card_type_tag.try_get().flatten()>
             // Header bar re-renders when type/orientation/mode override signals
             // change. All other callbacks are stable `StoredValue`s.
             {move || {
@@ -369,10 +411,12 @@ pub fn KyomiChart(
                     />
                 }.into_any()
             }}
-            // `min-height` reserves the rendered chart's vertical space so the
-            // ChartMLChart loading placeholder doesn't cause a layout shift when
-            // data arrives. (Parity fix #11 / #23 / #29.)
-            <div class="w-full flex flex-col" style=format!("min-height: {}px", chart_height_px)>
+            // Keeps an errored tile at the chart's height; see `chart_height_px`.
+            // Loading and rendered heights are chartml-leptos's own reservation
+            // (title + chart height), which is never below this minimum, so the
+            // two agree there. An error is shorter than that reservation: the
+            // error block reserves no height (KYO-977).
+            <div class="w-full flex flex-col" style=move || chart_height_px.try_get().flatten().map(|h| format!("min-height: {}px", h))>
                 <ChartMLChart
                     spec=spec_signal
                     chartml=chartml
