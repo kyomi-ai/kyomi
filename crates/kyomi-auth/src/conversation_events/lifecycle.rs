@@ -975,6 +975,13 @@ impl ConversationStore<'_> {
             let (existing,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM api_usage_log WHERE session_id=$1 AND request_id=$2")
                 .bind(conversation.as_str()).bind(run_key).fetch_one(&mut *tx).await?;
             if existing > 0 {
+                tracing::warn!(
+                    run_id = %run_key,
+                    input_tokens = usage.input_tokens,
+                    output_tokens = usage.output_tokens,
+                    cost_estimate = usage.cost_estimate,
+                    "usage row already written for this run; the additional usage is not recorded"
+                );
                 return Ok(());
             }
             let insert = kyomi_core::models::ApiUsageInsert::insert_sql(matches!(self.db, DbPool::Postgres(_)));

@@ -301,7 +301,30 @@ impl Drop for BillOnDrop {
 /// this does nothing. (If the lease was lost the fence rightly rejects the write and
 /// the loss is logged: another owner now owns the run.)
 #[derive(Clone, Default)]
-pub struct BillingSlot(Arc<Mutex<Option<(UsageLedger, OwnedBilling)>>>);
+pub struct BillingSlot(Arc<SlotInner>);
+
+#[derive(Default)]
+struct SlotInner(Mutex<Option<(UsageLedger, OwnedBilling)>>);
+
+impl Drop for SlotInner {
+    /// The last holder of a durable run is gone. Anything still unbilled (a panic, a
+    /// shutdown abort, a refused write) must not vanish quietly.
+    fn drop(&mut self) {
+        let Some((ledger, billing)) = self.0.get_mut().unwrap_or_else(std::sync::PoisonError::into_inner).take() else {
+            return;
+        };
+        if !ledger.is_empty() {
+            error!(
+                user_id = %billing.user_id,
+                workspace_id = %billing.workspace_id,
+                component = %billing.component,
+                model = %billing.model,
+                totals = ?ledger.totals(),
+                "BILLING ROW LOST: a durable run ended with unbilled model calls"
+            );
+        }
+    }
+}
 
 impl std::fmt::Debug for BillingSlot {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -312,7 +335,14 @@ impl std::fmt::Debug for BillingSlot {
 impl BillingSlot {
     /// Called by `execute_agent_chat` once the run's ledger and billing identity exist.
     pub(crate) fn register(&self, ledger: UsageLedger, billing: OwnedBilling) {
-        *self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some((ledger, billing));
+        // The raw key is not needed here: `bill_remaining` takes it as an argument.
+        let billing = OwnedBilling { encryption_key: [0u8; 32], ..billing };
+        let mut slot = self.0 .0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        debug_assert!(
+            slot.as_ref().is_none_or(|(held, _)| held.is_empty()),
+            "a registration must not replace a ledger that still has unbilled calls"
+        );
+        *slot = Some((ledger, billing));
     }
 
     /// Bill any calls the run made but never billed, under the run's *current* lease.
@@ -321,7 +351,7 @@ impl BillingSlot {
         run: &crate::adapter::DurableRun,
         encryption_key: &[u8; 32],
     ) -> kyomi_core::Result<()> {
-        let registered = self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
+        let registered = self.0 .0.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
         let Some((ledger, mut billing)) = registered else { return Ok(()) };
         if ledger.is_empty() {
             return Ok(());

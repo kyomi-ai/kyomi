@@ -212,7 +212,7 @@ impl DurableChatWorker {
             context: claimed_context.clone(),
             billing: usage_slot.clone(),
         };
-        let (result, lease) = drive_execution(
+        let driven = drive_execution(
             &store,
             &owned,
             &cancel,
@@ -222,16 +222,15 @@ impl DurableChatWorker {
                 heartbeat: HEARTBEAT_INTERVAL,
             },
         )
-        .await?;
+        .await;
         // Bill whatever the run paid for but never billed (execution dropped on a user cancel
-        // seen through the heartbeat, or ended in an error after a paid call) *before* the
-        // run is finished: the fenced write is only valid while the run is still `Running`.
-        {
-            let current = DurableRun { lease: lease.clone(), ..owned.clone() };
-            if let Err(e) = owned.billing.bill_remaining(&current, &self.encryption_key).await {
-                tracing::error!(error = %e, run_id = %run_id.as_str(), "BILLING ROW LOST: failed to bill a durable run's remaining usage");
-            }
-        }
+        // seen through the heartbeat, ended in an error after a paid call, or abandoned on a
+        // heartbeat failure) *before* the run is finished: the fenced write is only valid
+        // while the run is still `Running`. On a heartbeat failure the last known lease is the
+        // best we have; a refused write is logged, never silent.
+        let billing_lease = driven.as_ref().map_or_else(|_| owned.lease.clone(), |(_, lease)| lease.clone());
+        bill_run_remainder(&owned, &billing_lease, &self.encryption_key).await;
+        let (result, lease) = driven?;
         let (state, content, metadata, model, usage) = match result {
             Ok(result) => {
                 let (state, content) = terminal_outcome(&result.status, &result.response_text);
@@ -321,6 +320,14 @@ pub(crate) fn terminal_outcome<'a>(status: &str, response: &'a str) -> (RunState
             "Execution stopped before completing a response.",
         ),
         _ => (RunState::Failed, response),
+    }
+}
+
+/// Bill a durable run's unbilled calls under `lease`; a failure is logged with the totals.
+async fn bill_run_remainder(owned: &DurableRun, lease: &agent_runtime::Lease, key: &[u8; 32]) {
+    let current = DurableRun { lease: lease.clone(), ..owned.clone() };
+    if let Err(e) = owned.billing.bill_remaining(&current, key).await {
+        tracing::error!(error = %e, run_id = %owned.run_id.as_str(), "BILLING ROW LOST: failed to bill a durable run's remaining usage");
     }
 }
 
@@ -635,6 +642,47 @@ mod tests {
         assert!(owned.billing.bill_remaining(&current, &key).await.is_err(), "terminal run: stale fence");
         assert!(!late.is_empty(), "the refused calls are kept, not dropped");
         assert_eq!(rows(&db, owned.run_id.as_str()).await, 1);
+    }
+
+    /// A heartbeat failure (here: the run is already terminal, so renewal is refused) makes
+    /// `drive_execution` return an error. The worker still tries to bill what the run paid for
+    /// and, when the fence refuses, keeps the calls and logs instead of dropping them silently.
+    #[tokio::test]
+    async fn a_heartbeat_failure_still_attempts_to_bill_and_keeps_refused_calls() {
+        use crate::usage_ledger::{OwnedBilling, UsageLedger};
+        let db = crate::test_support::test_pool().await;
+        crate::test_support::seed_user_and_workspace(&db).await;
+        let key = [7u8; 32];
+        let owned = claimed(&db, &key).await;
+        let store = ConversationStore::new(&db, &key, "user-a", "ws-1");
+        let body = serde_json::json!({"content": [], "stop_reason": "end_turn", "usage": {"input_tokens": 1000, "output_tokens": 100}});
+        let response = crate::anthropic::AnthropicClient::parse_response("claude-sonnet-5-5", &body, None).unwrap();
+        let ledger = UsageLedger::default();
+        ledger.record("claude-sonnet-5-5", &response);
+        owned.billing.register(
+            ledger.clone(),
+            OwnedBilling {
+                db: db.clone(), encryption_key: [0u8; 32], user_id: "user-a".into(), workspace_id: "ws-1".into(),
+                session_id: None, component: "custom_agent".into(), provider: "anthropic".into(),
+                model: "claude-sonnet-5-5".into(), is_byok: false, durable: None,
+            },
+        );
+        // The run becomes terminal under the worker, so its next heartbeat is refused.
+        store
+            .finish_with_metadata(&owned.conversation_id, &owned.run_id, &owned.lease, now(), (RunState::Failed, "gone"), None)
+            .await
+            .expect("finish");
+        let cancel = CancellationToken::new();
+        let driven = drive_execution(
+            &store, &owned, &cancel,
+            std::future::pending::<kyomi_core::Result<()>>(),
+            LeaseTiming { ttl_ms: 30_000, heartbeat: Duration::from_millis(10) },
+        )
+        .await;
+        assert!(driven.is_err(), "a refused heartbeat abandons the execution");
+
+        bill_run_remainder(&owned, &owned.lease, &key).await; // refused by the fence: logged, not silent
+        assert!(!ledger.is_empty(), "the refused calls are kept");
     }
 
     #[tokio::test]
