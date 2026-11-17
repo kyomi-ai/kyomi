@@ -184,14 +184,24 @@ async fn every_call_type_writes_exactly_one_metered_row_counted_by_credits() {
 /// response (so the real client, parser, price table, metering and billing run);
 /// returns its base URL.
 async fn mock_anthropic(body: serde_json::Value) -> String {
+    mock_anthropic_capturing(body).await.0
+}
+
+/// As [`mock_anthropic`], also returning the `model` of every request the server received.
+async fn mock_anthropic_capturing(
+    body: serde_json::Value,
+) -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let payload = body.to_string();
+    let requested = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let seen = requested.clone();
     tokio::spawn(async move {
         loop {
             let Ok((mut stream, _)) = listener.accept().await else { return };
             let payload = payload.clone();
+            let seen = seen.clone();
             tokio::spawn(async move {
                 let mut buf = Vec::new();
                 let mut chunk = [0u8; 4096];
@@ -212,6 +222,10 @@ async fn mock_anthropic(body: serde_json::Value) -> String {
                             .and_then(|v| v.trim().parse::<usize>().ok())
                             .unwrap_or(0);
                         if buf.len() >= end + 4 + len {
+                            let body: serde_json::Value = serde_json::from_slice(&buf[end + 4..]).unwrap_or_default();
+                            if let Some(model) = body["model"].as_str() {
+                                seen.lock().unwrap().push(model.to_string());
+                            }
                             break;
                         }
                     }
@@ -224,7 +238,7 @@ async fn mock_anthropic(body: serde_json::Value) -> String {
             });
         }
     });
-    format!("http://{addr}")
+    (format!("http://{addr}"), requested)
 }
 
 fn haiku_text_response(text: &str) -> serde_json::Value {
@@ -237,7 +251,7 @@ fn haiku_text_response(text: &str) -> serde_json::Value {
 }
 
 /// A workspace/user/session fixture and an app config pointing the real provider
-/// factory at `base_url` (Haiku 5.5).
+/// factory at `base_url` (chat on Sonnet 5.5, title model Haiku 5.5), on the Kyomi-managed setup.
 async fn fixture(base_url: String) -> (DbPool, kyomi_core::Config) {
     let db = kyomi_test_db::test_pool().await;
     let DbPool::Sqlite(sq) = &db else { panic!("sqlite fixture") };
@@ -248,7 +262,9 @@ async fn fixture(base_url: String) -> (DbPool, kyomi_core::Config) {
     app_config.llm_provider = Some("anthropic".into());
     app_config.llm_api_key = Some("test-key".into());
     app_config.llm_base_url = Some(base_url);
-    app_config.llm_model = Some("claude-haiku-5-5".into());
+    // Chat runs on Sonnet 5.5; titles, summaries and tags are meant to run on the title model.
+    app_config.llm_model = Some("claude-sonnet-5-5".into());
+    app_config.llm_title_model = Some("claude-haiku-5-5".into());
     (db, app_config)
 }
 
@@ -465,4 +481,49 @@ async fn a_bill_dropped_mid_write_keeps_its_calls_for_the_next_bill() {
     ledger.bill(&ctx(&db)).await.unwrap();
     assert_eq!(usage_rows(&db).await.len(), 1, "written exactly once by the next bill");
     assert!(ledger.is_empty());
+}
+
+/// KYO-974: on the Kyomi-managed setup the title, dashboard-summary and collection-tag calls
+/// request the title model (`LLM_TITLE_MODEL`), not the chat model, and the usage rows record
+/// the model that was actually requested.
+#[tokio::test]
+async fn title_summary_and_tag_calls_request_and_record_the_title_model() {
+    let (url, requested) = mock_anthropic_capturing(haiku_text_response("[]")).await;
+    let (db, app_config) = fixture(url).await;
+    kyomi_core::db_execute!(&db, "INSERT INTO dashboards (dashboard_id,user_id,workspace_id,title,content,doc_type) VALUES ('d1','u1','w1','Revenue','Monthly revenue by region.','knowledge')").unwrap();
+    kyomi_core::db_execute!(&db, "INSERT INTO collections (id,workspace_id,name,description,created_by) VALUES ('c1','w1','Finance','Finance dashboards','u1')").unwrap();
+    let manager = kyomi_auth::websocket::WebSocketManager::new(None, db.clone());
+    crate::execution::generate_title_inner(&db, &manager, "s1", "u1", "w1", "revenue by region?", &app_config)
+        .await
+        .unwrap();
+    let params = crate::execution::DashboardSummaryParams {
+        validation_context: crate::tools::QueryContext {
+            db: db.clone(),
+            user_id: "u1".into(),
+            workspace_id: "w1".into(),
+            encryption_key: std::sync::Arc::new([0u8; 32]),
+            config: std::sync::Arc::new(app_config.clone()),
+            connect_registry: None,
+        },
+        db: db.clone(),
+        ws_manager: manager,
+        dashboard_id: "d1".into(),
+        user_id: "u1".into(),
+        workspace_id: "w1".into(),
+        title: "Revenue".into(),
+        content: "Monthly revenue by region.".into(),
+        app_config: std::sync::Arc::new(app_config),
+        doc_type: "knowledge".into(),
+        copilot_receipt_id: None,
+    };
+    crate::execution::generate_dashboard_summary_inner(params).await.unwrap();
+
+    assert_eq!(
+        *requested.lock().unwrap(),
+        ["claude-haiku-5-5"; 3],
+        "title, summary and tag each request the title model"
+    );
+    let rows = usage_rows(&db).await;
+    assert_eq!(rows.len(), 3, "{rows:?}");
+    assert!(rows.iter().all(|r| r.1 == "claude-haiku-5-5"), "rows record the requested model: {rows:?}");
 }

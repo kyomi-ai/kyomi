@@ -452,7 +452,7 @@ pub async fn execute_agent_chat(
             ws_config.model = Some(model.clone());
         }
         let is_byok = is_byok(&ws_config, app_config);
-        let client = create_provider_from_workspace(&ws_config, app_config)?;
+        let client = create_provider_from_workspace(&ws_config, app_config, None)?;
         // Resolved once per execution so the value is stable for the whole
         // conversation turn (effort changes invalidate Anthropic's prompt
         // cache).
@@ -931,7 +931,7 @@ pub(crate) async fn generate_title_inner(
             ))
         })?;
 
-    {
+    let requested_model = {
         // Check for an explicit title_model configured in workspace settings.
         // When set, it takes priority over the cheapest-model override below.
         let title_model = kyomi_auth::workspace_ai_config::load_title_model(db, workspace_id)
@@ -946,16 +946,13 @@ pub(crate) async fn generate_title_inner(
             .ok()
             .flatten();
 
-        // Title model: use LLM_TITLE_MODEL if set, or workspace title_model.
-        // No hardcoded fallback — if neither is configured, the default model is used.
-        if let Some(tm) = title_model {
-            ws_config.model = Some(tm);
-        } else if let Some(ref tm) = app_config.llm_title_model {
-            ws_config.model = Some(tm.clone());
-        }
-    }
+        // Title model: the workspace title_model, else LLM_TITLE_MODEL. No hardcoded fallback:
+        // if neither is configured the setup's own model is used. It is requested explicitly so
+        // it also applies on the Kyomi-managed setup (it used to be dropped there).
+        title_model.or_else(|| app_config.llm_title_model.clone())
+    };
 
-    let client = create_provider_from_workspace(&ws_config, app_config)?;
+    let client = create_provider_from_workspace(&ws_config, app_config, requested_model.as_deref())?;
     let options = crate::sampling::background_options(&ws_config, app_config, 512);
 
     let user_turn = format!(
@@ -1228,13 +1225,10 @@ pub(crate) async fn generate_dashboard_summary_inner(
         .ok()
         .flatten();
 
-    if let Some(tm) = title_model {
-        ws_config.model = Some(tm);
-    } else if let Some(ref tm) = app_config.llm_title_model {
-        ws_config.model = Some(tm.clone());
-    }
-
-    let client = create_provider_from_workspace(&ws_config, app_config)?;
+    // The workspace title_model, else LLM_TITLE_MODEL, requested explicitly (also on the
+    // Kyomi-managed setup); `None` keeps the setup's own model.
+    let requested_model = title_model.or_else(|| app_config.llm_title_model.clone());
+    let client = create_provider_from_workspace(&ws_config, app_config, requested_model.as_deref())?;
     let options = crate::sampling::background_options(&ws_config, app_config, 512);
     let tag_options = crate::sampling::background_options(&ws_config, app_config, 256);
 
