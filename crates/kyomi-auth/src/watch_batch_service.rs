@@ -17,9 +17,8 @@
 //!   re-polling its vendor batch id), and only a call with no row is
 //!   submitted. Keying by position rather than by request hash is what keeps a
 //!   resume from resubmitting when replayed tool results, or context such as
-//!   recent alerts, differ from the first attempt. The request hash is stored
-//!   as a drift check only. Response bodies are encrypted at rest like chat
-//!   messages.
+//!   recent alerts, differ from the first attempt. Response bodies are
+//!   encrypted at rest like chat messages.
 
 use chrono::{DateTime, Utc};
 use kyomi_core::models::ApiUsageInsert;
@@ -82,7 +81,6 @@ pub struct BatchCall {
     pub execution_id: i32,
     /// Position of the call within the run (0-based).
     pub call_index: i32,
-    pub request_hash: String,
     pub provider: String,
     pub model: String,
     pub vendor_batch_id: Option<String>,
@@ -97,7 +95,6 @@ struct CallRow {
     call_id: String,
     execution_id: i32,
     call_index: i32,
-    request_hash: String,
     provider: String,
     model: String,
     vendor_batch_id: Option<String>,
@@ -106,7 +103,7 @@ struct CallRow {
     error_message: Option<String>,
 }
 
-const CALL_COLUMNS: &str = "call_id, execution_id, call_index, request_hash, provider, model, \
+const CALL_COLUMNS: &str = "call_id, execution_id, call_index, provider, model, \
      vendor_batch_id, state, response_encrypted, error_message";
 
 fn to_call(row: CallRow, key: &[u8; 32]) -> kyomi_core::Result<BatchCall> {
@@ -114,7 +111,6 @@ fn to_call(row: CallRow, key: &[u8; 32]) -> kyomi_core::Result<BatchCall> {
         call_id: row.call_id,
         execution_id: row.execution_id,
         call_index: row.call_index,
-        request_hash: row.request_hash,
         provider: row.provider,
         model: row.model,
         vendor_batch_id: row.vendor_batch_id,
@@ -157,7 +153,6 @@ pub async fn begin_call(
     key: &[u8; 32],
     execution_id: i32,
     call_index: i32,
-    request_hash: &str,
     provider: &str,
     model: &str,
 ) -> kyomi_core::Result<BatchCall> {
@@ -165,13 +160,12 @@ pub async fn begin_call(
     kyomi_core::db_execute!(
         db,
         "INSERT INTO watch_batch_calls \
-            (call_id, execution_id, call_index, request_hash, provider, model, state, submitted_at) \
-         VALUES ($1, $2, $3, $4, $5, $6, 'submitting', $7) \
+            (call_id, execution_id, call_index, provider, model, state, submitted_at) \
+         VALUES ($1, $2, $3, $4, $5, 'submitting', $6) \
          ON CONFLICT (execution_id, call_index) DO NOTHING",
         &call_id,
         execution_id,
         call_index,
-        request_hash,
         provider,
         model,
         Utc::now()
@@ -815,13 +809,12 @@ mod tests {
     async fn begin_call_is_idempotent_per_position_and_distinct_across_positions() {
         let db = test_pool().await;
         let id = execution(&db).await;
-        let a = begin_call(&db, &KEY, id, 0, "h1", "anthropic", "m").await.unwrap();
+        let a = begin_call(&db, &KEY, id, 0, "anthropic", "m").await.unwrap();
         // The same position with a *different* request (replayed tool results
         // changed) still resolves to the same call: that is the point.
-        let again = begin_call(&db, &KEY, id, 0, "h-drifted", "anthropic", "m").await.unwrap();
+        let again = begin_call(&db, &KEY, id, 0, "anthropic", "m").await.unwrap();
         assert_eq!(a.call_id, again.call_id, "a position must not be recorded twice");
-        assert_eq!(again.request_hash, "h1", "the original request hash is kept as the drift check");
-        let b = begin_call(&db, &KEY, id, 1, "h2", "anthropic", "m").await.unwrap();
+        let b = begin_call(&db, &KEY, id, 1, "anthropic", "m").await.unwrap();
         assert_ne!(a.call_id, b.call_id);
         assert_eq!((a.state, b.call_index), (BatchCallState::Submitting, 1));
     }
@@ -830,7 +823,7 @@ mod tests {
     async fn a_finished_call_round_trips_its_response_encrypted_and_is_never_overwritten() {
         let db = test_pool().await;
         let id = execution(&db).await;
-        let c = begin_call(&db, &KEY, id, 0, "h1", "anthropic", "m").await.unwrap();
+        let c = begin_call(&db, &KEY, id, 0, "anthropic", "m").await.unwrap();
         mark_submitted(&db, &c.call_id, "msgbatch_1").await.unwrap();
         let body = serde_json::json!({"content": [{"type": "text", "text": "secret-finding"}]});
         assert!(finish_call(&db, &KEY, &c.call_id, BatchCallState::Succeeded, Some(&body), None).await.unwrap());
@@ -856,7 +849,7 @@ mod tests {
     async fn a_fallback_response_is_kept_once_for_an_abandoned_call_and_never_for_a_succeeded_one() {
         let db = test_pool().await;
         let id = execution(&db).await;
-        let abandoned = begin_call(&db, &KEY, id, 0, "h1", "anthropic", "m").await.unwrap();
+        let abandoned = begin_call(&db, &KEY, id, 0, "anthropic", "m").await.unwrap();
         finish_call(&db, &KEY, &abandoned.call_id, BatchCallState::Abandoned, None, Some("deadline")).await.unwrap();
         let first = serde_json::json!({"content": "realtime one"});
         attach_fallback_response(&db, &KEY, &abandoned.call_id, &first).await.unwrap();
@@ -864,7 +857,7 @@ mod tests {
         let got = find_call(&db, &KEY, id, 0).await.unwrap().unwrap();
         assert_eq!((got.state, got.response), (BatchCallState::Abandoned, Some(first)), "the first fallback response wins");
 
-        let ok = begin_call(&db, &KEY, id, 1, "h2", "anthropic", "m").await.unwrap();
+        let ok = begin_call(&db, &KEY, id, 1, "anthropic", "m").await.unwrap();
         finish_call(&db, &KEY, &ok.call_id, BatchCallState::Succeeded, Some(&serde_json::json!({"a": 1})), None).await.unwrap();
         attach_fallback_response(&db, &KEY, &ok.call_id, &serde_json::json!({"a": 2})).await.unwrap();
         assert_eq!(find_call(&db, &KEY, id, 1).await.unwrap().unwrap().response, Some(serde_json::json!({"a": 1})));
@@ -875,10 +868,10 @@ mod tests {
         let db = test_pool().await;
         let id = execution(&db).await;
         for (i, b) in [(0, "b1"), (1, "b2")] {
-            let c = begin_call(&db, &KEY, id, i, &format!("h{i}"), "anthropic", "m").await.unwrap();
+            let c = begin_call(&db, &KEY, id, i, "anthropic", "m").await.unwrap();
             mark_submitted(&db, &c.call_id, b).await.unwrap();
         }
-        let _unsubmitted = begin_call(&db, &KEY, id, 2, "h3", "anthropic", "m").await.unwrap();
+        let _unsubmitted = begin_call(&db, &KEY, id, 2, "anthropic", "m").await.unwrap();
         assert_eq!(batch_ids(&db, id).await.unwrap(), vec!["b1", "b2"]);
         sync_batch_ids(&db, id).await.unwrap();
         let e = crate::watch_service::get_execution_by_id_only(&db, id, "ws1", "u1").await.unwrap().unwrap();
@@ -982,7 +975,7 @@ mod tests {
     async fn calls_are_removed_with_their_execution() {
         let db = test_pool().await;
         let id = execution(&db).await;
-        begin_call(&db, &KEY, id, 0, "h1", "anthropic", "m").await.unwrap();
+        begin_call(&db, &KEY, id, 0, "anthropic", "m").await.unwrap();
         sqlx::query("PRAGMA foreign_keys = ON").execute(sqlite_pool(&db)).await.unwrap();
         sqlx::query("DELETE FROM watch_executions WHERE id = $1").bind(id).execute(sqlite_pool(&db)).await.unwrap();
         assert!(find_call(&db, &KEY, id, 0).await.unwrap().is_none());
@@ -1115,8 +1108,8 @@ mod tests {
     async fn usage_is_written_with_the_result_summed_over_the_run_and_billed_at_most_once_by_the_lease_owner() {
         let db = test_pool().await;
         let id = batch_run(&db, "me", Duration::seconds(120)).await;
-        let a = begin_call(&db, &KEY, id, 0, "h0", "anthropic", "m").await.unwrap();
-        let b = begin_call(&db, &KEY, id, 1, "h1", "anthropic", "m").await.unwrap();
+        let a = begin_call(&db, &KEY, id, 0, "anthropic", "m").await.unwrap();
+        let b = begin_call(&db, &KEY, id, 1, "anthropic", "m").await.unwrap();
         finish_call(&db, &KEY, &a.call_id, BatchCallState::Succeeded, Some(&serde_json::json!({"in": 20, "out": 9})), None).await.unwrap();
         finish_call(&db, &KEY, &b.call_id, BatchCallState::Abandoned, None, Some("deadline")).await.unwrap();
         assert!(attach_fallback_response(&db, &KEY, &b.call_id, &serde_json::json!({"in": 15, "out": 5})).await.unwrap());
@@ -1138,7 +1131,7 @@ mod tests {
 
         // A failed row build rolls the claim back, so the run can still be billed.
         let id3 = another_batch_run(&db, "me", Duration::seconds(120)).await;
-        let c = begin_call(&db, &KEY, id3, 0, "h", "anthropic", "m").await.unwrap();
+        let c = begin_call(&db, &KEY, id3, 0, "anthropic", "m").await.unwrap();
         finish_call(&db, &KEY, &c.call_id, BatchCallState::Succeeded, Some(&serde_json::json!({"in": 3, "out": 1})), None).await.unwrap();
         let failing = |_: &[StoredResponse]| Err(kyomi_core::Error::Internal("cannot price".into()));
         assert!(bill_run_once(&db, id3, BillingFence::LeaseOwner("me"), Utc::now(), &bill(), failing).await.is_err());
@@ -1149,7 +1142,7 @@ mod tests {
     async fn a_reaped_run_is_billed_for_what_it_paid_before_the_stop_and_only_once() {
         let db = test_pool().await;
         let id = batch_run(&db, "wedged", Duration::seconds(120)).await;
-        let c = begin_call(&db, &KEY, id, 0, "h", "anthropic", "m").await.unwrap();
+        let c = begin_call(&db, &KEY, id, 0, "anthropic", "m").await.unwrap();
         finish_call(&db, &KEY, &c.call_id, BatchCallState::Succeeded, Some(&serde_json::json!({"in": 11, "out": 4})), None).await.unwrap();
 
         // A live (not yet stopped) run cannot be billed by the StoppedRun fence.

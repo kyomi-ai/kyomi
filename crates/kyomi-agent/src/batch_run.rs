@@ -11,8 +11,7 @@
 //! Because calls are keyed by position, not by request hash, a run that is
 //! resumed after a restart simply replays from the start: nothing already paid
 //! for is resubmitted even if replayed tool results (or context such as recent
-//! alerts) differ from the first attempt. The request hash is recorded only so
-//! drift can be logged.
+//! alerts) differ from the first attempt.
 //!
 //! The wait is a lightweight poll loop. The run's lease is renewed by a
 //! heartbeat for the whole run ([`LeaseHeartbeat`]) as well as on every call; if
@@ -32,7 +31,6 @@ use chrono::{DateTime, Utc};
 use kyomi_auth::watch_batch_service::{self as store, BatchCall, BatchCallState};
 use kyomi_core::watch_llm::BatchFailurePolicy;
 use kyomi_core::DbPool;
-use sha2::{Digest, Sha256};
 use tracing::{info, warn};
 
 use crate::batch::{BatchLLMProvider, BatchPoll};
@@ -314,10 +312,6 @@ pub(crate) fn batch_run_row(
     Ok(ledger.billing_row(billing.is_byok, billing.provider, billing.model, billing.component))
 }
 
-fn request_hash(body: &serde_json::Value) -> String {
-    hex::encode(Sha256::digest(body.to_string().as_bytes()))
-}
-
 #[async_trait]
 impl LLMProvider for BatchingProvider {
     async fn complete(
@@ -340,16 +334,12 @@ impl LLMProvider for BatchingProvider {
         }
 
         let body = batch.build_body(messages, tools, options, user_names);
-        let hash = request_hash(&body);
         let past_deadline = Utc::now() >= self.ctx.deadline;
 
         // The nth call already has a row: this is a replay of an earlier attempt.
         let existing = store::find_call(&self.ctx.db, key, self.ctx.execution_id, index).await?;
         let call = match existing {
             Some(call) => {
-                if call.request_hash != hash {
-                    info!(execution_id = self.ctx.execution_id, index, "replayed request differs from the recorded one; answering from the recorded call");
-                }
                 match call.state {
                     BatchCallState::Succeeded => {
                         let response = call.response.as_ref().ok_or_else(|| {
@@ -380,11 +370,11 @@ impl LLMProvider for BatchingProvider {
                     // instead of paying for the model again.
                     let reason = "run reached its batch deadline; remaining calls ran in realtime";
                     store::note_fallback(&self.ctx.db, self.ctx.execution_id, reason).await?;
-                    let row = store::begin_call(&self.ctx.db, key, self.ctx.execution_id, index, &hash, &self.provider_name, self.inner.model()).await?;
+                    let row = store::begin_call(&self.ctx.db, key, self.ctx.execution_id, index, &self.provider_name, self.inner.model()).await?;
                     store::finish_call(&self.ctx.db, key, &row.call_id, BatchCallState::Abandoned, None, Some(reason)).await?;
                     return self.realtime_and_keep(Some(&row), messages, tools, options, user_names).await;
                 }
-                store::begin_call(&self.ctx.db, key, self.ctx.execution_id, index, &hash, &self.provider_name, self.inner.model()).await?
+                store::begin_call(&self.ctx.db, key, self.ctx.execution_id, index, &self.provider_name, self.inner.model()).await?
             }
         };
 
@@ -599,13 +589,7 @@ mod tests {
         // The custom_id is only known after the row exists, so serve the
         // results line lazily from the DB via a pre-registered call id.
         let line = {
-            let body = BatchingProvider::new(
-                Box::new(AnthropicClient::with_base_url("k".into(), Some("claude-x".into()), "http://unused".into()).unwrap()),
-                "anthropic",
-                ctx(&f, chrono::Duration::hours(1), BatchFailurePolicy::RealtimeRetry),
-            );
-            let b = body.inner.batch().unwrap().build_body(&msgs(), &[], &RequestOptions::new(256), &HashMap::new());
-            let c = store::begin_call(&f.db, &KEY, f.execution_id, 0, &request_hash(&b), "anthropic", "claude-x").await.unwrap();
+            let c = store::begin_call(&f.db, &KEY, f.execution_id, 0, "anthropic", "claude-x").await.unwrap();
             Box::leak(
                 json!({"custom_id": c.call_id, "result": {"type": "succeeded", "message": serde_json::from_str::<Value>(&anthropic_text_reply("batched answer")).unwrap()}})
                     .to_string()
@@ -653,9 +637,7 @@ mod tests {
     #[tokio::test]
     async fn a_restarted_run_answers_finished_calls_from_the_cache_without_any_request() {
         let f = fixture().await;
-        let b = AnthropicClient::with_base_url("k".into(), Some("claude-x".into()), "http://unused".into()).unwrap();
-        let body = crate::batch::BatchLLMProvider::build_body(&b, &msgs(), &[], &RequestOptions::new(256), &HashMap::new());
-        let c = store::begin_call(&f.db, &KEY, f.execution_id, 0, &request_hash(&body), "anthropic", "claude-x").await.unwrap();
+        let c = store::begin_call(&f.db, &KEY, f.execution_id, 0, "anthropic", "claude-x").await.unwrap();
         store::mark_submitted(&f.db, &c.call_id, "msgbatch_old").await.unwrap();
         store::finish_call(&f.db, &KEY, &c.call_id, BatchCallState::Succeeded, Some(&serde_json::from_str(&anthropic_text_reply("from the first life")).unwrap()), None).await.unwrap();
 

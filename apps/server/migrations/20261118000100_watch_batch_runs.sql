@@ -28,12 +28,11 @@ CREATE INDEX IF NOT EXISTS idx_watch_executions_batch_lease
 -- the replay key: a resumed run replays from the start and its nth model call is
 -- answered by the nth row (the finished response, the vendor batch still being
 -- polled, or the recorded outcome), so a call is never resubmitted even when the
--- replayed tool results differ. request_hash is kept as a drift check only.
+-- replayed tool results differ.
 CREATE TABLE IF NOT EXISTS watch_batch_calls (
     call_id varchar(50) PRIMARY KEY,
     execution_id integer NOT NULL REFERENCES watch_executions(id) ON DELETE CASCADE,
     call_index integer NOT NULL,
-    request_hash varchar(64) NOT NULL,
     provider varchar(50) NOT NULL,
     model varchar(200) NOT NULL,
     vendor_batch_id varchar(200),

@@ -18,7 +18,6 @@ CREATE TABLE IF NOT EXISTS watch_batch_calls (
     call_id TEXT NOT NULL PRIMARY KEY,
     execution_id INTEGER NOT NULL REFERENCES watch_executions(id) ON DELETE CASCADE,
     call_index INTEGER NOT NULL,
-    request_hash TEXT NOT NULL,
     provider TEXT NOT NULL,
     model TEXT NOT NULL,
     vendor_batch_id TEXT,

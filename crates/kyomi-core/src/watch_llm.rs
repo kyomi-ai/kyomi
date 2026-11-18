@@ -114,8 +114,6 @@ pub fn parse_batch_window_minutes(raw: &str) -> Result<u32, InvalidSetting> {
 }
 
 /// Settings from one layer (instance env or workspace). `None` = not set.
-///
-/// `Debug` is implemented by hand so the API key can never reach a log line.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct WatchLlmSettings {
     pub provider: Option<String>,

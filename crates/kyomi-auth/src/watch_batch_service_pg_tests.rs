@@ -80,15 +80,15 @@ async fn postgres_call_cache_lease_resume_and_reap() {
     let id = f.run("dead-instance", Duration::seconds(-5)).await;
 
     // Call cache: ON CONFLICT idempotency per position, result + usage in one write, encrypted at rest.
-    let a = begin_call(&f.db, &KEY, id, 0, "h1", "anthropic", "m").await.unwrap();
-    let again = begin_call(&f.db, &KEY, id, 0, "h-drift", "anthropic", "m").await.unwrap();
-    assert_eq!((a.call_id.clone(), again.request_hash), (again.call_id, "h1".to_string()));
+    let a = begin_call(&f.db, &KEY, id, 0, "anthropic", "m").await.unwrap();
+    let again = begin_call(&f.db, &KEY, id, 0, "anthropic", "m").await.unwrap();
+    assert_eq!(a.call_id, again.call_id);
     mark_submitted(&f.db, &a.call_id, "msgbatch_1").await.unwrap();
     let body = serde_json::json!({"content": [{"text": "secret-finding"}]});
     assert!(finish_call(&f.db, &KEY, &a.call_id, BatchCallState::Succeeded, Some(&body), None).await.unwrap());
     assert!(!finish_call(&f.db, &KEY, &a.call_id, BatchCallState::Abandoned, None, None).await.unwrap(), "a final call is not overwritten");
     assert_eq!(find_call(&f.db, &KEY, id, 0).await.unwrap().unwrap().response, Some(body));
-    let b = begin_call(&f.db, &KEY, id, 1, "h2", "anthropic", "m").await.unwrap();
+    let b = begin_call(&f.db, &KEY, id, 1, "anthropic", "m").await.unwrap();
     finish_call(&f.db, &KEY, &b.call_id, BatchCallState::Abandoned, None, Some("deadline")).await.unwrap();
     assert!(attach_fallback_response(&f.db, &KEY, &b.call_id, &serde_json::json!({"x": 1})).await.unwrap());
     assert!(!attach_fallback_response(&f.db, &KEY, &b.call_id, &serde_json::json!({"x": 2})).await.unwrap());
@@ -144,7 +144,7 @@ async fn postgres_call_cache_lease_resume_and_reap() {
 async fn postgres_billing_is_one_atomic_lease_fenced_transaction() {
     let Some(f) = fixture("postgres_billing_is_one_atomic_lease_fenced_transaction").await else { return };
     let id = f.run("me", Duration::seconds(120)).await;
-    let c = begin_call(&f.db, &KEY, id, 0, "h", "anthropic", "m").await.unwrap();
+    let c = begin_call(&f.db, &KEY, id, 0, "anthropic", "m").await.unwrap();
     finish_call(&f.db, &KEY, &c.call_id, BatchCallState::Succeeded, Some(&serde_json::json!({"in": 7, "out": 3})), None).await.unwrap();
 
     let bill = UsageBill { encryption_key: &KEY, user_id: &f.user, workspace_id: &f.ws, session_id: "s" };
