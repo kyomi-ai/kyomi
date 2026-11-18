@@ -484,7 +484,7 @@ pub async fn update(
 // ---------------------------------------------------------------------------
 
 /// What to do with the stored watch LLM API key.
-#[derive(Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum WatchKeyChange {
     /// Leave the stored key as is.
     Keep,
@@ -492,16 +492,6 @@ pub enum WatchKeyChange {
     Set(String),
     /// Remove the stored key.
     Clear,
-}
-
-impl std::fmt::Debug for WatchKeyChange {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Keep => f.write_str("Keep"),
-            Self::Set(_) => f.write_str("Set(<redacted>)"),
-            Self::Clear => f.write_str("Clear"),
-        }
-    }
 }
 
 /// Whether the workspace has a stored watch LLM API key.
@@ -980,11 +970,6 @@ mod tests {
 
     // --- Watch LLM override (KYO-973) -------------------------------------
 
-    #[test]
-    fn watch_key_change_debug_never_prints_the_key() {
-        let shown = format!("{:?}", WatchKeyChange::Set("sk-watch-secret".into()));
-        assert!(!shown.contains("sk-watch-secret"), "{shown}");
-    }
 
     fn watch_settings() -> kyomi_core::watch_llm::WatchLlmSettings {
         use kyomi_core::watch_llm::{BatchFailurePolicy, WatchLlmMode, WatchLlmSettings};

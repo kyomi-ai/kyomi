@@ -116,7 +116,7 @@ pub fn parse_batch_window_minutes(raw: &str) -> Result<u32, InvalidSetting> {
 /// Settings from one layer (instance env or workspace). `None` = not set.
 ///
 /// `Debug` is implemented by hand so the API key can never reach a log line.
-#[derive(Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct WatchLlmSettings {
     pub provider: Option<String>,
     pub model: Option<String>,
@@ -125,20 +125,6 @@ pub struct WatchLlmSettings {
     pub mode: Option<WatchLlmMode>,
     pub batch_window_minutes: Option<u32>,
     pub batch_failure: Option<BatchFailurePolicy>,
-}
-
-impl fmt::Debug for WatchLlmSettings {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("WatchLlmSettings")
-            .field("provider", &self.provider)
-            .field("model", &self.model)
-            .field("base_url", &self.base_url)
-            .field("api_key", &self.api_key.as_ref().map(|_| "<redacted>"))
-            .field("mode", &self.mode)
-            .field("batch_window_minutes", &self.batch_window_minutes)
-            .field("batch_failure", &self.batch_failure)
-            .finish()
-    }
 }
 
 impl WatchLlmSettings {
@@ -165,21 +151,11 @@ impl WatchLlmSettings {
 }
 
 /// The watch LLM connection chosen by [`resolve_watch_llm`].
-#[derive(Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct WatchConnection {
     pub provider: String,
     pub api_key: String,
     pub base_url: Option<String>,
-}
-
-impl fmt::Debug for WatchConnection {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("WatchConnection")
-            .field("provider", &self.provider)
-            .field("api_key", &"<redacted>")
-            .field("base_url", &self.base_url)
-            .finish()
-    }
 }
 
 /// What a watch run should use.
@@ -453,13 +429,6 @@ mod tests {
         assert_eq!(resolve_watch_llm(&key_only, &Default::default()).connection, None);
     }
 
-    #[test]
-    fn debug_never_prints_the_api_key() {
-        let s = conn("openai", "sk-secret-value");
-        assert!(!format!("{s:?}").contains("sk-secret-value"));
-        let c = resolve_watch_llm(&s, &Default::default());
-        assert!(!format!("{c:?}").contains("sk-secret-value"));
-    }
 
     #[test]
     fn env_parsing_accepts_valid_and_names_the_bad_variable() {

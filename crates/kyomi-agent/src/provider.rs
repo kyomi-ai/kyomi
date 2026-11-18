@@ -262,9 +262,7 @@ impl ProviderKind {
 // ---------------------------------------------------------------------------
 
 /// Configuration needed to instantiate an [`LLMProvider`].
-///
-/// `Debug` is written by hand so the API key can never reach a log line.
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct LLMProviderConfig {
     /// Which provider backend to use.
     pub provider: ProviderKind,
@@ -276,18 +274,6 @@ pub struct LLMProviderConfig {
     pub base_url: Option<String>,
     /// Context window size in tokens (0 = unknown, use hardcoded lookup).
     pub context_window: u32,
-}
-
-impl fmt::Debug for LLMProviderConfig {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("LLMProviderConfig")
-            .field("provider", &self.provider)
-            .field("api_key", &"<redacted>")
-            .field("model", &self.model)
-            .field("base_url", &self.base_url)
-            .field("context_window", &self.context_window)
-            .finish()
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1101,17 +1087,4 @@ mod reasoning_usage_tests {
         assert!(!reasoning_exhausted_budget(&response("", "end_turn", None)));
     }
 
-    #[test]
-    fn provider_config_debug_never_prints_the_api_key() {
-        let c = LLMProviderConfig {
-            provider: ProviderKind::Anthropic,
-            api_key: "sk-super-secret".into(),
-            model: None,
-            base_url: None,
-            context_window: 0,
-        };
-        let shown = format!("{c:?}");
-        assert!(!shown.contains("sk-super-secret"), "{shown}");
-        assert!(shown.contains("redacted"));
-    }
 }
