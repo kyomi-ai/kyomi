@@ -27,8 +27,9 @@ use crate::components::{
     Label, Skeleton, StatusBadge, StatusBadgeVariant, INPUT_CLASS,
 };
 use crate::server_fns::ai::{
-    get_llm_tuning, get_resolved_ai_provider, list_openrouter_models, update_llm_tuning,
-    LlmTuningValues, LlmTuningView, ResolvedAiProviderView,
+    get_llm_tuning, get_resolved_ai_provider, get_watch_llm, list_openrouter_models,
+    update_llm_tuning, update_watch_llm, LlmTuningValues, LlmTuningView, ResolvedAiProviderView,
+    WatchLlmValues, WatchLlmView,
 };
 use crate::server_fns::context::UserContext;
 
@@ -92,6 +93,7 @@ fn SelfHostedView() -> impl IntoView {
         <div class="space-y-6">
             <ResolvedProviderPanel/>
             <LlmTuningCard/>
+            <WatchLlmCard/>
             <Card>
                 <CardContent>
                     <div class="space-y-4 p-2">
@@ -305,6 +307,25 @@ fn TuningField(
     }
 }
 
+/// The card chrome shared by the tuning-style settings cards: a title, a
+/// description and the body (a form behind a loading skeleton).
+#[component]
+fn SettingsCard(title: &'static str, description: &'static str, children: Children) -> impl IntoView {
+    view! {
+        <Card>
+            <CardContent>
+                <div class="space-y-4 p-2">
+                    <div>
+                        <h2 class="text-xl font-display text-foreground">{title}</h2>
+                        <p class="text-sm text-muted-foreground">{description}</p>
+                    </div>
+                    {children()}
+                </div>
+            </CardContent>
+        </Card>
+    }
+}
+
 #[component]
 fn LlmTuningCard() -> impl IntoView {
     let tuning = Resource::new(|| (), |_| get_llm_tuning());
@@ -314,44 +335,199 @@ fn LlmTuningCard() -> impl IntoView {
     let resolved = Resource::new(|| (), |_| get_resolved_ai_provider());
 
     view! {
-        <Card>
-            <CardContent>
-                <div class="space-y-4 p-2">
-                    <div>
-                        <h2 class="text-xl font-display text-foreground">"LLM Tuning"</h2>
-                        <p class="text-sm text-muted-foreground">
-                            "Reasoning effort and temperature for this workspace. Leave a field empty to use the instance value (shown as the placeholder); if neither is set, nothing is sent and the provider's own default applies. A value you enter is sent exactly as written."
-                        </p>
-                    </div>
-                    <Transition fallback=move || view! { <Skeleton class="h-40 w-full"/> }>
-                        {move || Suspend::new(async move {
-                            match tuning.await {
-                                Ok(view_data) => {
-                                    let model_id = match resolved.await {
-                                        Ok(ResolvedAiProviderView::Resolved { model, .. }) => model,
-                                        _ => None,
-                                    };
-                                    let model_efforts = models
-                                        .await
-                                        .ok()
-                                        .and_then(|list| {
-                                            list.into_iter().find(|m| Some(&m.id) == model_id.as_ref())
-                                        })
-                                        .map(|m| (m.supported_efforts, m.default_effort));
-                                    view! { <LlmTuningForm data=view_data model_efforts/> }.into_any()
-                                }
-                                Err(e) => view! {
-                                    <Alert variant=AlertVariant::Error>
-                                        <AlertTitle>"Couldn't load LLM tuning"</AlertTitle>
-                                        <AlertDescription>{e.to_string()}</AlertDescription>
-                                    </Alert>
-                                }.into_any(),
-                            }
-                        })}
-                    </Transition>
-                </div>
-            </CardContent>
-        </Card>
+        <SettingsCard title="LLM Tuning" description="Reasoning effort and temperature for this workspace. Leave a field empty to use the instance value (shown as the placeholder); if neither is set, nothing is sent and the provider's own default applies. A value you enter is sent exactly as written.">
+            <Transition fallback=move || view! { <Skeleton class="h-40 w-full"/> }>
+                {move || Suspend::new(async move {
+                    match tuning.await {
+                        Ok(view_data) => {
+                            let model_id = match resolved.await {
+                                Ok(ResolvedAiProviderView::Resolved { model, .. }) => model,
+                                _ => None,
+                            };
+                            let model_efforts = models
+                                .await
+                                .ok()
+                                .and_then(|list| {
+                                    list.into_iter().find(|m| Some(&m.id) == model_id.as_ref())
+                                })
+                                .map(|m| (m.supported_efforts, m.default_effort));
+                            view! { <LlmTuningForm data=view_data model_efforts/> }.into_any()
+                        }
+                        Err(e) => view! {
+                            <Alert variant=AlertVariant::Error>
+                                <AlertTitle>"Couldn't load LLM tuning"</AlertTitle>
+                                <AlertDescription>{e.to_string()}</AlertDescription>
+                            </Alert>
+                        }.into_any(),
+                    }
+                })}
+            </Transition>
+        </SettingsCard>
+    }
+}
+
+#[component]
+fn WatchLlmCard() -> impl IntoView {
+    let watch_llm = Resource::new(|| (), |_| get_watch_llm());
+    view! {
+        <SettingsCard title="Watch LLM" description="Run watches on their own provider, model or key, and optionally on the provider's batch API. Leave a field empty to use the instance default (shown as the placeholder) or the main LLM. Reasoning effort and temperature for watches are set in LLM Tuning above.">
+            <Transition fallback=move || view! { <Skeleton class="h-40 w-full"/> }>
+                {move || Suspend::new(async move {
+                    match watch_llm.await {
+                        Ok(data) => view! { <WatchLlmForm data/> }.into_any(),
+                        Err(e) => view! {
+                            <Alert variant=AlertVariant::Error>
+                                <AlertTitle>"Couldn't load watch LLM settings"</AlertTitle>
+                                <AlertDescription>{e.to_string()}</AlertDescription>
+                            </Alert>
+                        }.into_any(),
+                    }
+                })}
+            </Transition>
+        </SettingsCard>
+    }
+}
+
+#[component]
+fn WatchLlmForm(data: WatchLlmView) -> impl IntoView {
+    let WatchLlmView { workspace, instance, has_workspace_api_key, has_instance_api_key, warnings } = data;
+
+    let provider = RwSignal::new(workspace.provider.clone());
+    let model = RwSignal::new(workspace.model.clone());
+    let base_url = RwSignal::new(workspace.base_url.clone());
+    let mode = RwSignal::new(workspace.mode.clone());
+    let window = RwSignal::new(workspace.batch_window_minutes.clone());
+    let failure = RwSignal::new(workspace.batch_failure.clone());
+    let new_key = RwSignal::new(String::new());
+    let clear_key = RwSignal::new(false);
+
+    let inherit = |instance_value: &str, fallback: &str| {
+        if instance_value.is_empty() {
+            fallback.to_string()
+        } else {
+            format!("{instance_value} (instance)")
+        }
+    };
+    let ph_provider = inherit(&instance.provider, "same as the main LLM");
+    let ph_model = inherit(&instance.model, "same as the main LLM");
+    let ph_base_url = inherit(&instance.base_url, "provider default");
+    let ph_window = inherit(&instance.batch_window_minutes, "60");
+    let ph_key = if has_workspace_api_key {
+        "stored \u{2014} type to replace".to_string()
+    } else if has_instance_api_key {
+        "instance key in use".to_string()
+    } else {
+        "API key for the watch provider".to_string()
+    };
+    let instance_mode = if instance.mode.is_empty() { "realtime".to_string() } else { instance.mode.clone() };
+    let instance_failure = if instance.batch_failure.is_empty() { "realtime_retry".to_string() } else { instance.batch_failure.clone() };
+
+    let save = Action::new(|values: &WatchLlmValues| {
+        let values = values.clone();
+        async move { update_watch_llm(values).await }
+    });
+    let on_save = move |_| {
+        save.dispatch(WatchLlmValues {
+            provider: provider.get_untracked(),
+            model: model.get_untracked(),
+            base_url: base_url.get_untracked(),
+            mode: mode.get_untracked(),
+            batch_window_minutes: window.get_untracked(),
+            batch_failure: failure.get_untracked(),
+            new_api_key: new_key.get_untracked(),
+            clear_api_key: clear_key.get_untracked(),
+        });
+        new_key.set(String::new());
+    };
+    let save_error = move || save.value().get().and_then(|r| r.err()).map(|e| e.to_string());
+
+    view! {
+        {(!warnings.is_empty()).then(|| view! {
+            <Alert variant=AlertVariant::Warning>
+                <AlertTitle>"Some saved values are invalid and are being ignored"</AlertTitle>
+                <AlertDescription>
+                    <ul class="list-disc pl-5">
+                        {warnings.iter().map(|w| view! { <li class="font-mono text-xs">{w.clone()}</li> }).collect_view()}
+                    </ul>
+                    <p class="mt-2">"Fix or clear the fields below and save."</p>
+                </AlertDescription>
+            </Alert>
+        })}
+        <datalist id="watch-llm-providers">
+            <option value="anthropic"></option>
+            <option value="openai"></option>
+            <option value="gemini"></option>
+        </datalist>
+        <div class="grid gap-4 sm:grid-cols-2">
+            <TuningField label="Provider"
+                hint="anthropic, openai or gemini. Requires an API key below."
+                value=provider placeholder=ph_provider list_id="watch-llm-providers"/>
+            <TuningField label="Model"
+                hint="Model for watch runs."
+                value=model placeholder=ph_model list_id=""/>
+            <TuningField label="Base URL"
+                hint="Proxy or compatible endpoint. Use an openrouter.ai URL for batch on OpenRouter."
+                value=base_url placeholder=ph_base_url list_id=""/>
+            <div class="space-y-2">
+                <Label>"API key"</Label>
+                <input
+                    type="password"
+                    class=INPUT_CLASS
+                    placeholder=ph_key
+                    autocomplete="off"
+                    prop:value=move || new_key.get()
+                    on:input=move |ev| new_key.set(event_target_value(&ev))
+                />
+                <label class="flex items-center gap-2 text-xs text-muted-foreground">
+                    <input
+                        type="checkbox"
+                        prop:checked=move || clear_key.get()
+                        on:change=move |ev| clear_key.set(event_target_checked(&ev))
+                    />
+                    "Remove the stored key"
+                </label>
+            </div>
+            <div class="space-y-2">
+                <Label>"Mode"</Label>
+                <select
+                    class=INPUT_CLASS
+                    prop:value=move || mode.get()
+                    on:change=move |ev| mode.set(event_target_value(&ev))
+                >
+                    <option value="">{format!("Instance default ({instance_mode})")}</option>
+                    <option value="realtime">"Realtime"</option>
+                    <option value="batch">"Batch (about half price, minutes to hours)"</option>
+                </select>
+                <p class="text-xs text-muted-foreground">
+                    "Batch works with Anthropic and OpenRouter. \"Run now\" always runs realtime."
+                </p>
+            </div>
+            <TuningField label="Expected batch window (minutes)"
+                hint="A watch whose next run is sooner than this runs that occurrence realtime, and a batch not finished before the next run is cancelled and re-run realtime."
+                value=window placeholder=ph_window list_id=""/>
+            <div class="space-y-2">
+                <Label>"If a batch fails or expires"</Label>
+                <select
+                    class=INPUT_CLASS
+                    prop:value=move || failure.get()
+                    on:change=move |ev| failure.set(event_target_value(&ev))
+                >
+                    <option value="">{format!("Instance default ({instance_failure})")}</option>
+                    <option value="realtime_retry">"Retry once in realtime, then fail"</option>
+                    <option value="error">"Fail the run"</option>
+                </select>
+            </div>
+        </div>
+        {move || save_error().map(|msg| view! {
+            <Alert variant=AlertVariant::Error>
+                <AlertTitle>"Not saved"</AlertTitle>
+                <AlertDescription>{msg}</AlertDescription>
+            </Alert>
+        })}
+        <div class="flex items-center gap-3">
+            <Button on:click=on_save>"Save"</Button>
+            <ActionStatus action=save/>
+        </div>
     }
 }
 

@@ -59,6 +59,13 @@ fn status_badge_view(status: &str) -> impl IntoView + use<> {
             </Badge>
         }
         .into_any(),
+        "waiting_batch" => view! {
+            <Badge variant=BadgeVariant::Default>
+                <Spinner class="mr-1"/>
+                "Waiting on batch"
+            </Badge>
+        }
+        .into_any(),
         other => {
             let label = other.to_string();
             view! {
@@ -67,6 +74,29 @@ fn status_badge_view(status: &str) -> impl IntoView + use<> {
             .into_any()
         }
     }
+}
+
+/// One line describing how a run talked to the LLM: provider, model, mode,
+/// batch ids and token usage. `None` for rows from before this was recorded.
+fn llm_summary(exec: &crate::types::WatchExecutionItem) -> Option<String> {
+    let mode = exec.llm_mode.as_deref()?;
+    let mut parts = vec![mode.to_string()];
+    if let Some(p) = exec.llm_provider.as_deref().filter(|p| !p.is_empty()) {
+        parts.push(p.to_string());
+    }
+    if let Some(m) = exec.llm_model.as_deref().filter(|m| !m.is_empty()) {
+        parts.push(m.to_string());
+    }
+    if let Some(ids) = exec
+        .batch_ids
+        .as_deref()
+        .and_then(|raw| serde_json::from_str::<Vec<String>>(raw).ok())
+        .filter(|ids| !ids.is_empty())
+    {
+        parts.push(format!("batch {}", ids.join(", ")));
+    }
+    parts.push(format!("{} in / {} out tokens", exec.input_tokens, exec.output_tokens));
+    Some(parts.join(" \u{b7} "))
 }
 
 // ---------------------------------------------------------------------------
@@ -380,6 +410,8 @@ pub fn ExecutionLogViewer(
                     };
 
                     let status_badge = status_badge_view(&status);
+                    let llm_summary = llm_summary(&exec);
+                    let fallback_reason = exec.batch_fallback_reason.clone();
 
                     view! {
                         <div class="space-y-4 animate-fade-in">
@@ -395,6 +427,15 @@ pub fn ExecutionLogViewer(
                                     <span class="text-xs text-muted-foreground">{d}</span>
                                 })}
                             </div>
+
+                            // Provider, model and mode of this run, so cost can be
+                            // compared realtime vs batch (KYO-973).
+                            {llm_summary.map(|text| view! {
+                                <p class="text-xs text-muted-foreground" data-testid="execution-llm">{text}</p>
+                            })}
+                            {fallback_reason.map(|reason| view! {
+                                <p class="text-xs text-muted-foreground" data-testid="execution-batch-fallback">{format!("Realtime fallback: {reason}")}</p>
+                            })}
 
                             // Error Message
                             {error_message.clone().map(|err_msg| view! {
@@ -462,7 +503,7 @@ pub fn ExecutionLogViewer(
                                                     on_ask_about_chart=on_ask_about_chart
                                                 />
                                             }.into_any()
-                                        } else if status == "running" {
+                                        } else if crate::types::watch_execution_in_flight(&status) {
                                             view! {
                                                 <div class="flex items-center gap-2 text-muted-foreground">
                                                     <Spinner/>
@@ -532,6 +573,50 @@ fn ExecutionLogSkeleton() -> impl IntoView {
                 </div>
             </div>
         </div>
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::WatchExecutionItem;
+
+    fn item() -> WatchExecutionItem {
+        serde_json::from_value(serde_json::json!({
+            "id": 1, "watch_id": "w", "watch_name": "W", "mode": "alert",
+            "started_at": "2026-11-16T00:00:00Z", "completed_at": null,
+            "status": "success", "agent_response": null, "error_message": null,
+            "input_tokens": 120, "output_tokens": 30, "alert_triggered": false,
+            "notification_id": null, "execution_trace": null, "read_at": null,
+            "deleted_at": null, "deleted_by": null
+        }))
+        .expect("an item serialized before KYO-973 still deserializes")
+    }
+
+    #[test]
+    fn rows_from_before_the_llm_record_show_no_summary() {
+        assert_eq!(llm_summary(&item()), None);
+    }
+
+    #[test]
+    fn a_batch_run_summary_names_mode_provider_model_batch_and_tokens() {
+        let mut e = item();
+        e.llm_mode = Some("batch".into());
+        e.llm_provider = Some("anthropic".into());
+        e.llm_model = Some("claude-haiku-x".into());
+        e.batch_ids = Some(r#"["msgbatch_1","msgbatch_2"]"#.into());
+        assert_eq!(
+            llm_summary(&e).unwrap(),
+            "batch \u{b7} anthropic \u{b7} claude-haiku-x \u{b7} batch msgbatch_1, msgbatch_2 \u{b7} 120 in / 30 out tokens"
+        );
+    }
+
+    #[test]
+    fn a_realtime_run_summary_omits_batch_ids() {
+        let mut e = item();
+        e.llm_mode = Some("realtime".into());
+        e.llm_provider = Some("openai".into());
+        assert_eq!(llm_summary(&e).unwrap(), "realtime \u{b7} openai \u{b7} 120 in / 30 out tokens");
     }
 }
 

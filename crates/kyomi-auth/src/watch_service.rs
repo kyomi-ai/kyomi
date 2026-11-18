@@ -1115,7 +1115,8 @@ pub async fn get_executions(
         SELECT id, watch_id, watch_name, mode, workspace_id, session_id,
                started_at, completed_at, status, agent_response, error_message,
                input_tokens, output_tokens, cost_estimate, execution_trace,
-               alert_triggered, notification_id, read_at, deleted_at, deleted_by, created_by
+               alert_triggered, notification_id, read_at, deleted_at, deleted_by, created_by,
+               llm_provider, llm_model, llm_mode, batch_ids, batch_fallback_reason
         FROM watch_executions
         WHERE watch_id = $1
         ORDER BY started_at DESC
@@ -1160,7 +1161,8 @@ pub async fn get_execution_by_id(
         SELECT id, watch_id, watch_name, mode, workspace_id, session_id,
                started_at, completed_at, status, agent_response, error_message,
                input_tokens, output_tokens, cost_estimate, execution_trace,
-               alert_triggered, notification_id, read_at, deleted_at, deleted_by, created_by
+               alert_triggered, notification_id, read_at, deleted_at, deleted_by, created_by,
+               llm_provider, llm_model, llm_mode, batch_ids, batch_fallback_reason
         FROM watch_executions
         WHERE id = $1 AND watch_id = $2
     "#;
@@ -1206,7 +1208,8 @@ pub async fn get_execution_by_id_only(
         SELECT id, watch_id, watch_name, mode, workspace_id, session_id,
                started_at, completed_at, status, agent_response, error_message,
                input_tokens, output_tokens, cost_estimate, execution_trace,
-               alert_triggered, notification_id, read_at, deleted_at, deleted_by, created_by
+               alert_triggered, notification_id, read_at, deleted_at, deleted_by, created_by,
+               llm_provider, llm_model, llm_mode, batch_ids, batch_fallback_reason
         FROM watch_executions
         WHERE id = $1 AND workspace_id = $2 AND created_by = $3
     "#;
@@ -1246,7 +1249,8 @@ pub async fn create_execution(
         RETURNING id, watch_id, watch_name, mode, workspace_id, session_id,
                   started_at, completed_at, status, agent_response, error_message,
                   input_tokens, output_tokens, cost_estimate, execution_trace,
-                  alert_triggered, notification_id, read_at, deleted_at, deleted_by, created_by
+                  alert_triggered, notification_id, read_at, deleted_at, deleted_by, created_by,
+               llm_provider, llm_model, llm_mode, batch_ids, batch_fallback_reason
         "#,
         now = sql_compat::now(is_pg),
         false_val = sql_compat::bool_false(is_pg),
@@ -1314,7 +1318,8 @@ pub async fn complete_execution(
         RETURNING id, watch_id, watch_name, mode, workspace_id, session_id,
                   started_at, completed_at, status, agent_response, error_message,
                   input_tokens, output_tokens, cost_estimate, execution_trace,
-                  alert_triggered, notification_id, read_at, deleted_at, deleted_by, created_by
+                  alert_triggered, notification_id, read_at, deleted_at, deleted_by, created_by,
+               llm_provider, llm_model, llm_mode, batch_ids, batch_fallback_reason
         "#,
         now = sql_compat::now(is_pg),
     );
@@ -1399,7 +1404,11 @@ pub async fn can_run_watch_now(
     let stale_count: i64 = kyomi_core::db_fetch_scalar!(
         db,
         i64,
-        "SELECT COUNT(*) FROM watch_executions WHERE watch_id = $1 AND status = 'running' AND started_at < $2",
+        &format!(
+            "SELECT COUNT(*) FROM watch_executions WHERE watch_id = $1 AND status = 'running' \
+               AND {} AND started_at < $2",
+            crate::watch_batch_service::NOT_A_BATCH_RUN
+        ),
         watch_id,
         stale_cutoff
     )
@@ -1412,8 +1421,10 @@ pub async fn can_run_watch_now(
             r#"UPDATE watch_executions
                SET status = 'error', completed_at = {now},
                    error_message = 'Execution timed out after 5 minutes'
-               WHERE watch_id = $1 AND status = 'running' AND started_at < $2"#,
+               WHERE watch_id = $1 AND status = 'running'
+                 AND {not_batch} AND started_at < $2"#,
             now = sql_compat::now(is_pg),
+            not_batch = crate::watch_batch_service::NOT_A_BATCH_RUN,
         );
 
         kyomi_core::db_execute!(db, &expire_sql, watch_id, stale_cutoff)
@@ -1428,11 +1439,15 @@ pub async fn can_run_watch_now(
         );
     }
 
-    // After expiring stale ones, check if any are genuinely still running
+    // After expiring stale ones, check if any are genuinely still running.
+    // A batch-mode run (KYO-973) is exempt from the 5-minute expiry above (it
+    // legitimately waits for hours, governed by its lease and deadline) and
+    // counts as running while it waits on a batch.
     let running_count: i64 = kyomi_core::db_fetch_scalar!(
         db,
         i64,
-        "SELECT COUNT(*) FROM watch_executions WHERE watch_id = $1 AND status = 'running' LIMIT 1",
+        "SELECT COUNT(*) FROM watch_executions WHERE watch_id = $1 \
+           AND status IN ('running', 'waiting_batch') LIMIT 1",
         watch_id
     )
     .map_err(|e| {

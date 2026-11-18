@@ -495,6 +495,130 @@ impl AgentTool for SucceedingTool {
 }
 
 // ---------------------------------------------------------------------------
+// FakeHttpServer — a loopback HTTP server that records requests (KYO-973)
+// ---------------------------------------------------------------------------
+//
+// Real HTTP over a real socket, so provider clients are exercised end to end
+// (headers, URL, body) with canned vendor responses instead of a mocked trait.
+
+/// One request received by a [`FakeHttpServer`].
+#[derive(Debug, Clone)]
+pub(crate) struct RecordedRequest {
+    pub method: String,
+    pub path: String,
+    pub headers: std::collections::HashMap<String, String>,
+    pub body: String,
+}
+
+impl RecordedRequest {
+    pub(crate) fn json(&self) -> serde_json::Value {
+        serde_json::from_str(&self.body).unwrap_or(serde_json::Value::Null)
+    }
+}
+
+type FakeHandler = Arc<dyn Fn(&RecordedRequest) -> (u16, String) + Send + Sync>;
+
+pub(crate) struct FakeHttpServer {
+    pub base_url: String,
+    requests: Arc<Mutex<Vec<RecordedRequest>>>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl FakeHttpServer {
+    pub(crate) async fn start(
+        handler: impl Fn(&RecordedRequest) -> (u16, String) + Send + Sync + 'static,
+    ) -> Self {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let requests: Arc<Mutex<Vec<RecordedRequest>>> = Arc::new(Mutex::new(Vec::new()));
+        let handler: FakeHandler = Arc::new(handler);
+        let log = requests.clone();
+        let task = tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else { break };
+                let handler = handler.clone();
+                let log = log.clone();
+                tokio::spawn(async move {
+                    let mut buf = Vec::new();
+                    let mut chunk = [0u8; 8192];
+                    let header_end = loop {
+                        let n = stream.read(&mut chunk).await.unwrap_or(0);
+                        if n == 0 {
+                            return;
+                        }
+                        buf.extend_from_slice(&chunk[..n]);
+                        if let Some(p) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                            break p;
+                        }
+                    };
+                    let head = String::from_utf8_lossy(&buf[..header_end]).to_string();
+                    let mut lines = head.lines();
+                    let mut first = lines.next().unwrap_or_default().split_whitespace();
+                    let method = first.next().unwrap_or_default().to_string();
+                    let path = first.next().unwrap_or_default().to_string();
+                    let headers: std::collections::HashMap<String, String> = lines
+                        .filter_map(|l| l.split_once(':'))
+                        .map(|(k, v)| (k.trim().to_ascii_lowercase(), v.trim().to_string()))
+                        .collect();
+                    let want: usize = headers
+                        .get("content-length")
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(0);
+                    let mut body = buf[header_end + 4..].to_vec();
+                    while body.len() < want {
+                        let n = stream.read(&mut chunk).await.unwrap_or(0);
+                        if n == 0 {
+                            break;
+                        }
+                        body.extend_from_slice(&chunk[..n]);
+                    }
+                    let req = RecordedRequest {
+                        method,
+                        path,
+                        headers,
+                        body: String::from_utf8_lossy(&body).to_string(),
+                    };
+                    let (status, reply) = handler(&req);
+                    log.lock().unwrap().push(req);
+                    let response = format!(
+                        "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{reply}",
+                        reply.len()
+                    );
+                    let _ = stream.write_all(response.as_bytes()).await;
+                    let _ = stream.shutdown().await;
+                });
+            }
+        });
+        Self { base_url, requests, task }
+    }
+
+    /// Requests received so far, oldest first.
+    pub(crate) fn requests(&self) -> Vec<RecordedRequest> {
+        self.requests.lock().unwrap().clone()
+    }
+}
+
+impl Drop for FakeHttpServer {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+/// A minimal Anthropic Messages API success body with one text block.
+pub(crate) fn anthropic_text_reply(text: &str) -> String {
+    json!({
+        "id": "msg_test",
+        "type": "message",
+        "role": "assistant",
+        "content": [{"type": "text", "text": text}],
+        "stop_reason": "end_turn",
+        "usage": {"input_tokens": 11, "output_tokens": 7}
+    })
+    .to_string()
+}
+
+// ---------------------------------------------------------------------------
 // OpenAI-compatible HTTP fake — a real network boundary for whole-turn tests
 // ---------------------------------------------------------------------------
 

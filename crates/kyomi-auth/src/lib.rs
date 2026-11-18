@@ -64,6 +64,7 @@ pub mod totp;
 pub mod token_refresh;
 pub mod token_service;
 pub mod user_service;
+pub mod watch_batch_service;
 pub mod watch_service;
 pub mod workspace_ai_config;
 pub mod workspace_web_config;

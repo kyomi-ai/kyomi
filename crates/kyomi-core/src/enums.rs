@@ -312,6 +312,9 @@ impl FromStr for WatchMode {
 #[serde(rename_all = "snake_case")]
 pub enum WatchExecutionStatus {
     Running,
+    /// A batch-mode run waiting on a provider batch (KYO-973). Not terminal:
+    /// the run returns to `Running` when the batch result arrives.
+    WaitingBatch,
     Success,
     Error,
     NoAlert,
@@ -329,6 +332,7 @@ impl AsRef<str> for WatchExecutionStatus {
     fn as_ref(&self) -> &str {
         match self {
             Self::Running => "running",
+            Self::WaitingBatch => "waiting_batch",
             Self::Success => "success",
             Self::Error => "error",
             Self::NoAlert => "no_alert",
@@ -341,6 +345,7 @@ impl FromStr for WatchExecutionStatus {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "running" => Ok(Self::Running),
+            "waiting_batch" => Ok(Self::WaitingBatch),
             "success" => Ok(Self::Success),
             "error" => Ok(Self::Error),
             "no_alert" => Ok(Self::NoAlert),

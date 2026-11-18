@@ -16,7 +16,7 @@ use serde_json::json;
 use tracing::{debug, info, warn};
 
 use crate::provider::RequestOptions;
-use crate::anthropic_pricing::{price_call, CallTokens};
+use crate::anthropic_pricing::{price_call_at, CallTokens, PriceTier};
 use crate::types::{
     AgentTokenUsage, LLMResponse, Message, MessageRole, ProviderCallDetail, Tool, ToolCall,
 };
@@ -307,6 +307,39 @@ impl AnthropicClient {
     // API Call
     // -----------------------------------------------------------------------
 
+    /// The request body for these inputs. The realtime [`complete`](Self::complete)
+    /// and the batch adapter both send exactly this (KYO-973).
+    pub(crate) fn request_body(
+        &self,
+        messages: &[Message],
+        tools: &[Tool],
+        options: &RequestOptions,
+        user_names: &HashMap<String, String>,
+    ) -> serde_json::Value {
+        let (system_prompt, anthropic_messages) =
+            Self::convert_messages_to_anthropic(messages, user_names);
+        Self::build_request_body(&self.base.model, system_prompt, anthropic_messages, tools, options)
+    }
+
+    /// A request to a batch endpoint under this client's base URL, with the
+    /// same authentication headers as the realtime call.
+    pub(crate) fn batch_request(&self, method: reqwest::Method, path: &str) -> reqwest::RequestBuilder {
+        let url = format!("{}{path}", self.base.base_url.trim_end_matches('/'));
+        self.authed_request(method, &url)
+    }
+
+    /// As [`batch_request`](Self::batch_request) for an absolute URL the API
+    /// returned (the batch `results_url`).
+    pub(crate) fn authed_request(&self, method: reqwest::Method, url: &str) -> reqwest::RequestBuilder {
+        self.base
+            .client
+            .request(method, url)
+            .header("x-api-key", &self.base.api_key)
+            .header("anthropic-version", ANTHROPIC_VERSION)
+            .header("anthropic-beta", PROMPT_CACHING_BETA)
+            .header("content-type", "application/json")
+    }
+
     /// Send a completion request to the Anthropic Messages API.
     ///
     /// # Arguments
@@ -325,21 +358,11 @@ impl AnthropicClient {
         options: &RequestOptions,
         user_names: &HashMap<String, String>,
     ) -> kyomi_core::Result<LLMResponse> {
-        let (system_prompt, anthropic_messages) =
-            Self::convert_messages_to_anthropic(messages, user_names);
-
-        let message_count = anthropic_messages.len();
-        let body = Self::build_request_body(
-            &self.base.model,
-            system_prompt,
-            anthropic_messages,
-            tools,
-            options,
-        );
+        let body = self.request_body(messages, tools, options, user_names);
 
         debug!(
             model = %self.base.model,
-            message_count,
+            message_count = body["messages"].as_array().map_or(0, Vec::len),
             tool_count = tools.len(),
             "calling Anthropic API"
         );
@@ -381,13 +404,7 @@ impl AnthropicClient {
     ) -> kyomi_core::Result<(serde_json::Value, Option<String>)> {
         let url = format!("{}/v1/messages", self.base.base_url.trim_end_matches('/'));
         let response = self
-            .base
-            .client
-            .post(&url)
-            .header("x-api-key", &self.base.api_key)
-            .header("anthropic-version", ANTHROPIC_VERSION)
-            .header("anthropic-beta", PROMPT_CACHING_BETA)
-            .header("content-type", "application/json")
+            .authed_request(reqwest::Method::POST, &url)
             .json(body)
             .send()
             .await
@@ -442,6 +459,11 @@ impl AnthropicClient {
     // -----------------------------------------------------------------------
     // Response Parsing
     // -----------------------------------------------------------------------
+
+    /// Parse a vendor response body (realtime or batch result) as this client's model.
+    pub(crate) fn parse_response_body(&self, response: &serde_json::Value) -> kyomi_core::Result<LLMResponse> {
+        Self::parse_response(&self.base.model, response, None)
+    }
 
     /// Parse the Anthropic API JSON response into an [`LLMResponse`].
     pub(crate) fn parse_response(
@@ -593,7 +615,8 @@ impl AnthropicClient {
             (None, None) => (u64::from(usage.cache_creation_input_tokens), 0),
             (a, b) => (a.unwrap_or(0), b.unwrap_or(0)),
         };
-        let priced = price_call(
+        let service_tier = u.and_then(|u| u.get("service_tier")).and_then(|v| v.as_str());
+        let priced = price_call_at(
             model,
             CallTokens {
                 input: u64::from(usage.input_tokens),
@@ -602,11 +625,12 @@ impl AnthropicClient {
                 cache_write_1h: w1h,
                 cache_read: u64::from(usage.cache_read_input_tokens),
             },
+            PriceTier::from_service_tier(service_tier),
         );
         ProviderCallDetail {
             message_id: response.get("id").and_then(|v| v.as_str()).map(str::to_string),
             request_id,
-            service_tier: u.and_then(|u| u.get("service_tier")).and_then(|v| v.as_str()).map(str::to_string),
+            service_tier: service_tier.map(str::to_string),
             cache_creation_5m: u32::try_from(w5m).unwrap_or(u32::MAX),
             cache_creation_1h: u32::try_from(w1h).unwrap_or(u32::MAX),
             stop_reason: finish_reason.to_string(),

@@ -83,6 +83,12 @@ async fn serve() {
         }
     }
 
+    // The watch LLM configuration (LLM_WATCH_*) must be usable: batch mode on a
+    // provider without a batch API is a startup error, not a failed run later.
+    if let Err(e) = kyomi_agent::watch_llm::validate_instance(&config) {
+        panic!("{e}");
+    }
+
     // Web search / fetch backends must be compatible with the LLM provider
     // (KYO-969). Fail fast with a clear message rather than a 400 at runtime.
     if let Err(e) = kyomi_agent::web::validate_startup(&config) {

@@ -32,13 +32,14 @@ use kyomi_auth::websocket::WebSocketManager;
 use kyomi_auth::{chat_service, user_service, watch_service};
 use kyomi_core::models::Watch;
 use kyomi_core::platform::PlatformRegistry;
+use kyomi_auth::watch_batch_service;
 use kyomi_core::{capability, DbPool, KVPool, WatchMode};
 use kyomi_embed::EmbeddingService;
 use kyomi_types::truncate_preview;
 
 use crate::adapter::{AssistantMessagePersistence, UserMessagePersistence};
 use crate::alert::deliver_watch_alert;
-use crate::execution::{execute_agent_chat, AgentExecutionConfig};
+use crate::execution::AgentExecutionConfig;
 use crate::tools::WATCH_TOOLS;
 
 // ---------------------------------------------------------------------------
@@ -566,7 +567,7 @@ pub fn build_watch_system_prompt(
 /// context, recent alerts and queries the first attempt used. Falling back to
 /// the chat prompt (`system_prompt: None`) would drop the schema the retry is
 /// being asked to satisfy and point the agent at tools this subset excludes.
-fn build_watch_retry_config(
+pub(crate) fn build_watch_retry_config(
     session_id: &str,
     user_id: &str,
     workspace_id: &str,
@@ -574,12 +575,36 @@ fn build_watch_retry_config(
     creator_workspace_roles: Vec<kyomi_core::enums::WorkspaceRole>,
     correction_prompt: String,
 ) -> AgentExecutionConfig {
+    build_watch_agent_config(
+        session_id,
+        user_id,
+        workspace_id,
+        correction_prompt,
+        system_prompt,
+        creator_workspace_roles,
+        UserMessagePersistence::AdapterPersists(None),
+    )
+}
+
+/// The one place a watch turn's [`AgentExecutionConfig`] is built, shared by
+/// the main run and the JSON-correction retry so both carry the Watch LLM
+/// profile (KYO-973): provider, model, effort and temperature for a watch
+/// cannot differ between them.
+pub(crate) fn build_watch_agent_config(
+    session_id: &str,
+    user_id: &str,
+    workspace_id: &str,
+    message: String,
+    system_prompt: String,
+    creator_workspace_roles: Vec<kyomi_core::enums::WorkspaceRole>,
+    user_message_persistence: UserMessagePersistence,
+) -> AgentExecutionConfig {
     AgentExecutionConfig {
         session_id: session_id.to_string(),
         user_id: user_id.to_string(),
         workspace_id: workspace_id.to_string(),
-        message: correction_prompt,
-        model_name: None,
+        message,
+        model_name: None, // the Watch profile selects the model (see `watch_llm`)
         llm_profile: kyomi_core::llm_sampling::LlmProfile::Watch,
         is_shared_conversation: false,
         context_type: "kyomi_watch".into(),
@@ -594,12 +619,14 @@ fn build_watch_retry_config(
         max_total_tokens: Some(MAX_WATCH_TOTAL_TOKENS),
         max_tokens: MAX_WATCH_OUTPUT_TOKENS,
         component: "kyomi_watch".into(),
-        user_message_persistence: UserMessagePersistence::AdapterPersists(None),
+        user_message_persistence,
         assistant_message_persistence: AssistantMessagePersistence::adapter_inserts_with_new_id(),
         conversation_history: None,
         user_display_name: "Kyomi Watch".to_string(),
         context_window: 0,
         workspace_roles: creator_workspace_roles,
+        // Watch execution has no single open document — see
+        // `ToolContext::document_id`.
         document_id: None,
     }
 }
@@ -743,14 +770,35 @@ fn format_relative_time(delta_seconds: i64) -> String {
 // Main execution function
 // ---------------------------------------------------------------------------
 
-/// Execute a watch by running the AI agent with the watch prompt.
-///
-/// This is the main entry point called by the scheduler or "Run Now" API.
+/// How a watch execution was started.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunKind {
+    /// A user's "run now" (and the watch tool): always realtime.
+    Manual,
+    /// The scheduler's due-time run: honours the watch LLM mode.
+    Scheduled,
+    /// Another attempt at an unfinished batch-mode run whose driver is gone
+    /// (restart, crash, lease handover). Replays from the durable call cache.
+    Resume { execution_id: i32 },
+}
+
+/// Everything a watch execution needs from the server.
+pub struct WatchRunEnv<'a> {
+    pub db: &'a DbPool,
+    pub kv: &'a KVPool,
+    pub encryption_key: &'a Arc<[u8; 32]>,
+    pub embedding: &'a EmbeddingService,
+    pub ws_manager: &'a WebSocketManager,
+    pub app_config: &'a Arc<kyomi_core::Config>,
+    pub connect_registry: Option<kyomi_datasource_server::ConnectRegistry>,
+    pub platforms: &'a Arc<PlatformRegistry>,
+}
+
+/// Execute a watch immediately, as a manual run (always realtime).
 ///
 /// # Arguments
-///
-/// * `db` — Database connection pool
-/// * `kv` — KV store (Redis or in-memory)
+/// * `db` — Database pool
+/// * `kv` — KV store (rate limiting, ephemeral state)
 /// * `encryption_key` — AES key for encrypted DB fields
 /// * `embedding` — Embedding service for semantic search
 /// * `ws_manager` — WebSocket manager for real-time notifications
@@ -768,32 +816,69 @@ pub async fn execute_watch(
     platforms: &Arc<PlatformRegistry>,
     watch_id: &str,
 ) -> kyomi_core::Result<()> {
-    info!(watch_id = %watch_id, "Starting watch execution");
+    execute_watch_with(
+        WatchRunEnv { db, kv, encryption_key, embedding, ws_manager, app_config, connect_registry, platforms },
+        watch_id,
+        RunKind::Manual,
+    )
+    .await
+}
+
+/// Execute a watch with an explicit [`RunKind`]. See [`execute_watch`].
+pub async fn execute_watch_with(
+    env: WatchRunEnv<'_>,
+    watch_id: &str,
+    kind: RunKind,
+) -> kyomi_core::Result<()> {
+    let WatchRunEnv { db, kv, encryption_key, embedding, ws_manager, app_config, connect_registry, platforms } = env;
+    info!(watch_id = %watch_id, ?kind, "Starting watch execution");
 
     // 1. Load watch from DB
     let watch = load_watch(db, watch_id).await?;
-    let Some(watch) = watch else {
+    let Some(watch) = watch.filter(|w| w.enabled) else {
         info!(watch_id = %watch_id, "Watch not found or disabled, skipping");
+        if let RunKind::Resume { execution_id } = kind {
+            // The run was already in flight: do not leave it waiting forever.
+            watch_service::fail_execution_minimal(
+                db,
+                execution_id,
+                "Watch was removed or disabled while a batch run was in progress",
+            )
+            .await?;
+        }
         return Ok(());
     };
 
-    if !watch.enabled {
-        info!(watch_id = %watch_id, "Watch is disabled, skipping");
-        return Ok(());
-    }
-
-    // 2. Create execution record
-    let execution = watch_service::create_execution(
-        db,
-        &watch.watch_id,
-        &watch.name,
-        &watch.workspace_id,
-        watch.mode,
-        &watch.created_by,
-    )
-    .await?;
-
-    let execution_id = execution.id;
+    // 2. Create (or, resuming, load) the execution record
+    let (execution_id, started_at, stored_deadline) = match kind {
+        RunKind::Resume { execution_id } => {
+            let Some(info) = watch_batch_service::unfinished_run(db, execution_id).await? else {
+                info!(execution_id, "Run already finished; nothing to resume");
+                return Ok(());
+            };
+            (info.id, info.started_at, info.batch_deadline_at)
+        }
+        RunKind::Manual | RunKind::Scheduled => {
+            let execution = watch_service::create_execution(
+                db,
+                &watch.watch_id,
+                &watch.name,
+                &watch.workspace_id,
+                watch.mode,
+                &watch.created_by,
+            )
+            .await?;
+            (execution.id, execution.started_at, None)
+        }
+    };
+    let run = RunSetup {
+        kind,
+        started_at,
+        stored_deadline,
+        lease_lost: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        is_batch: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        billing: Arc::new(std::sync::Mutex::new(None)),
+    };
 
     // Run the execution, capturing errors to ensure we always clean up
     let result = execute_watch_inner(
@@ -807,6 +892,7 @@ pub async fn execute_watch(
         platforms,
         &watch,
         execution_id,
+        &run,
     )
     .await;
 
@@ -826,8 +912,35 @@ pub async fn execute_watch(
             )
             .await;
         }
+        Err(_) if run.lease_lost.load(std::sync::atomic::Ordering::SeqCst) => {
+            // Another instance took over this batch run; the record is theirs.
+            info!(watch_id = %watch_id, execution_id, "Lost the run's lease to another instance; stopping");
+        }
+        Err(e) if run.is_batch.load(std::sync::atomic::Ordering::SeqCst)
+            && !watch_batch_service::claim_lease(
+                db,
+                execution_id,
+                crate::batch_run::instance_id(),
+                Utc::now() + chrono::Duration::seconds(crate::batch_run::LEASE_TTL_SECONDS),
+                Utc::now(),
+            )
+            .await
+            // A database error cannot show the lease was lost: fail open (treat
+            // it as still ours) and let the terminal write below decide.
+            .unwrap_or(true) =>
+        {
+            // A batch run failed, but another instance owns it now: its record
+            // is theirs to finish, not ours to mark failed.
+            run.lease_lost.store(true, std::sync::atomic::Ordering::SeqCst);
+            info!(watch_id = %watch_id, execution_id, error = %e, "Batch run failed after losing its lease; leaving the record to its new owner");
+        }
         Err(e) => {
             error!(watch_id = %watch_id, error = %e, "Watch execution failed");
+
+            // A failed batch run still paid for its calls.
+            if run.is_batch.load(std::sync::atomic::Ordering::SeqCst) {
+                bill_batch_run(db, encryption_key, &watch, execution_id, &run).await;
+            }
 
             // Mark execution as failed
             let error_msg = watch_execution_error_message(&e);
@@ -889,6 +1002,100 @@ pub async fn execute_watch(
     }
 
     Ok(())
+}
+
+/// An agent turn reports its own failure as a normal result (`status` is not
+/// `completed`, `response_text` is an apology), so for a batch run, where the
+/// failure can be a displaced driver or a batch the failure policy says must
+/// fail the run, that has to become the run's error here. Otherwise the text
+/// would go through JSON validation and the correction retry as if the model
+/// had answered badly, and the run would end as a quiet "no alert".
+fn ensure_batch_attempt_succeeded(
+    extras: &crate::execution::ExecutionExtras,
+    run: &RunSetup,
+    result: &crate::execution::AgentExecutionResult,
+) -> kyomi_core::Result<()> {
+    if extras.watch_batch.is_none() {
+        return Ok(());
+    }
+    if run.lease_lost.load(std::sync::atomic::Ordering::SeqCst) {
+        return Err(kyomi_core::Error::Internal(
+            "watch run lease was taken by another instance".into(),
+        ));
+    }
+    if result.status != "completed" {
+        return Err(kyomi_core::Error::Internal(
+            result
+                .error
+                .clone()
+                .unwrap_or_else(|| "watch batch run failed".to_string()),
+        ));
+    }
+    Ok(())
+}
+
+/// Who a batch run's usage is billed to; known once the run's session exists.
+struct BillingTarget {
+    provider: String,
+    model: String,
+    is_byok: bool,
+    session_id: String,
+}
+
+/// Bill a batch-mode run once, with one `api_usage_log` row summing every call
+/// of the run across all attempts, restarts and retries. The claim, the sum and
+/// the write are one transaction (`watch_batch_service::bill_run_once`), so a
+/// crash or abort cannot lose or repeat a bill, and only the instance holding
+/// the run's live lease can bill, so a displaced driver never bills a partial
+/// run. A transient failure is logged and the run is simply not billed.
+async fn bill_batch_run(db: &DbPool, encryption_key: &[u8; 32], watch: &Watch, execution_id: i32, run: &RunSetup) {
+    let Some((provider, model, is_byok, session_id)) = run
+        .billing
+        .lock()
+        .ok()
+        .and_then(|t| t.as_ref().map(|t| (t.provider.clone(), t.model.clone(), t.is_byok, t.session_id.clone())))
+    else {
+        return;
+    };
+    let bill = watch_batch_service::UsageBill {
+        encryption_key,
+        user_id: &watch.created_by,
+        workspace_id: &watch.workspace_id,
+        session_id: &session_id,
+    };
+    let billing = crate::batch_run::RunBilling { is_byok, provider: &provider, model: &model, component: "kyomi_watch" };
+    match crate::batch_run::bill_run(
+        db,
+        execution_id,
+        watch_batch_service::BillingFence::LeaseOwner(crate::batch_run::instance_id()),
+        &bill,
+        &billing,
+    )
+    .await
+    {
+        Ok(true) => {}
+        // Already billed by an earlier step of this run, or no longer ours.
+        Ok(false) => info!(execution_id, "Batch run usage was not billed here (already billed, or the lease is no longer held)"),
+        // The transaction rolled back: nothing was claimed or written, so the run is not billed.
+        Err(e) => error!(execution_id, error = %e, "BILLING ROW LOST: failed to bill a batch run"),
+    }
+}
+
+/// Per-run facts [`execute_watch_inner`] needs besides the watch itself.
+struct RunSetup {
+    kind: RunKind,
+    /// The execution's stored start time: the frozen "current time" of the
+    /// run, so a resumed run rebuilds byte-identical requests.
+    started_at: DateTime<Utc>,
+    /// The batch deadline stored by the first attempt (resumes only).
+    stored_deadline: Option<DateTime<Utc>>,
+    /// Set when this instance loses the run's lease.
+    lease_lost: Arc<std::sync::atomic::AtomicBool>,
+    /// Set once the run is known to be a batch-mode run (its terminal writes
+    /// are then fenced by the lease).
+    is_batch: Arc<std::sync::atomic::AtomicBool>,
+    /// Set once the run's session exists; read when the run is billed.
+    billing: Arc<std::sync::Mutex<Option<BillingTarget>>>,
 }
 
 /// Data produced by [`prepare_watch_dispatch`] for the caller to attach to
@@ -981,6 +1188,7 @@ async fn execute_watch_inner(
     platforms: &Arc<PlatformRegistry>,
     watch: &Watch,
     execution_id: i32,
+    run: &RunSetup,
 ) -> kyomi_core::Result<(String, String)> {
     let watch_id = &watch.watch_id;
     let mode = watch.mode;
@@ -1128,8 +1336,135 @@ async fn execute_watch_inner(
         return Ok(("no_alert".to_string(), "no_alert".to_string()));
     }
 
-    // 6. Build enhanced system prompt with ChartML reference and watch context
-    let current_time = Utc::now();
+    // 5c. Decide how this run talks to the LLM (KYO-973) and record it. A
+    // resumed batch run keeps the plan its first attempt recorded.
+    let ws_ai = kyomi_auth::workspace_ai_config::load(db, &watch.workspace_id)
+        .await
+        .map_err(|e| {
+            kyomi_core::Error::Internal(format!("failed to load workspace AI config: {e}"))
+        })?;
+    let selection = crate::watch_llm::resolve_watch_selection(&ws_ai, app_config)?;
+    let provider_name = selection.provider_config.provider.to_string();
+    let configured_model = selection.provider_config.model.clone().unwrap_or_default();
+    let plan = match run.kind {
+        RunKind::Resume { execution_id } => {
+            // The stored calls belong to the provider the run started with.
+            // Resuming on another one would parse their bodies with the wrong
+            // adapter and poll their batch ids against the wrong vendor.
+            let recorded = watch_batch_service::run_provider(db, execution_id).await?;
+            if let Some(recorded) = recorded.filter(|r| *r != provider_name) {
+                return Err(kyomi_core::Error::Internal(format!(
+                    "the watch LLM provider changed from {recorded} to {provider_name} while a \
+                     batch run was in progress; the run cannot be resumed. Its pending batch, if \
+                     any, was not cancelled"
+                )));
+            }
+            crate::watch_llm::RunPlan::Batch {
+                deadline: run.stored_deadline.ok_or_else(|| {
+                    kyomi_core::Error::Internal("batch run has no stored deadline".into())
+                })?,
+            }
+        }
+        RunKind::Manual | RunKind::Scheduled => {
+            let plan = crate::watch_llm::plan_run(
+                &selection.resolved,
+                crate::batch::batch_support(
+                    selection.provider_config.provider,
+                    selection.provider_config.base_url.as_deref(),
+                ),
+                run.kind == RunKind::Scheduled,
+                watch.next_run_at,
+                Utc::now(),
+            )
+            .map_err(kyomi_core::Error::Internal)?;
+            let (mode, deadline, reason, lease) = match &plan {
+                crate::watch_llm::RunPlan::Realtime { reason } => ("realtime", None, reason.as_deref(), None),
+                crate::watch_llm::RunPlan::Batch { deadline } => (
+                    "batch",
+                    Some(*deadline),
+                    None,
+                    Some((
+                        crate::batch_run::instance_id(),
+                        Utc::now() + chrono::Duration::seconds(crate::batch_run::LEASE_TTL_SECONDS),
+                    )),
+                ),
+            };
+            watch_batch_service::record_run_llm(
+                db,
+                execution_id,
+                &watch_batch_service::RunLlm {
+                    provider: &provider_name,
+                    model: &configured_model,
+                    mode,
+                    deadline,
+                    fallback_reason: reason,
+                    lease,
+                    workspace_billed: selection.workspace_billed,
+                },
+            )
+            .await?;
+            plan
+        }
+    };
+    run.is_batch.store(
+        matches!(plan, crate::watch_llm::RunPlan::Batch { .. }),
+        std::sync::atomic::Ordering::SeqCst,
+    );
+    let extras = match &plan {
+        crate::watch_llm::RunPlan::Batch { deadline } => crate::execution::ExecutionExtras {
+            watch_batch: Some(crate::execution::WatchBatchRun {
+                execution_id,
+                deadline: *deadline,
+                lease_lost: run.lease_lost.clone(),
+                call_seq: Arc::new(std::sync::atomic::AtomicI32::new(0)),
+                on_waiting: Some({
+                    let ws = ws_manager.clone();
+                    let workspace_id = watch.workspace_id.clone();
+                    let user_id = watch.created_by.clone();
+                    let watch_id = watch.watch_id.clone();
+                    Arc::new(move |waiting: bool| {
+                        let (ws, workspace_id, user_id, watch_id) =
+                            (ws.clone(), workspace_id.clone(), user_id.clone(), watch_id.clone());
+                        Box::pin(async move {
+                            ws_helpers::send_watch_state_update(
+                                ws.for_workspace(&workspace_id),
+                                &user_id,
+                                &watch_id,
+                                if waiting { "waiting_batch" } else { "running" },
+                            )
+                            .await;
+                        })
+                    })
+                }),
+            }),
+        },
+        crate::watch_llm::RunPlan::Realtime { .. } => crate::execution::ExecutionExtras::default(),
+    };
+    // A batch run legitimately waits far longer than the realtime guard: it may
+    // wait until its deadline, and then still needs the full realtime budget to
+    // finish (the fallback tail), so the bound is the wait plus the guard.
+    let max_duration = match &plan {
+        crate::watch_llm::RunPlan::Batch { deadline } => (*deadline - Utc::now())
+            .to_std()
+            .unwrap_or_default()
+            + MAX_WATCH_DURATION,
+        crate::watch_llm::RunPlan::Realtime { .. } => MAX_WATCH_DURATION,
+    };
+    // Keep the lease alive for the whole run, whatever it is doing, and stop if
+    // another instance takes it. Dropped (and stopped) when this function ends.
+    let _heartbeat = matches!(plan, crate::watch_llm::RunPlan::Batch { .. }).then(|| {
+        crate::batch_run::LeaseHeartbeat::start(
+            db.clone(),
+            execution_id,
+            crate::batch_run::instance_id().to_string(),
+            run.lease_lost.clone(),
+        )
+    });
+
+    // 6. Build enhanced system prompt with ChartML reference and watch context.
+    // The run's stored start time, not "now": a resumed run must rebuild the
+    // identical prompt so its cached batch responses still match.
+    let current_time = run.started_at;
 
     let recent_alerts = if mode == WatchMode::Alert {
         get_recent_alerts_for_watch(db, watch_id, &current_time, 5).await
@@ -1148,6 +1483,11 @@ async fn execute_watch_inner(
     );
 
     // 7. Create watch_execution session (hidden from chat list)
+    let previous_session = if matches!(run.kind, RunKind::Resume { .. }) {
+        watch_batch_service::execution_session(db, execution_id).await?
+    } else {
+        None
+    };
     let session_id = uuid::Uuid::new_v4().to_string();
     chat_service::create_session_with_id(
         db,
@@ -1159,6 +1499,22 @@ async fn execute_watch_inner(
         None,
     )
     .await?;
+    // Record the session now, not only at completion, so an interrupted
+    // attempt's session can be found and removed when the run resumes.
+    watch_batch_service::set_execution_session(db, execution_id, &session_id).await?;
+    if let Ok(mut target) = run.billing.lock() {
+        *target = Some(BillingTarget {
+            provider: provider_name.clone(),
+            model: configured_model.clone(),
+            is_byok: selection.workspace_billed,
+            session_id: session_id.clone(),
+        });
+    }
+    if let Some(old) = previous_session.filter(|old| *old != session_id)
+        && let Err(e) = chat_service::delete_session(db, &watch.created_by, &old, Some(&watch.workspace_id)).await
+    {
+        warn!(execution_id, session_id = %old, error = %e, "Failed to remove the interrupted attempt's session (non-fatal)");
+    }
 
     info!(
         session_id = %session_id,
@@ -1188,50 +1544,28 @@ async fn execute_watch_inner(
     );
 
     // 9. Run agent via execute_agent_chat with limited tool set
-    let tools_subset: Vec<String> = WATCH_TOOLS.iter().map(|s| s.to_string()).collect();
-
-    let agent_config = AgentExecutionConfig {
-        session_id: session_id.clone(),
-        user_id: watch.created_by.clone(),
-        workspace_id: watch.workspace_id.clone(),
-        message: watch.prompt.clone(),
-        model_name: None, // use default model
-        llm_profile: kyomi_core::llm_sampling::LlmProfile::Watch,
-        is_shared_conversation: false,
-        context_type: "kyomi_watch".into(),
-        workspace_user_ids: None,
-        cancel_token: CancellationToken::new(),
-        current_time_user_tz: None,
-        message_source: Some("Kyomi Watch".into()),
-        system_prompt: Some(enhanced_system_prompt.clone()),
-        tools_subset: Some(tools_subset),
-        max_iterations: MAX_WATCH_ITERATIONS,
-        max_duration: Some(MAX_WATCH_DURATION),
-        max_total_tokens: Some(MAX_WATCH_TOTAL_TOKENS),
-        max_tokens: MAX_WATCH_OUTPUT_TOKENS,
-        component: "kyomi_watch".into(),
-        // CallerPersisted, not AdapterPersists(None): `prepare_watch_dispatch`
-        // above already made the pre-written row durable. The LLM still
-        // receives the watch prompt for this turn — `CustomAgent::chat()` pushes
-        // `message` into the in-flight message list regardless of the persistence
-        // variant — but `caller_persisted_id()` returns `Some(user_message_id)`
-        // for `CallerPersisted` (unlike `AdapterPersists`, which returns `None`
-        // regardless of its inner id), so `should_persist_new_message` recognises
-        // that in-flight message as the same row already on disk and skips
-        // writing it again.
-        user_message_persistence: watch_dispatch.user_message_persistence,
-        assistant_message_persistence: AssistantMessagePersistence::adapter_inserts_with_new_id(),
-        conversation_history: None,
-        user_display_name: "Kyomi Watch".to_string(),
-        context_window: 0,
-        workspace_roles: creator_workspace_roles.clone(),
-        // Watch execution has no single open document — see
-        // `ToolContext::document_id`.
-        document_id: None,
-    };
+    // CallerPersisted, not AdapterPersists(None): `prepare_watch_dispatch`
+    // above already made the pre-written row durable. The LLM still
+    // receives the watch prompt for this turn — `CustomAgent::chat()` pushes
+    // `message` into the in-flight message list regardless of the persistence
+    // variant — but `caller_persisted_id()` returns `Some(user_message_id)`
+    // for `CallerPersisted` (unlike `AdapterPersists`, which returns `None`
+    // regardless of its inner id), so `should_persist_new_message` recognises
+    // that in-flight message as the same row already on disk and skips
+    // writing it again.
+    let mut agent_config = build_watch_agent_config(
+        &session_id,
+        &watch.created_by,
+        &watch.workspace_id,
+        watch.prompt.clone(),
+        enhanced_system_prompt.clone(),
+        creator_workspace_roles.clone(),
+        watch_dispatch.user_message_persistence,
+    );
+    agent_config.max_duration = Some(max_duration);
 
     let lazy_embedding = kyomi_embed::LazyEmbedding::loaded(embedding.clone());
-    let agent_result = execute_agent_chat(
+    let agent_result = crate::execution::execute_agent_chat_with(
         agent_config,
         crate::execution::AgentExecutionEnv {
             db,
@@ -1243,8 +1577,21 @@ async fn execute_watch_inner(
             connect_registry: connect_registry.clone(),
             platforms: platforms.clone(),
         },
+        extras.clone(),
     )
     .await?;
+    ensure_batch_attempt_succeeded(&extras, run, &agent_result)?;
+    // The configured model may be the provider default; record the real one.
+    if let Some(model) = agent_result.model.as_deref()
+        && let Err(e) = kyomi_core::db_execute!(
+            db,
+            "UPDATE watch_executions SET llm_model = $1 WHERE id = $2",
+            model,
+            execution_id
+        )
+    {
+        warn!(execution_id, error = %e, "Failed to record the watch run's model (non-fatal)");
+    }
 
     let mut raw_response = agent_result.response_text;
     let mut input_tokens = agent_result
@@ -1325,7 +1672,7 @@ async fn execute_watch_inner(
                          {{\"should_alert\": false, \"reason\": \"...\"}}"
                     );
 
-                    let retry_config = build_watch_retry_config(
+                    let mut retry_config = build_watch_retry_config(
                         &session_id,
                         &watch.created_by,
                         &watch.workspace_id,
@@ -1334,8 +1681,9 @@ async fn execute_watch_inner(
                         correction_prompt,
                     );
 
+                    retry_config.max_duration = Some(max_duration);
                     let lazy_embedding_retry = kyomi_embed::LazyEmbedding::loaded(embedding.clone());
-                    match execute_agent_chat(
+                    match crate::execution::execute_agent_chat_with(
                         retry_config,
                         crate::execution::AgentExecutionEnv {
                             db,
@@ -1347,10 +1695,12 @@ async fn execute_watch_inner(
                             connect_registry: connect_registry.clone(),
                             platforms: platforms.clone(),
                         },
+                        extras.clone(),
                     )
                     .await
                     {
                         Ok(retry_result) => {
+                            ensure_batch_attempt_succeeded(&extras, run, &retry_result)?;
                             raw_response = retry_result.response_text;
                             // Accumulate retry tokens for accurate billing
                             input_tokens += retry_result
@@ -1422,6 +1772,45 @@ async fn execute_watch_inner(
     let validated_data = validated_data.ok_or_else(|| {
         kyomi_core::Error::Internal("Failed to validate watch response".into())
     })?;
+
+    // A batch run finalizes and delivers only while it still owns the run: a
+    // displaced driver must not write a result or send a duplicate alert.
+    if extras.watch_batch.is_some() {
+        let still_mine = watch_batch_service::claim_lease(
+            db,
+            execution_id,
+            crate::batch_run::instance_id(),
+            Utc::now() + chrono::Duration::seconds(crate::batch_run::LEASE_TTL_SECONDS),
+            Utc::now(),
+        )
+        .await?;
+        if !still_mine {
+            run.lease_lost.store(true, std::sync::atomic::Ordering::SeqCst);
+            return Err(kyomi_core::Error::Internal(
+                "watch run lease was taken by another instance".into(),
+            ));
+        }
+        // The wait can be hours: a watch disabled or deleted meanwhile must not
+        // deliver. (A realtime run is seconds long and is not re-checked.)
+        if !load_watch(db, watch_id).await?.is_some_and(|w| w.enabled) {
+            return Err(kyomi_core::Error::Internal(
+                "Watch was removed or disabled while a batch run was in progress".into(),
+            ));
+        }
+    }
+
+    // A batch-mode run is billed exactly once, from the responses stored on its
+    // call rows, through the usage ledger (see `bill_batch_run`). Done on the failure path too, so the
+    // calls of a run that is then failed are not silently free.
+    if extras.watch_batch.is_some() {
+        if let Ok(mut target) = run.billing.lock()
+            && let Some(t) = target.as_mut()
+            && let Some(model) = agent_result.model.clone()
+        {
+            t.model = model;
+        }
+        bill_batch_run(db, encryption_key, watch, execution_id, run).await;
+    }
 
     // 11. Determine the stored/delivered terminal state. A guard stop is an
     // Error with its human message, never an empty successful report.

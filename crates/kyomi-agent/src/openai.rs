@@ -94,6 +94,10 @@ impl OpenAIProvider {
         self.ctx_window
     }
 
+    pub(crate) fn base_url(&self) -> &str {
+        &self.base.base_url
+    }
+
     /// Return the model name this provider is configured with.
     pub fn model(&self) -> &str {
         self.base.model()
@@ -257,6 +261,44 @@ impl OpenAIProvider {
     // API Call
     // -----------------------------------------------------------------------
 
+    /// The request body for these inputs. The realtime [`complete`](Self::complete)
+    /// and the batch adapter both send exactly this (KYO-973).
+    pub(crate) fn request_body(
+        &self,
+        messages: &[Message],
+        tools: &[Tool],
+        options: &RequestOptions,
+        user_names: &HashMap<String, String>,
+    ) -> serde_json::Value {
+        let openai_messages = Self::convert_messages_to_openai(messages, user_names);
+        Self::build_request_body(&self.base.model, openai_messages, tools, options)
+    }
+
+    /// A request to a batch endpoint under this provider's base URL, with the
+    /// same authentication and attribution headers as the realtime call.
+    pub(crate) fn batch_request(&self, method: reqwest::Method, path: &str) -> reqwest::RequestBuilder {
+        let url = format!("{}{path}", self.base.base_url.trim_end_matches('/'));
+        let request = self
+            .base
+            .client
+            .request(method, url)
+            .header("Authorization", format!("Bearer {}", self.base.api_key))
+            .header("Content-Type", "application/json");
+        Self::with_openrouter_headers(request)
+    }
+
+    /// OpenRouter's attribution headers, shared by the realtime and batch calls.
+    fn with_openrouter_headers(request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        request
+            .header("X-OpenRouter-Title", "Kyomi")
+            .header("HTTP-Referer", "https://kyomi.ai")
+    }
+
+    /// Parse a vendor response body (realtime or batch result) as this provider's model.
+    pub(crate) fn parse_response_body(&self, response: &serde_json::Value) -> kyomi_core::Result<LLMResponse> {
+        Self::parse_response(&self.base.model, response)
+    }
+
     /// Send a completion request to the OpenAI-compatible chat completions API.
     ///
     /// # Arguments
@@ -275,19 +317,11 @@ impl OpenAIProvider {
         options: &RequestOptions,
         user_names: &HashMap<String, String>,
     ) -> kyomi_core::Result<LLMResponse> {
-        let openai_messages = Self::convert_messages_to_openai(messages, user_names);
-
-        let message_count = openai_messages.len();
-        let body = Self::build_request_body(
-            &self.base.model,
-            openai_messages,
-            tools,
-            options,
-        );
+        let body = self.request_body(messages, tools, options, user_names);
 
         debug!(
             model = %self.base.model,
-            message_count,
+            message_count = body["messages"].as_array().map_or(0, Vec::len),
             tool_count = tools.len(),
             "calling OpenAI-compatible API"
         );
@@ -313,10 +347,8 @@ impl OpenAIProvider {
             .header("Authorization", format!("Bearer {}", self.base.api_key))
             .header("Content-Type", "application/json");
 
-        if self.base.base_url.contains("openrouter.ai") {
-            request = request
-                .header("X-OpenRouter-Title", "Kyomi")
-                .header("HTTP-Referer", "https://kyomi.ai");
+        if crate::batch::is_openrouter(&self.base.base_url) {
+            request = Self::with_openrouter_headers(request);
         }
 
         let response = request
@@ -388,7 +420,7 @@ impl OpenAIProvider {
     ///
     /// Extracts content and tool calls from `choices[0].message`, and maps
     /// `finish_reason` to internal format.
-    fn parse_response(
+    pub(crate) fn parse_response(
         model: &str,
         response: &serde_json::Value,
     ) -> kyomi_core::Result<LLMResponse> {

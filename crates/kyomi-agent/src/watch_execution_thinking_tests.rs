@@ -233,9 +233,17 @@ async fn execute_watch_inner_attaches_the_trace_to_the_saved_assistant_row() {
     let key = Arc::new(KEY);
     let platforms = Arc::new(kyomi_core::platform::PlatformRegistry::new());
 
+    let run = RunSetup {
+        kind: RunKind::Manual,
+        started_at: execution.started_at,
+        stored_deadline: None,
+        lease_lost: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        is_batch: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        billing: Arc::new(std::sync::Mutex::new(None)),
+    };
     execute_watch_inner(
         &db, &kv, &key, &embedding, &ws_manager, &app_config, None, &platforms, &watch,
-        execution.id,
+        execution.id, &run,
     )
     .await
     .expect("watch run completes");

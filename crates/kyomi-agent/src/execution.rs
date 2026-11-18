@@ -34,7 +34,7 @@ use crate::adapter::{AssistantMessagePersistence, ChatAgentAdapter, UserMessageP
 use crate::agent::{AgentConfig, CustomAgent};
 use crate::prompt;
 use crate::provider::{
-    create_provider_from_workspace, resolve_provider_config, LLMProvider, ProviderKind,
+    create_provider, create_provider_from_workspace, resolve_provider_config, LLMProvider, ProviderKind,
 };
 use crate::thinking::AgentThinkingTracker;
 use crate::tools::web::WEB_TOOL_NAMES;
@@ -365,7 +365,7 @@ fn effective_provider_kind(
 }
 
 /// BYOK workspaces (their own key, self-hosted only) cost Kyomi credits nothing.
-fn is_byok(
+pub(crate) fn is_byok(
     ws_config: &kyomi_auth::workspace_ai_config::WorkspaceAiConfig,
     app_config: &kyomi_core::Config,
 ) -> bool {
@@ -511,6 +511,38 @@ pub async fn execute_agent_chat(
     config: AgentExecutionConfig,
     env: AgentExecutionEnv<'_>,
 ) -> kyomi_core::Result<AgentExecutionResult> {
+    execute_agent_chat_with(config, env, ExecutionExtras::default()).await
+}
+
+/// Per-run extras that only some callers have (watch batch mode, KYO-973).
+/// Kept out of [`AgentExecutionConfig`] so every other call site is unchanged.
+#[derive(Clone, Default)]
+pub struct ExecutionExtras {
+    /// Set for a watch run that talks to the LLM through a provider batch API.
+    pub watch_batch: Option<WatchBatchRun>,
+}
+
+/// A watch run that uses batch mode.
+#[derive(Clone)]
+pub struct WatchBatchRun {
+    pub execution_id: i32,
+    /// Latest time the run may still wait on a batch.
+    pub deadline: chrono::DateTime<chrono::Utc>,
+    /// Set when this instance loses the run's lease to another instance.
+    pub lease_lost: Arc<std::sync::atomic::AtomicBool>,
+    /// Told when the run starts or stops waiting on a batch.
+    pub on_waiting: Option<crate::batch_run::WaitingHook>,
+    /// Position of the next model call of the run, shared by every turn of one
+    /// attempt (see [`crate::batch_run::BatchRunContext::call_seq`]).
+    pub call_seq: Arc<std::sync::atomic::AtomicI32>,
+}
+
+/// [`execute_agent_chat`] with per-run [`ExecutionExtras`].
+pub async fn execute_agent_chat_with(
+    config: AgentExecutionConfig,
+    env: AgentExecutionEnv<'_>,
+    extras: ExecutionExtras,
+) -> kyomi_core::Result<AgentExecutionResult> {
     // Built up front: a pure mapping off `config`/`env` with no I/O, so it
     // can happen before `env` is destructured below. See `build_tool_context`.
     let tool_context = build_tool_context(&config, &env);
@@ -548,11 +580,6 @@ pub async fn execute_agent_chat(
         if let Some(ref model) = config.model_name {
             ws_config.model = Some(model.clone());
         }
-        let is_byok = is_byok(&ws_config, app_config);
-        let llm_config = crate::provider::resolve_workspace_provider_config(&ws_config, app_config)?;
-        let provider_kind = llm_config.provider;
-        let llm_base_url = llm_config.base_url;
-        let client = create_provider_from_workspace(&ws_config, app_config, None)?;
         // Resolved once per execution so the value is stable for the whole
         // conversation turn (effort changes invalidate Anthropic's prompt
         // cache).
@@ -562,7 +589,47 @@ pub async fn execute_agent_chat(
             app_config,
             false,
         );
-        (client, provider_kind, is_byok, sampling, llm_base_url)
+        if config.llm_profile == kyomi_core::llm_sampling::LlmProfile::Watch
+            && config.model_name.is_none()
+        {
+            // Watches may use their own provider / model / key (KYO-973).
+            // Every watch turn, including the JSON-correction retry, takes
+            // this path because both carry the Watch profile.
+            let selection = crate::watch_llm::resolve_watch_selection(&ws_config, app_config)?;
+            let kind = selection.provider_config.provider;
+            let llm_base_url = selection.provider_config.base_url.clone();
+            let failure_policy = selection.resolved.batch_failure;
+            let mut inner = create_provider(selection.provider_config)?;
+            if let Some(run) = &extras.watch_batch {
+                inner = Box::new(crate::batch_run::BatchingProvider::new(
+                    inner,
+                    &kind.to_string(),
+                    crate::batch_run::BatchRunContext {
+                        db: db.clone(),
+                        encryption_key: encryption_key.clone(),
+                        execution_id: run.execution_id,
+                        owner: crate::batch_run::instance_id().to_string(),
+                        deadline: run.deadline,
+                        failure_policy,
+                        poll_interval: crate::batch_run::poll_interval(),
+                        lease_lost: run.lease_lost.clone(),
+                        on_waiting: run.on_waiting.clone(),
+                        call_seq: run.call_seq.clone(),
+                    },
+                ));
+            }
+            // A batch run is billed from its persisted calls when it completes
+            // (`watch_execution::bill_batch_run`); the in-memory ledger of this
+            // attempt is never billed for it (see step 14b).
+            (crate::usage_ledger::MeteredClient::new(inner), kind, selection.workspace_billed, sampling, llm_base_url)
+        } else {
+            let is_byok = is_byok(&ws_config, app_config);
+            let llm_config = crate::provider::resolve_workspace_provider_config(&ws_config, app_config)?;
+            let provider_kind = llm_config.provider;
+            let llm_base_url = llm_config.base_url;
+            let client = create_provider_from_workspace(&ws_config, app_config, None)?;
+            (client, provider_kind, is_byok, sampling, llm_base_url)
+        }
     };
     // Read the authoritative model name from the provider (not from config defaults).
     let model_name = client.model().to_string();
@@ -591,6 +658,7 @@ pub async fn execute_agent_chat(
             run.billing.register(usage_ledger.clone(), registered);
             None
         }
+        None if extras.watch_batch.is_some() => None,
         None => Some(crate::usage_ledger::BillOnDrop::new(usage_ledger.clone(), billing.clone())),
     };
 
@@ -837,7 +905,14 @@ pub async fn execute_agent_chat(
     // 14b. Bill the run: the metered client recorded every provider call (incl. the
     // max-iterations wrap-up) and `UsageLedger::bill` is the one writer of
     // `api_usage_log` rows for every call type (KYO-974).
-    usage_ledger.bill(&billing.context()).await?;
+    //
+    // A batch-mode watch run is billed once, when it completes, from the
+    // responses persisted on its call rows (`watch_execution::bill_batch_run`):
+    // this attempt's ledger also holds replayed calls, and a resumed run's
+    // earlier attempts are not in it.
+    if extras.watch_batch.is_none() {
+        usage_ledger.bill(&billing.context()).await?;
+    }
 
     // 14. Finalize the assistant message: attach metadata (model, thinking
     //     events, token usage) and, via `MessageStatus`, the turn's

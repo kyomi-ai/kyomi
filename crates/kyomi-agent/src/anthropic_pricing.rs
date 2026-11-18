@@ -20,6 +20,11 @@
 //!   higher row for the whole request. Every other 4.6+ model includes the
 //!   full 1M window at standard pricing.
 //! * Thinking tokens are part of `output_tokens` and are billed as output.
+//! * The Batch API (the "Batch processing" section of the same page) takes 50 percent
+//!   off input and output tokens, and the page states the cache multipliers "stack with
+//!   other pricing modifiers, including the Batch API discount", so a batch call costs
+//!   [`BATCH_DISCOUNT`] of every component of its standard price, cache writes and reads
+//!   included. Haiku 5.5's prompt-length tier applies to batch the same way.
 
 use std::collections::HashSet;
 use std::sync::{Mutex, OnceLock};
@@ -135,9 +140,33 @@ pub struct PricedCall {
     pub known_model: bool,
 }
 
-/// Price one call. An unknown model is logged at error level and priced at the
-/// highest published rates; it never costs 0.
+/// How a call was served: the service tier the API reports in `usage.service_tier`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PriceTier {
+    Standard,
+    /// A Message Batches result (`service_tier: "batch"`).
+    Batch,
+}
+
+impl PriceTier {
+    /// The tier a response's `usage.service_tier` names; anything but `batch` is standard.
+    pub fn from_service_tier(service_tier: Option<&str>) -> Self {
+        if service_tier == Some("batch") { Self::Batch } else { Self::Standard }
+    }
+}
+
+/// Fraction of the standard price a Batch API call pays (the published 50 percent discount).
+pub const BATCH_DISCOUNT: f64 = 0.5;
+
+/// Price one standard-tier call. An unknown model is logged at error level and
+/// priced at the highest published rates; it never costs 0.
 pub fn price_call(model: &str, tokens: CallTokens) -> PricedCall {
+    price_call_at(model, tokens, PriceTier::Standard)
+}
+
+/// Price one call at its service tier. The one place a price is computed: a batch
+/// call is the standard price with the batch discount applied.
+pub fn price_call_at(model: &str, tokens: CallTokens, tier: PriceTier) -> PricedCall {
     let (r, known_model) = match family(model) {
         Some(f) => {
             let prompt = tokens.input + tokens.cache_write_5m + tokens.cache_write_1h + tokens.cache_read;
@@ -168,6 +197,10 @@ pub fn price_call(model: &str, tokens: CallTokens) -> PricedCall {
         + per_million(tokens.cache_write_5m, r.cache_write_5m)
         + per_million(tokens.cache_write_1h, r.cache_write_1h)
         + per_million(tokens.cache_read, r.cache_read);
+    let cost_usd = match tier {
+        PriceTier::Standard => cost_usd,
+        PriceTier::Batch => cost_usd * BATCH_DISCOUNT,
+    };
     PricedCall { cost_usd, known_model }
 }
 
@@ -275,5 +308,54 @@ mod tests {
         assert_eq!(context_window("claude-haiku-4-5-20251001"), 200_000);
         assert_eq!(context_window("claude-sonnet-4-5-20250929"), 200_000);
         assert_eq!(context_window("something-else"), 200_000);
+    }
+
+    // -- Batch tier (the Batch API's published 50 percent discount) ----------
+
+    const EVERY_COMPONENT: CallTokens =
+        CallTokens { input: 1_000_000, output: 1_000_000, cache_write_5m: 1_000_000, cache_write_1h: 1_000_000, cache_read: 1_000_000 };
+
+    #[test]
+    fn a_batch_call_costs_half_of_the_same_standard_call_for_every_component() {
+        for model in ["claude-haiku-5-5", "claude-sonnet-5-5", "claude-opus-5-5", "claude-fable-5-2", "claude-haiku-4-5-20251001"] {
+            let standard = price_call_at(model, EVERY_COMPONENT, PriceTier::Standard);
+            let batch = price_call_at(model, EVERY_COMPONENT, PriceTier::Batch);
+            assert!(standard.known_model && batch.known_model, "{model}");
+            assert!((batch.cost_usd - standard.cost_usd * 0.5).abs() < 1e-9, "{model}: {} vs {}", batch.cost_usd, standard.cost_usd);
+            // Cache writes and reads stack with the discount: each component alone is halved.
+            for t in [
+                CallTokens { input: 1_000_000, ..Default::default() },
+                CallTokens { output: 1_000_000, ..Default::default() },
+                CallTokens { cache_write_5m: 1_000_000, ..Default::default() },
+                CallTokens { cache_write_1h: 1_000_000, ..Default::default() },
+                CallTokens { cache_read: 1_000_000, ..Default::default() },
+            ] {
+                let (s, b) = (price_call_at(model, t, PriceTier::Standard), price_call_at(model, t, PriceTier::Batch));
+                assert!((b.cost_usd - s.cost_usd * 0.5).abs() < 1e-9, "{model} {t:?}");
+            }
+        }
+    }
+
+    /// The published batch prices (pricing page, "Batch processing", read 2026-11-18):
+    /// Opus 5.5 $2 / $10, Sonnet 5.5 $1 / $5, Fable 5.2 $4 / $20 per million input / output
+    /// tokens; Haiku 5.5 $0.05 / $0.25 up to 100K prompt tokens and $0.25 / $1.25 above.
+    #[test]
+    fn batch_prices_match_the_published_batch_table() {
+        let io = CallTokens { input: 1_000_000, output: 1_000_000, ..Default::default() };
+        let cost = |model, t| price_call_at(model, t, PriceTier::Batch).cost_usd;
+        assert!((cost("claude-opus-5-5", io) - 12.0).abs() < 1e-9);
+        assert!((cost("claude-sonnet-5-5", io) - 6.0).abs() < 1e-9);
+        assert!((cost("claude-fable-5-2", io) - 24.0).abs() < 1e-9);
+        assert!((cost("claude-haiku-5-5", CallTokens { input: 100_000, output: 1_000_000, ..Default::default() }) - (0.005 + 0.25)).abs() < 1e-9);
+        // Over 100K prompt tokens Haiku 5.5's higher row applies to batch the same way.
+        assert!((cost("claude-haiku-5-5", CallTokens { input: 100_001, output: 1_000_000, ..Default::default() }) - (0.0250005 + 1.25)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn only_a_batch_service_tier_is_priced_as_batch() {
+        assert_eq!(PriceTier::from_service_tier(Some("batch")), PriceTier::Batch);
+        for t in [None, Some("standard"), Some("priority"), Some("")] {
+            assert_eq!(PriceTier::from_service_tier(t), PriceTier::Standard, "{t:?}");
+        }
     }
 }

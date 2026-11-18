@@ -344,7 +344,7 @@ pub async fn send_watch_alert(
 /// Send a watch_state_update notification.
 ///
 /// Sent at key points during watch execution to update the frontend's watch list
-/// in real-time. Status values: `"running"`, `"success"`, `"no_alert"`, `"error"`.
+/// in real-time. Status values: `"running"`, `"waiting_batch"`, `"success"`, `"no_alert"`, `"error"`.
 pub async fn send_watch_state_update(
     manager: WorkspaceMessageContext<'_>,
     user_id: &str,

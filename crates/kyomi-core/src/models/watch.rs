@@ -107,7 +107,7 @@ pub struct WatchExecution {
     /// When the execution completed (null while running).
     pub completed_at: Option<DateTime<Utc>>,
 
-    /// Execution status: `"running"`, `"success"`, `"error"`, `"no_alert"`.
+    /// Execution status: `"running"`, `"waiting_batch"`, `"success"`, `"error"`, `"no_alert"`.
     pub status: WatchExecutionStatus,
 
     /// The AI agent's response text.
@@ -142,4 +142,29 @@ pub struct WatchExecution {
 
     /// Who soft-deleted the alert.
     pub deleted_by: Option<String>,
+
+    /// Provider the run used (KYO-973). `None` on rows from before it existed.
+    #[sqlx(default)]
+    #[serde(default)]
+    pub llm_provider: Option<String>,
+
+    /// Model the run used.
+    #[sqlx(default)]
+    #[serde(default)]
+    pub llm_model: Option<String>,
+
+    /// `"realtime"` or `"batch"`: what the run actually used.
+    #[sqlx(default)]
+    #[serde(default)]
+    pub llm_mode: Option<String>,
+
+    /// JSON array text of the vendor batch ids this run submitted.
+    #[sqlx(default)]
+    #[serde(default)]
+    pub batch_ids: Option<String>,
+
+    /// Why a batch-configured run (or part of it) ran realtime.
+    #[sqlx(default)]
+    #[serde(default)]
+    pub batch_fallback_reason: Option<String>,
 }

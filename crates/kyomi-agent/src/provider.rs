@@ -141,6 +141,12 @@ pub trait LLMProvider: Send + Sync {
 
     /// Return the model's context window size in tokens (0 = unknown).
     fn context_window(&self) -> u32 { 0 }
+
+    /// The provider's batch API, when it has one (KYO-973). `None` means
+    /// batch mode is unsupported for this provider and endpoint.
+    fn batch(&self) -> Option<&dyn crate::batch::BatchLLMProvider> {
+        None
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -293,6 +299,13 @@ impl LLMProvider for AnthropicClient {
     fn context_window(&self) -> u32 {
         AnthropicClient::context_window(self)
     }
+
+    fn batch(&self) -> Option<&dyn crate::batch::BatchLLMProvider> {
+        // The adapter exists for any Anthropic client; whether a custom base
+        // URL (a proxy) may be used for batches is a configuration decision
+        // enforced by `batch::batch_support`.
+        Some(self)
+    }
 }
 
 #[async_trait]
@@ -313,6 +326,11 @@ impl LLMProvider for OpenAIProvider {
 
     fn context_window(&self) -> u32 {
         self.context_window()
+    }
+
+    fn batch(&self) -> Option<&dyn crate::batch::BatchLLMProvider> {
+        crate::batch::is_openrouter(self.base_url())
+            .then_some(self as &dyn crate::batch::BatchLLMProvider)
     }
 }
 
@@ -412,8 +430,10 @@ fn build_provider_from_workspace(
 
 /// The provider configuration [`create_provider_from_workspace`] builds the
 /// client from. Public so other code that depends on *which* provider and base
-/// URL are in effect for a workspace (for example whether a provider-executed
-/// web backend can run) asks the same function instead of re-deriving the rule.
+/// URL are in effect for a workspace asks the same function instead of
+/// re-deriving the rule: whether a provider-executed web backend can run, and
+/// watches, which override only the model on the same connection (KYO-973)
+/// rather than re-deriving the SaaS / Kyomi / BYOK connection rules.
 pub fn resolve_workspace_provider_config(
     ws_config: &kyomi_auth::workspace_ai_config::WorkspaceAiConfig,
     fallback_config: &kyomi_core::Config,
@@ -777,6 +797,8 @@ mod tests {
             context_window: 0,
             sampling: Default::default(),
             sampling_warnings: Vec::new(),
+            watch_llm: Default::default(),
+            watch_llm_warnings: Vec::new(),
         };
 
         let provider = create_provider_from_workspace(&ws, &fallback, None)
@@ -800,6 +822,8 @@ mod tests {
             context_window: 0,
             sampling: Default::default(),
             sampling_warnings: Vec::new(),
+            watch_llm: Default::default(),
+            watch_llm_warnings: Vec::new(),
         };
         for self_hosted in [false, true] {
             let mut fallback = kyomi_core::Config::test_config();
@@ -830,6 +854,8 @@ mod tests {
             context_window: 0,
             sampling: Default::default(),
             sampling_warnings: Vec::new(),
+            watch_llm: Default::default(),
+            watch_llm_warnings: Vec::new(),
         };
 
         let provider = create_provider_from_workspace(&ws, &fallback, None).unwrap();
@@ -858,6 +884,8 @@ mod tests {
             context_window: 0,
             sampling: Default::default(),
             sampling_warnings: Vec::new(),
+            watch_llm: Default::default(),
+            watch_llm_warnings: Vec::new(),
         };
 
         let provider = create_provider_from_workspace(&ws, &fallback, None)
@@ -881,6 +909,8 @@ mod tests {
             context_window: 0,
             sampling: Default::default(),
             sampling_warnings: Vec::new(),
+            watch_llm: Default::default(),
+            watch_llm_warnings: Vec::new(),
         };
 
         let provider = create_provider_from_workspace(&ws, &fallback, None).unwrap();
@@ -903,6 +933,8 @@ mod tests {
             context_window: 0,
             sampling: Default::default(),
             sampling_warnings: Vec::new(),
+            watch_llm: Default::default(),
+            watch_llm_warnings: Vec::new(),
         };
 
         let err = match create_provider_from_workspace(&ws, &fallback, None) {
@@ -935,6 +967,8 @@ mod tests {
             context_window: 0,
             sampling: Default::default(),
             sampling_warnings: Vec::new(),
+            watch_llm: Default::default(),
+            watch_llm_warnings: Vec::new(),
         };
 
         // SaaS mode should ignore BYOK and use server config
@@ -1052,4 +1086,5 @@ mod reasoning_usage_tests {
         assert!(!reasoning_exhausted_budget(&response("partial", "length", None)));
         assert!(!reasoning_exhausted_budget(&response("", "end_turn", None)));
     }
+
 }

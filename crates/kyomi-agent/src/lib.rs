@@ -28,6 +28,8 @@ mod runtime_adapter;
 pub mod agent;
 pub mod alert;
 pub mod anthropic;
+pub mod batch;
+pub mod batch_run;
 pub mod anthropic_pricing;
 pub mod catalog;
 pub mod catalog_scheduler;
@@ -47,6 +49,7 @@ pub mod pdf_typst;
 pub mod prompt;
 pub mod provider;
 pub mod sampling;
+pub mod watch_llm;
 pub mod scheduler;
 // Slack message processor moved to enterprise/kyomi-slack crate (Phase 12).
 #[cfg(test)]

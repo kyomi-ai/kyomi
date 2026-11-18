@@ -36,6 +36,12 @@ Receive a summary on every scheduled run, regardless of what the data shows.
 
 ![Creating a watch](/images/docs/watch-creation-sidebar.png)
 
+## Running Watches on a Cheaper Model or Batch API (self-hosted)
+
+Self-hosted workspace admins can point watches at their own provider, model or API key, and optionally run them on the provider's batch API at about half the price, under **Settings → AI → Watch LLM**. Instance operators can set the same options with the `LLM_WATCH_*` environment variables.
+
+Batch mode (Anthropic and OpenRouter) trades latency for cost: a run takes minutes to an hour or more, and each step of a run waits for its own batch. It is off by default and works for both alert and report watches. Kyomi protects your schedule: a watch whose next run is sooner than the configured batch window runs that occurrence in realtime, a batch that has not finished before the next run is due is cancelled and the run completes in realtime, and **Run now** always runs in realtime. While a batch is pending the run shows as "Waiting on batch", and each run records its provider, model, mode and token usage.
+
 ## Schedule Timezones
 
 Schedules use five cron fields: minute, hour, day of month, month and weekday (0 or 7 is Sunday; 1 is Monday). Choose a named IANA timezone such as `Australia/Sydney` to keep a recurring schedule at the same local time through daylight saving changes. Monday at 09:00 Sydney is `0 9 * * 1` with `Australia/Sydney`: Sunday 23:00 UTC in winter and Sunday 22:00 UTC in summer.
