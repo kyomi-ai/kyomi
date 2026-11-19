@@ -103,6 +103,35 @@ fn a_provider_search_without_a_reported_query_still_lists_its_sources() {
     assert!(html.contains("href=\"https://blog.rust-lang.org/x\""), "{html}");
 }
 
+/// KYO-979: OpenRouter reports only a count for a fetch, so the card has no URL
+/// and no sources. It still renders as the fetch card — heading only, with no
+/// empty subject box and nothing invented.
+#[test]
+fn a_fetch_without_a_reported_url_still_shows_its_card() {
+    let html = render(json!({
+        "tool": "web_fetch",
+        "input": {"url": ""},
+        "output": {"tool": "web_fetch", "available": true}
+    }));
+    assert!(html.contains("Fetching page:"), "{html}");
+    assert!(!html.contains("bg-muted p-2"), "no empty subject box: {html}");
+    assert!(!html.contains("Sources:"), "{html}");
+}
+
+/// KYO-979: a successful fetch that returned no page shows the call's URL as the
+/// subject, with no "Sources:" row pretending the call URL was a source.
+#[test]
+fn a_successful_fetch_without_a_page_shows_the_call_url_and_no_sources() {
+    let html = render(json!({
+        "tool": "web_fetch",
+        "input": {"url": "https://empty.example"},
+        "output": {"tool": "web_fetch", "available": true}
+    }));
+    assert!(html.contains("Fetching page:"), "{html}");
+    assert!(html.contains("https://empty.example"), "{html}");
+    assert!(!html.contains("Sources:"), "{html}");
+}
+
 /// Card titles come from the web: bidi controls, zero-width and TAG characters are
 /// removed and the length is capped, by the same shared rule the answer footer uses.
 #[test]

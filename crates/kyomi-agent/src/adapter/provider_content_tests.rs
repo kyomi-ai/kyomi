@@ -66,17 +66,32 @@ fn anthropic_server_tool_config() -> crate::agent::AgentConfig {
     }
 }
 
-fn adapter_with_server_tools(
+fn openrouter_server_tool_config() -> crate::agent::AgentConfig {
+    use kyomi_core::web_tools::{WebBackendConfig, WebBackendKind, WebCaps, WebToolKind};
+    let cfg = WebBackendConfig { kind: WebBackendKind::OpenRouter, ..Default::default() };
+    let caps = WebCaps::default();
+    let entry = |tool| crate::web::server_tools::openrouter_tool_entry(tool, &cfg, &caps);
+    crate::agent::AgentConfig {
+        server_tools: vec![
+            crate::web::server_tools::ServerTool { kind: WebToolKind::Search, backend: WebBackendKind::OpenRouter, entry: entry(WebToolKind::Search) },
+            crate::web::server_tools::ServerTool { kind: WebToolKind::Fetch, backend: WebBackendKind::OpenRouter, entry: entry(WebToolKind::Fetch) },
+        ],
+        ..Default::default()
+    }
+}
+
+fn adapter_with_config(
     db: &kyomi_core::DbPool,
     session_id: &str,
     key: &Arc<[u8; 32]>,
     provider: CapturedThenText,
+    config: crate::agent::AgentConfig,
 ) -> ChatAgentAdapter {
     let mut ctx = crate::test_support::build_ctx(db.clone());
     ctx.session_id = Some(session_id.to_string());
     let agent = CustomAgent::new(
         Box::new(provider),
-        anthropic_server_tool_config(),
+        config,
         Arc::new(crate::tools::ToolRegistry::new()),
         ctx,
         std::collections::HashMap::new(),
@@ -85,9 +100,35 @@ fn adapter_with_server_tools(
         "custom_agent".to_string(), db.clone(), key.clone())
 }
 
+fn adapter_with_server_tools(
+    db: &kyomi_core::DbPool,
+    session_id: &str,
+    key: &Arc<[u8; 32]>,
+    provider: CapturedThenText,
+) -> ChatAgentAdapter {
+    adapter_with_config(db, session_id, key, provider, anthropic_server_tool_config())
+}
+
 /// The reply the provider actually returned for a web-search turn (live capture).
 fn captured_search_message() -> serde_json::Value {
     serde_json::from_str(include_str!("../web/fixtures/anthropic_search_message.json")).expect("fixture")
+}
+
+/// The reply the provider actually returned for a web-fetch turn (live capture).
+fn captured_fetch_message() -> serde_json::Value {
+    serde_json::from_str(include_str!("../web/fixtures/anthropic_fetch_message.json")).expect("fixture")
+}
+
+/// The captured fetch reply with a client `tool_use` block appended: the
+/// adjacent shape where the fetch has already completed in the same response
+/// that calls a client tool. The provider blocks are untouched.
+fn completed_fetch_alongside_client_tool_calls() -> serde_json::Value {
+    let mut raw = captured_fetch_message();
+    raw["stop_reason"] = serde_json::json!("tool_use");
+    raw["content"].as_array_mut().expect("content").push(serde_json::json!({
+        "type": "tool_use", "id": "toolu_kyo979", "name": "list_datasources", "input": {}
+    }));
+    raw
 }
 
 struct TwoTurns {
@@ -220,6 +261,412 @@ async fn a_provider_executed_search_is_recorded_as_a_source_card_event_and_repla
     let expected = &captured["content"][1]["content"][0];
     assert_eq!(first["url"], expected["url"]);
     assert!(first["title"].as_str().unwrap().contains(expected["title"].as_str().unwrap()), "title fenced like a Kyomi-executed result");
+}
+
+/// KYO-979, adjacent regression: when the provider has already completed a
+/// fetch in the same response that calls a client tool, its card is recorded.
+/// This shape already worked and is not the production incident's shape.
+#[tokio::test]
+async fn a_completed_fetch_in_the_same_response_as_client_tool_calls_is_recorded_as_a_source_card() {
+    let db = crate::test_support::test_pool().await;
+    crate::test_support::seed_user_and_workspace(&db).await;
+    let key = Arc::new([7u8; 32]);
+    let session_id = uuid::Uuid::new_v4().to_string();
+    let captured = completed_fetch_alongside_client_tool_calls();
+    let live = crate::anthropic::AnthropicClient::parse_response("claude", &captured, None).expect("parse capture");
+    let (user, assistant) = claim_durable_turn(&db, &key, &session_id, chrono::Utc::now().timestamp_millis(), 30_000).await;
+    let mut adapter = adapter_with_server_tools(&db, &session_id, &key,
+        CapturedThenText { script: std::sync::Mutex::new(vec![live].into()), fail_when_exhausted: false, seen: Arc::new(std::sync::Mutex::new(Vec::new())) });
+    let answer = adapter.chat(ChatParams {
+        message: "look at kyomi.ai and list my datasources", cancel_token: CancellationToken::new(), current_time_user_tz: None,
+        message_source: Some("web"), user_id: Some("user-a"), user_message_persistence: &user,
+        assistant_message_persistence: &assistant,
+    }).await.expect("turn");
+    assert!(!answer.contains("**Sources**"), "the fetch card replaces its footer source: {answer}");
+
+    let run = assistant.durable_run().expect("durable");
+    let store = kyomi_auth::conversation_events::ConversationStore::new(&db, &key, "user-a", "ws-1");
+    let batch = store.replay(&run.conversation_id, 0, agent_runtime::MAX_REPLAY_EVENTS).await.expect("replay events");
+    let provider_id = captured["content"][0]["id"].as_str().unwrap();
+    let outcome = batch.events.iter().find_map(|event| match &event.payload {
+        agent_runtime::PublicPayload::ToolOutcome { tool_call_id, text, .. } if tool_call_id.as_str() == provider_id => Some(text.preview.clone()),
+        _ => None,
+    }).expect("the provider fetch is recorded even though the response also called a client tool");
+    let shown: serde_json::Value = serde_json::from_str(&outcome).expect("the card payload is JSON");
+    assert_eq!(shown["tool"], "web_fetch");
+    assert_eq!(shown["url"], captured["content"][1]["content"]["url"]);
+}
+
+/// Anthropic's documented mixed-turn shape: a provider call and a client call in
+/// the same parallel group. Response 1 returns `stop_reason: "tool_use"` before
+/// the provider call has run; after the client tool results are sent back,
+/// response 2 begins with that call's result block and does not repeat the
+/// `server_tool_use` block.
+fn deferred_server_call(
+    live: &serde_json::Value,
+    call_index: usize,
+    result_index: usize,
+    first_usage: serde_json::Value,
+    second_usage: serde_json::Value,
+) -> (serde_json::Value, serde_json::Value) {
+    let first = serde_json::json!({
+        "id": "msg_deferred_1", "type": "message", "role": "assistant",
+        "stop_reason": "tool_use",
+        "content": [
+            {"type": "text", "text": "I'll look that up and check your datasources."},
+            live["content"][call_index].clone(),
+            {"type": "tool_use", "id": "toolu_kyo979", "name": "list_datasources", "input": {}}
+        ],
+        "usage": {"input_tokens": 10, "output_tokens": 5, "server_tool_use": first_usage},
+    });
+    let second = serde_json::json!({
+        "id": "msg_deferred_2", "type": "message", "role": "assistant",
+        "stop_reason": "end_turn",
+        "content": [
+            live["content"][result_index].clone(),
+            {"type": "text", "text": "Here is what I found."}
+        ],
+        "usage": {"input_tokens": 20, "output_tokens": 10, "server_tool_use": second_usage},
+    });
+    (first, second)
+}
+
+/// A live `pause_turn` (one fetch still pending, no result yet) and its live
+/// continuation, which begins with that fetch's result block and does not repeat
+/// the `server_tool_use` block — the provider's documented continuation shape.
+/// A client tool call is added to the continuation, as production had (KYO-979).
+fn paused_single_fetch_chain() -> (serde_json::Value, serde_json::Value) {
+    let paused_live: serde_json::Value =
+        serde_json::from_str(include_str!("../web/fixtures/anthropic_pause_turn_message.json")).expect("paused fixture");
+    let continuation_live: serde_json::Value =
+        serde_json::from_str(include_str!("../web/fixtures/anthropic_pause_turn_continuation_message.json")).expect("continuation fixture");
+    let paused_content = paused_live["content"].as_array().expect("content");
+    let pending = paused_content
+        .iter()
+        .find(|block| {
+            block["type"] == "server_tool_use"
+                && !paused_content.iter().any(|result| {
+                    result["tool_use_id"] == block["id"]
+                        && result["type"].as_str().is_some_and(|kind| kind.ends_with("_tool_result"))
+                })
+        })
+        .expect("the paused call without a result")
+        .clone();
+    let pending_id = pending["id"].as_str().expect("id");
+    let result = continuation_live["content"]
+        .as_array()
+        .expect("content")
+        .iter()
+        .find(|block| block["type"] == "web_fetch_tool_result" && block["tool_use_id"] == pending_id)
+        .expect("the continuation's result for the paused call")
+        .clone();
+    let paused = serde_json::json!({
+        "id": "msg_pause_kyo979", "type": "message", "role": "assistant",
+        "stop_reason": "pause_turn",
+        "content": [paused_live["content"][0].clone(), pending],
+        "usage": {"input_tokens": 10, "output_tokens": 5, "server_tool_use": {"web_fetch_requests": 1}},
+    });
+    let continuation = serde_json::json!({
+        "id": "msg_continuation_kyo979", "type": "message", "role": "assistant",
+        "stop_reason": "tool_use",
+        "content": [
+            result,
+            {"type": "text", "text": "The page is fetched."},
+            {"type": "tool_use", "id": "toolu_kyo979", "name": "list_datasources", "input": {}}
+        ],
+        "usage": {"input_tokens": 20, "output_tokens": 10, "server_tool_use": {"web_fetch_requests": 1}},
+    });
+    (paused, continuation)
+}
+
+struct CardRun {
+    answer: String,
+    cards: Vec<serde_json::Value>,
+    /// The full `tool_execution_end` event data, in order, so tests can inspect
+    /// the recorded outcome as well as the card schema.
+    events: Vec<serde_json::Value>,
+    outcomes: Vec<(String, String)>,
+}
+
+/// Run one durable turn with a thinking tracker attached and capture the exact
+/// frames the live chat receives plus the durable tool outcomes.
+struct CardRunInput<'a> {
+    db: &'a kyomi_core::DbPool,
+    key: &'a Arc<[u8; 32]>,
+    session_id: &'a str,
+    user: &'a UserMessagePersistence,
+    assistant: &'a AssistantMessagePersistence,
+    prompt: &'a str,
+    config: crate::agent::AgentConfig,
+    script: Vec<crate::types::LLMResponse>,
+}
+
+/// Run one durable turn with a thinking tracker attached and capture the exact
+/// frames the live chat receives plus the durable tool outcomes.
+async fn run_capturing_cards(input: CardRunInput<'_>) -> CardRun {
+    let CardRunInput { db, key, session_id, user, assistant, prompt, config, script } = input;
+    let mut adapter = adapter_with_config(db, session_id, key,
+        CapturedThenText { script: std::sync::Mutex::new(script.into()), fail_when_exhausted: false, seen: Arc::new(std::sync::Mutex::new(Vec::new())) },
+        config);
+    let manager = kyomi_auth::websocket::WebSocketManager::new(None, db.clone());
+    let (_, mut receiver) = manager.connect("user-a").expect("connect");
+    let tracker = Arc::new(tokio::sync::Mutex::new(crate::thinking::AgentThinkingTracker::new(
+        crate::thinking::AgentThinkingTrackerConfig {
+            workspace_id: "ws-1".into(), session_id: session_id.to_string(), user_id: "user-a".into(),
+            message_id: assistant.tag_id().expect("assistant id").into(), ws_manager: manager,
+            workspace_user_ids: None, context_type: Some("chat".into()), context_window: 0,
+            incremental_flush: None,
+        },
+    )));
+    adapter.set_thinking_tracker(tracker);
+    let answer = adapter.chat(ChatParams {
+        message: prompt, cancel_token: CancellationToken::new(), current_time_user_tz: None,
+        message_source: Some("web"), user_id: Some("user-a"), user_message_persistence: user,
+        assistant_message_persistence: assistant,
+    }).await.expect("turn");
+    let mut cards = Vec::new();
+    let mut events = Vec::new();
+    while let Ok(frame) = receiver.try_recv() {
+        let frame: kyomi_core::WebSocketMessage = serde_json::from_str(&frame).expect("frame");
+        if frame.message_type != kyomi_core::MessageType::AgentThinking { continue; }
+        let event = frame.data.as_ref().and_then(|data| data.get("event")).expect("thinking event");
+        if event.get("event_type").and_then(|kind| kind.as_str()) != Some("tool_execution_end") { continue; }
+        cards.push(event.get("data").and_then(|data| data.get("schema")).expect("card schema").clone());
+        events.push(event.clone());
+    }
+    let run = assistant.durable_run().expect("durable");
+    let store = kyomi_auth::conversation_events::ConversationStore::new(db, key, "user-a", "ws-1");
+    let batch = store.replay(&run.conversation_id, 0, agent_runtime::MAX_REPLAY_EVENTS).await.expect("replay events");
+    let outcomes = batch.events.iter().filter_map(|event| match &event.payload {
+        agent_runtime::PublicPayload::ToolOutcome { tool_call_id, text, .. } => Some((tool_call_id.as_str().to_string(), text.preview.clone())),
+        _ => None,
+    }).collect();
+    CardRun { answer, cards, events, outcomes }
+}
+
+/// KYO-979: a fetch started in a `pause_turn` response and returned at the start
+/// of its continuation — with the expected `tool_use_id` but no repeated
+/// `server_tool_use` block — is still recorded as a source card, in a response
+/// that also calls client tools. The footer must not have to stand in for it.
+#[tokio::test]
+async fn a_paused_fetch_result_in_a_continuation_with_client_tool_calls_is_recorded_as_a_source_card() {
+    let db = crate::test_support::test_pool().await;
+    crate::test_support::seed_user_and_workspace(&db).await;
+    let key = Arc::new([7u8; 32]);
+    let session_id = uuid::Uuid::new_v4().to_string();
+    let (paused, continuation) = paused_single_fetch_chain();
+    let pending_url = paused["content"][1]["input"]["url"].as_str().expect("url").to_string();
+    let provider_id = paused["content"][1]["id"].as_str().expect("id").to_string();
+    let paused = crate::anthropic::AnthropicClient::parse_response("claude", &paused, None).expect("parse paused");
+    let continuation = crate::anthropic::AnthropicClient::parse_response("claude", &continuation, None).expect("parse continuation");
+    let (user, assistant) = claim_durable_turn(&db, &key, &session_id, chrono::Utc::now().timestamp_millis(), 30_000).await;
+
+    let run = run_capturing_cards(CardRunInput {
+        db: &db, key: &key, session_id: &session_id, user: &user, assistant: &assistant,
+        prompt: "fetch n=7 and list my datasources", config: anthropic_server_tool_config(),
+        script: vec![paused, continuation],
+    }).await;
+    assert!(!run.answer.contains("**Sources**"), "the fetch card replaces its footer source: {}", run.answer);
+    let cards: Vec<_> = run.cards.iter().filter(|schema| schema["tool"] == "web_fetch").collect();
+    assert_eq!(cards.len(), 1, "one web fetch card, streamed to the UI: {:?}", run.cards);
+    assert_eq!(cards[0]["input"]["url"], pending_url);
+    assert_eq!(cards[0]["output"]["url"], pending_url);
+    assert!(cards[0]["output"]["title"].as_str().expect("title").contains("httpbin.org/get?n=7"));
+    assert!(run.outcomes.iter().any(|(id, _)| id == &provider_id), "the card is recorded durably under the provider's call id");
+}
+
+/// KYO-979, the production shape: a fetch called in the same parallel group as a
+/// client tool. The provider defers the fetch until the client tool results are
+/// returned, and its next response carries the result without repeating the
+/// `server_tool_use`. The fetch must still be recorded as a source card.
+#[tokio::test]
+async fn a_deferred_fetch_behind_client_tool_results_is_recorded_as_a_source_card() {
+    let db = crate::test_support::test_pool().await;
+    crate::test_support::seed_user_and_workspace(&db).await;
+    let key = Arc::new([7u8; 32]);
+    let session_id = uuid::Uuid::new_v4().to_string();
+    let captured = captured_fetch_message();
+    let (first, second) = deferred_server_call(&captured, 0, 1,
+        serde_json::json!({"web_fetch_requests": 0}), serde_json::json!({"web_fetch_requests": 1}));
+    let provider_id = first["content"][1]["id"].as_str().expect("id").to_string();
+    let url = first["content"][1]["input"]["url"].as_str().expect("url").to_string();
+    let first = crate::anthropic::AnthropicClient::parse_response("claude", &first, None).expect("parse first");
+    let second = crate::anthropic::AnthropicClient::parse_response("claude", &second, None).expect("parse second");
+    let (user, assistant) = claim_durable_turn(&db, &key, &session_id, chrono::Utc::now().timestamp_millis(), 30_000).await;
+
+    let run = run_capturing_cards(CardRunInput {
+        db: &db, key: &key, session_id: &session_id, user: &user, assistant: &assistant,
+        prompt: "look at the Rust site and list my datasources", config: anthropic_server_tool_config(),
+        script: vec![first, second],
+    }).await;
+    assert!(!run.answer.contains("**Sources**"), "the deferred fetch card replaces its footer source: {}", run.answer);
+    let cards: Vec<_> = run.cards.iter().filter(|schema| schema["tool"] == "web_fetch").collect();
+    assert_eq!(cards.len(), 1, "one web fetch card, streamed to the UI: {:?}", run.cards);
+    assert_eq!(cards[0]["input"]["url"], url);
+    assert_eq!(cards[0]["output"]["url"], url);
+    assert!(cards[0]["output"]["title"].as_str().expect("title").contains("Rust Programming Language"));
+    let event = run.events.iter().find(|event| event["data"]["schema"]["tool"] == "web_fetch").expect("fetch event");
+    assert_eq!(event["data"]["success"], true, "a successful provider fetch is recorded as succeeded");
+    assert!(run.outcomes.iter().any(|(id, _)| id == &provider_id), "the card is recorded durably under the provider's call id");
+}
+
+/// KYO-979, the same production shape for a search: the deferred search's query
+/// and results must reach the card even though the result block arrives without
+/// the `server_tool_use`.
+#[tokio::test]
+async fn a_deferred_search_behind_client_tool_results_keeps_its_query_and_is_recorded_as_a_source_card() {
+    let db = crate::test_support::test_pool().await;
+    crate::test_support::seed_user_and_workspace(&db).await;
+    let key = Arc::new([7u8; 32]);
+    let session_id = uuid::Uuid::new_v4().to_string();
+    let captured = captured_search_message();
+    let (first, second) = deferred_server_call(&captured, 0, 1,
+        serde_json::json!({"web_search_requests": 0}), serde_json::json!({"web_search_requests": 1}));
+    let provider_id = first["content"][1]["id"].as_str().expect("id").to_string();
+    let query = first["content"][1]["input"]["query"].as_str().expect("query").to_string();
+    let result_url = second["content"][0]["content"][0]["url"].as_str().expect("result url").to_string();
+    let first = crate::anthropic::AnthropicClient::parse_response("claude", &first, None).expect("parse first");
+    let second = crate::anthropic::AnthropicClient::parse_response("claude", &second, None).expect("parse second");
+    let (user, assistant) = claim_durable_turn(&db, &key, &session_id, chrono::Utc::now().timestamp_millis(), 30_000).await;
+
+    let run = run_capturing_cards(CardRunInput {
+        db: &db, key: &key, session_id: &session_id, user: &user, assistant: &assistant,
+        prompt: "search for rust news and list my datasources", config: anthropic_server_tool_config(),
+        script: vec![first, second],
+    }).await;
+    assert!(!run.answer.contains("**Sources**"), "the deferred search card replaces its footer source: {}", run.answer);
+    let cards: Vec<_> = run.cards.iter().filter(|schema| schema["tool"] == "web_search").collect();
+    assert_eq!(cards.len(), 1, "one web search card, streamed to the UI: {:?}", run.cards);
+    assert_eq!(cards[0]["input"]["query"], query);
+    assert_eq!(cards[0]["output"]["results"][0]["url"], result_url);
+    assert!(run.outcomes.iter().any(|(id, _)| id == &provider_id), "the card is recorded durably under the provider's call id");
+}
+
+/// KYO-979, OpenRouter: the Chat Completions response reports only a count for a
+/// fetch — no URL and no annotations. The card is still shown, with only what
+/// the provider returned; nothing is invented.
+#[tokio::test]
+async fn a_provider_fetch_without_a_reported_url_or_sources_still_shows_a_card() {
+    let db = crate::test_support::test_pool().await;
+    crate::test_support::seed_user_and_workspace(&db).await;
+    let key = Arc::new([7u8; 32]);
+    let session_id = uuid::Uuid::new_v4().to_string();
+    let captured: serde_json::Value =
+        serde_json::from_str(include_str!("../web/fixtures/openrouter_fetch_chat_completion.json")).expect("fixture");
+    let response = crate::types::LLMResponse {
+        raw_response: captured,
+        content: "The title of the webpage is \"Example Domain\".".into(),
+        finish_reason: "stop".into(),
+        usage: Default::default(),
+        tool_calls: None,
+        cost: None,
+        thinking_content: None,
+        call_detail: None,
+    };
+    let (user, assistant) = claim_durable_turn(&db, &key, &session_id, chrono::Utc::now().timestamp_millis(), 30_000).await;
+
+    let run = run_capturing_cards(CardRunInput {
+        db: &db, key: &key, session_id: &session_id, user: &user, assistant: &assistant,
+        prompt: "read https://example.com", config: openrouter_server_tool_config(),
+        script: vec![response],
+    }).await;
+    assert!(!run.answer.contains("**Sources**"), "there is no footer source to stand in: {}", run.answer);
+    let cards: Vec<_> = run.cards.iter().filter(|schema| schema["tool"] == "web_fetch").collect();
+    assert_eq!(cards.len(), 1, "the fetch card is shown even without a URL: {:?}", run.cards);
+    assert_eq!(cards[0]["input"]["url"], "");
+    assert!(cards[0]["output"].get("url").is_none(), "no URL is invented: {}", cards[0]["output"]);
+    assert!(cards[0]["output"].get("title").is_none(), "no title is invented: {}", cards[0]["output"]);
+}
+
+/// KYO-979: a deferred call whose result is an error still gets a card with the
+/// model's URL and the provider's own error code; no sources, no footer.
+#[tokio::test]
+async fn a_deferred_fetch_error_still_shows_a_card_with_its_url_and_reason() {
+    let db = crate::test_support::test_pool().await;
+    crate::test_support::seed_user_and_workspace(&db).await;
+    let key = Arc::new([7u8; 32]);
+    let session_id = uuid::Uuid::new_v4().to_string();
+    let first = serde_json::json!({
+        "id": "msg_error_1", "type": "message", "role": "assistant", "stop_reason": "tool_use",
+        "content": [
+            {"type": "text", "text": "I'll fetch that page."},
+            {"type": "server_tool_use", "id": "srvtoolu_error", "name": "web_fetch", "input": {"url": "https://blocked.example"}},
+            {"type": "tool_use", "id": "toolu_kyo979", "name": "list_datasources", "input": {}}
+        ],
+        "usage": {"input_tokens": 10, "output_tokens": 5, "server_tool_use": {"web_fetch_requests": 0}},
+    });
+    let second = serde_json::json!({
+        "id": "msg_error_2", "type": "message", "role": "assistant", "stop_reason": "end_turn",
+        "content": [
+            {"type": "web_fetch_tool_result", "tool_use_id": "srvtoolu_error", "content": {"error_code": "url_not_accessible"}},
+            {"type": "text", "text": "The page could not be fetched."}
+        ],
+        "usage": {"input_tokens": 20, "output_tokens": 10, "server_tool_use": {"web_fetch_requests": 1}},
+    });
+    let first = crate::anthropic::AnthropicClient::parse_response("claude", &first, None).expect("parse first");
+    let second = crate::anthropic::AnthropicClient::parse_response("claude", &second, None).expect("parse second");
+    let (user, assistant) = claim_durable_turn(&db, &key, &session_id, chrono::Utc::now().timestamp_millis(), 30_000).await;
+
+    let run = run_capturing_cards(CardRunInput {
+        db: &db, key: &key, session_id: &session_id, user: &user, assistant: &assistant,
+        prompt: "fetch https://blocked.example and list my datasources", config: anthropic_server_tool_config(),
+        script: vec![first, second],
+    }).await;
+    assert!(!run.answer.contains("**Sources**"), "there is no footer source to stand in: {}", run.answer);
+    let cards: Vec<_> = run.cards.iter().filter(|schema| schema["tool"] == "web_fetch").collect();
+    assert_eq!(cards.len(), 1, "the failed fetch still gets a card: {:?}", run.cards);
+    assert_eq!(cards[0]["input"]["url"], "https://blocked.example");
+    assert!(cards[0]["output"].get("url").is_none(), "the call URL is the card subject, not a returned source");
+    assert_eq!(cards[0]["output"]["available"], false);
+    assert_eq!(cards[0]["output"]["reason"], "url_not_accessible", "only the provider's own code");
+    assert!(cards[0]["output"].get("title").is_none(), "no page, so no title");
+    let event = run.events.iter().find(|event| event["data"]["schema"]["tool"] == "web_fetch").expect("fetch event");
+    assert_eq!(event["data"]["success"], false, "a failed provider fetch is recorded as failed, not a green Done");
+    assert_eq!(event["data"]["schema"]["output"]["reason"], "url_not_accessible");
+}
+
+/// KYO-979: when the tool-use budget runs out with a deferred call still
+/// pending, the forced wrap-up response carries that call's result. It must go
+/// through the same recording as every other response: a card and a usage count.
+#[tokio::test]
+async fn a_wrap_up_response_carrying_a_pending_fetch_result_is_still_recorded() {
+    let db = crate::test_support::test_pool().await;
+    crate::test_support::seed_user_and_workspace(&db).await;
+    let key = Arc::new([7u8; 32]);
+    let session_id = uuid::Uuid::new_v4().to_string();
+    let captured = captured_fetch_message();
+    let (first, second) = deferred_server_call(&captured, 0, 1,
+        serde_json::json!({"web_fetch_requests": 0}), serde_json::json!({"web_fetch_requests": 1}));
+    let provider_id = first["content"][1]["id"].as_str().expect("id").to_string();
+    let url = first["content"][1]["input"]["url"].as_str().expect("url").to_string();
+    let first = crate::anthropic::AnthropicClient::parse_response("claude", &first, None).expect("parse first");
+    let second_content = second["content"].as_array().expect("content").clone();
+    let second = crate::anthropic::AnthropicClient::parse_response("claude", &second, None).expect("parse second");
+    let (user, assistant) = claim_durable_turn(&db, &key, &session_id, chrono::Utc::now().timestamp_millis(), 30_000).await;
+    let mut config = anthropic_server_tool_config();
+    config.max_iterations = 1;
+
+    let capture = kyomi_test_tracing::capture_tracing();
+    let run = run_capturing_cards(CardRunInput {
+        db: &db, key: &key, session_id: &session_id, user: &user, assistant: &assistant,
+        prompt: "fetch the Rust site and list my datasources", config, script: vec![first, second],
+    }).await;
+    let line = capture.events_at(tracing::Level::INFO).into_iter()
+        .map(|(_, message)| message)
+        .find(|message| message.contains("provider web tool used"))
+        .expect("the wrap-up's provider web call is counted");
+    assert!(line.contains("tool=\"web_fetch\""), "{line}");
+    assert!(line.contains("billable_calls=1"), "the wrap-up's call is counted once: {line}");
+    assert!(!run.answer.contains("**Sources**"), "the wrap-up card replaces its footer source: {}", run.answer);
+    let cards: Vec<_> = run.cards.iter().filter(|schema| schema["tool"] == "web_fetch").collect();
+    assert_eq!(cards.len(), 1, "the wrap-up result gets its card: {:?}", run.cards);
+    assert_eq!(cards[0]["input"]["url"], url);
+    assert_eq!(cards[0]["output"]["url"], url);
+    assert!(cards[0]["output"]["title"].as_str().expect("title").contains("Rust Programming Language"));
+    assert!(run.outcomes.iter().any(|(id, _)| id == &provider_id), "the card is recorded durably under the provider's call id");
+    let history = chat_service::get_agent_messages(&db, &key, &session_id, None).await.expect("history");
+    let final_row = history.iter().find(|message| message.message_id == assistant.tag_id().expect("assistant id")).expect("final assistant row");
+    assert_eq!(final_row.provider_content.as_ref(), Some(&serde_json::Value::Array(second_content.clone())), "the wrap-up blocks are stored verbatim");
 }
 
 #[tokio::test]
@@ -475,3 +922,4 @@ async fn a_provider_error_inside_a_pause_chain_leaves_no_stored_rows_from_the_ru
     let history = chat_service::get_agent_messages(&turns.db, &key, &turns.session_id, None).await.unwrap();
     assert!(history.iter().all(|m| m.role != "assistant" || !m.content.contains("I'll fetch each URL")), "no partial text row");
 }
+

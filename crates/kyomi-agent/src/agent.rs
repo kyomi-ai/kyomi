@@ -490,6 +490,10 @@ pub struct CustomAgent {
     /// Sources the provider's web tools used during this run (normalised);
     /// shown to the user as a footer on the final answer.
     web_sources: Vec<crate::web::WebSource>,
+    /// Calls the previous response announced without a result yet. The next
+    /// response returns their results without repeating the `server_tool_use`
+    /// block, so the parser pairs them with these.
+    pending_server_calls: Vec<crate::web::server_tools::ServerToolCall>,
     /// Provider-reported web calls used so far in this run, per tool: the per-turn
     /// allowance is spent across every request of the run, not per request.
     web_usage: HashMap<kyomi_core::web_tools::WebToolKind, u32>,
@@ -524,6 +528,7 @@ impl CustomAgent {
             tool_context,
             user_names,
             web_sources: Vec::new(),
+            pending_server_calls: Vec::new(),
             web_usage: HashMap::new(),
             turn_server_tools: tokio::sync::OnceCell::new(),
             last_server_tools: std::sync::Mutex::new(Vec::new()),
@@ -612,6 +617,7 @@ impl CustomAgent {
     ) -> kyomi_core::Result<String> {
         self.pause_chain_start = None;
         self.web_sources.clear();
+        self.pending_server_calls.clear();
         let result = self.run_chat(user_message, cancel_token, current_time_user_tz, message_source, user_id).await;
         // A failed run keeps none of an open `pause_turn` chain (blocks that end in a
         // call without its result are rejected by the provider on every later turn);
@@ -1170,6 +1176,7 @@ impl CustomAgent {
         // The wrap-up is an LLM call like any other, so it counts.
         self.state.global_iteration += 1;
 
+        let wrap_up_started = std::time::Instant::now();
         let wrap_up = tokio::select! {
             result = self.call_llm_with(&wrap_up_messages, &[], false) => result,
             _ = cancel_token.cancelled() => {
@@ -1191,6 +1198,11 @@ impl CustomAgent {
                 ));
             }
         };
+
+        // The wrap-up can carry the result of a call deferred before the budget
+        // ran out. Record it exactly like a loop response: usage, card, sources
+        // and the verbatim blocks (KYO-979).
+        let server_activity = self.note_server_tools(&response, wrap_up_started.elapsed()).await;
 
         let content = final_response_text(response);
 
@@ -1241,7 +1253,7 @@ impl CustomAgent {
         };
 
         let content = self.with_web_sources(content);
-        self.state.messages.push(Message::assistant(&content));
+        self.state.messages.push(Message::assistant(&content).with_provider_content(server_activity.provider_content));
         Ok(content)
     }
 
@@ -1436,10 +1448,18 @@ impl CustomAgent {
         if self.config.server_tools.is_empty() {
             return Default::default();
         }
+        let pending = std::mem::take(&mut self.pending_server_calls);
         let activity = match self.config.server_tools.first().map(|t| t.backend) {
             Some(kyomi_core::web_tools::WebBackendKind::OpenRouter) => crate::web::server_tools::parse_openrouter(&response.raw_response),
-            _ => crate::web::server_tools::parse_anthropic(&response.raw_response),
+            _ => crate::web::server_tools::parse_anthropic_with_pending(&response.raw_response, &pending),
         };
+        // A server call the provider announced without a result is returned by
+        // the next response (its continuation) without repeating the
+        // `server_tool_use` block. That happens when the turn paused
+        // (`pause_turn`) and when a server call is deferred behind client tool
+        // results in the same parallel group (`stop_reason: "tool_use"`).
+        // Carry it into that response so it can still be carded (KYO-979).
+        self.pending_server_calls = activity.pending.clone();
         let ctx = &self.tool_context;
         for (tool, calls) in [
             (kyomi_core::web_tools::WebToolKind::Search, activity.searches),
@@ -1491,7 +1511,10 @@ impl CustomAgent {
                 kyomi_core::web_tools::WebToolKind::Search => serde_json::json!({"query": call.subject}),
                 kyomi_core::web_tools::WebToolKind::Fetch => serde_json::json!({"url": call.subject}),
             };
-            let shown = ProviderToolDisplay { text: crate::tools::web::display_output(call.tool, &call.subject, &call.sources) };
+            let shown = ProviderToolDisplay {
+                text: crate::tools::web::display_output(call.tool, &call.subject, &call.sources, call.error.as_deref()),
+                succeeded: call.error.is_none(),
+            };
             match context.tool(sink.as_ref(), &shown, agent_runtime::ToolCallId(id), name.to_string(), arguments).await {
                 Ok(_) => carded.extend(call.sources.iter().map(|source| source.url.clone())),
                 Err(error) => warn!(%error, tool = name, "could not record a provider web call as a source card; its sources are listed in the answer instead"),
@@ -1873,16 +1896,18 @@ impl agent_runtime::CompleteProvider for RuntimeProvider<'_> {
     }
 }
 /// A provider-executed call, already finished by the provider: recording it only
-/// stores its normalised result for display; nothing runs.
+/// stores its normalised result for display; nothing runs. A result the provider
+/// flagged as an error is recorded as a rejection, so the card reads as failed.
 struct ProviderToolDisplay {
     text: String,
+    succeeded: bool,
 }
 #[async_trait::async_trait]
 impl agent_runtime::ToolExecution for ProviderToolDisplay {
     async fn execute(&self) -> agent_runtime::ToolOutcome {
         agent_runtime::ToolOutcome {
             transport: agent_runtime::TransportOutcome::Completed,
-            domain: agent_runtime::DomainOutcome::Succeeded,
+            domain: if self.succeeded { agent_runtime::DomainOutcome::Succeeded } else { agent_runtime::DomainOutcome::Rejected },
             text: self.text.clone(),
         }
     }

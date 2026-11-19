@@ -2272,9 +2272,10 @@ fn web_source_row(title: String, url: String, published: Option<String>) -> AnyV
     .into_any()
 }
 
-/// `web_search` / `web_fetch`: the query or URL, then the sources the agent
-/// used. Backend-neutral: it reads the normalised result shape every backend
-/// produces (`results[{title,url,published}]` / `{url,title}`), never vendor data.
+/// `web_search` / `web_fetch`: the query or URL (when the backend reported one),
+/// then the sources the agent used. Backend-neutral: it reads the normalised
+/// result shape (`results[{title,url,published}]` / `{url,title}`) when present,
+/// never vendor data. A backend that reports only a count still gets the card.
 fn render_web_tool(schema: &Value) -> impl IntoView {
     let tool = str_field(schema, "tool").unwrap_or("web_search").to_string();
     let input = schema.get("input");
@@ -2313,7 +2314,9 @@ fn render_web_tool(schema: &Value) -> impl IntoView {
         <div class="space-y-2">
             <div>
                 {section_label(heading)}
-                <div class="mt-1 bg-muted p-2 rounded border border-border text-xs text-foreground font-medium break-words">{subject}</div>
+                {(!subject.is_empty()).then(|| view! {
+                    <div class="mt-1 bg-muted p-2 rounded border border-border text-xs text-foreground font-medium break-words">{subject}</div>
+                })}
             </div>
             {unavailable.then(|| view! { <div class="text-xs text-muted-foreground">{reason}</div> })}
             {(!rows.is_empty()).then(|| view! {

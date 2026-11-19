@@ -106,29 +106,48 @@ fn source_json(s: &WebSource) -> Option<Value> {
     Some(v)
 }
 
-/// The result payload the UI's source card reads for one search or fetch, in the
-/// same shape the Kyomi-executed tools return. Used to show a provider-executed
-/// call (whose results never pass through a Kyomi tool) with the same card.
-pub(crate) fn display_output(tool: kyomi_core::web_tools::WebToolKind, subject: &str, sources: &[WebSource]) -> String {
+/// The result payload the UI's source card reads for one search or fetch. The
+/// subject is the call's query/URL; the sources/URL/title are the result fields
+/// the provider reported, when it reported them. Shows a provider-executed call
+/// (whose results never pass through a Kyomi tool) with the same card; a
+/// backend that reports nothing but a count gets the card with only the fields
+/// it has.
+pub(crate) fn display_output(
+    tool: kyomi_core::web_tools::WebToolKind,
+    subject: &str,
+    sources: &[WebSource],
+    error: Option<&str>,
+) -> String {
     use kyomi_core::web_tools::WebToolKind;
-    match tool {
+    let mut output = match tool {
         WebToolKind::Search => json!({
             "tool": "web_search",
-            "available": true,
+            "available": error.is_none(),
             "query": subject,
             "results": sources.iter().filter_map(source_json).collect::<Vec<_>>(),
         }),
         WebToolKind::Fetch => {
             let page = sources.first();
-            json!({
-                "tool": "web_fetch",
-                "available": true,
-                "url": page.and_then(|p| safe_url(&p.url)).unwrap_or(subject),
-                "title": page.map(|p| fence_untrusted(&p.title)),
-            })
+            let mut output = json!({"tool": "web_fetch", "available": error.is_none()});
+            // Only a returned page supplies a source URL/title; the call's URL is
+            // the card's subject. A result with no page (a blocked fetch, an empty
+            // result, or a counts-only backend) therefore shows no source row and
+            // no invented fields.
+            if let Some(url) = page.and_then(|p| safe_url(&p.url)) {
+                output["url"] = json!(url);
+            }
+            if let Some(page) = page {
+                output["title"] = json!(fence_untrusted(&page.title));
+            }
+            output
         }
+    };
+    // The call's own URL/query stays on the card; the provider's reason is the
+    // only failure field it returned.
+    if let Some(error) = error {
+        output["reason"] = json!(error);
     }
-    .to_string()
+    output.to_string()
 }
 
 // ---------------------------------------------------------------------------
@@ -438,7 +457,7 @@ mod tests {
             score: None,
             published: Some("2026-10-01".into()),
         }];
-        let shown = parse(&display_output(kyomi_core::web_tools::WebToolKind::Search, "rust", &sources));
+        let shown = parse(&display_output(kyomi_core::web_tools::WebToolKind::Search, "rust", &sources, None));
         for key in shown.as_object().unwrap().keys() {
             assert!(real.get(key).is_some(), "the real search payload has `{key}`");
         }
@@ -463,13 +482,49 @@ mod tests {
             score: None,
             published: None,
         }];
-        let shown = parse(&display_output(kyomi_core::web_tools::WebToolKind::Fetch, "https://example.com", &sources));
+        let shown = parse(&display_output(kyomi_core::web_tools::WebToolKind::Fetch, "https://example.com", &sources, None));
         for key in shown.as_object().unwrap().keys() {
             assert!(real.get(key).is_some(), "the real fetch payload has `{key}`");
         }
         assert_eq!(shown["tool"], real["tool"]);
         assert_eq!(shown["available"], real["available"]);
         assert_eq!(shown["url"], "https://example.com/");
+    }
+
+    /// KYO-979: OpenRouter reports only a count for a fetch, so there is no URL
+    /// or page to show. The payload carries only what exists — no empty url or
+    /// invented title that the card would render as a blank link.
+    #[test]
+    fn a_fetch_without_a_url_or_page_reports_only_what_exists() {
+        let shown = parse(&display_output(kyomi_core::web_tools::WebToolKind::Fetch, "", &[], None));
+        assert_eq!(shown, json!({"tool": "web_fetch", "available": true}));
+    }
+
+    /// KYO-979: a failed call still shows the call's URL/query and the provider's
+    /// own error code; a successful search that found nothing shows an empty
+    /// result list. Neither invents a source or a reason.
+    #[test]
+    fn failed_and_zero_result_calls_show_the_call_and_only_the_provider_reason() {
+        let failed_fetch = parse(&display_output(kyomi_core::web_tools::WebToolKind::Fetch, "https://blocked.example", &[], Some("url_not_accessible")));
+        assert_eq!(failed_fetch["available"], false);
+        assert!(failed_fetch.get("url").is_none(), "the call URL is the card subject, not a returned source");
+        assert_eq!(failed_fetch["reason"], "url_not_accessible");
+        assert!(failed_fetch.get("title").is_none() && failed_fetch.get("results").is_none());
+
+        let failed_search = parse(&display_output(kyomi_core::web_tools::WebToolKind::Search, "q", &[], Some("too_many_requests")));
+        assert_eq!(failed_search["available"], false);
+        assert_eq!(failed_search["query"], "q");
+        assert_eq!(failed_search["reason"], "too_many_requests");
+        assert_eq!(failed_search["results"], json!([]));
+
+        let empty_search = parse(&display_output(kyomi_core::web_tools::WebToolKind::Search, "q", &[], None));
+        assert_eq!(empty_search["available"], true);
+        assert_eq!(empty_search["query"], "q");
+        assert_eq!(empty_search["results"], json!([]));
+        assert!(empty_search.get("reason").is_none());
+
+        let no_page = parse(&display_output(kyomi_core::web_tools::WebToolKind::Fetch, "https://empty.example", &[], None));
+        assert_eq!(no_page, json!({"tool": "web_fetch", "available": true}), "the call URL is the card subject, not a returned source");
     }
 
     #[tokio::test]
