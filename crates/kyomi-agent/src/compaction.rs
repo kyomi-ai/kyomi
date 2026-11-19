@@ -144,7 +144,10 @@ pub fn estimate_tokens(messages: &[Message], system_prompt_len: usize) -> u32 {
 ///     another assistant message, the cut moves back over the whole run. A
 ///     `pause_turn` chain and a provider-executed server tool's result are
 ///     stored as consecutive assistant messages, and splitting them would keep
-///     a result whose call was summarised away.
+///     a result whose call was summarised away;
+///   * if a kept assistant message carries a provider server-tool result, the
+///     cut moves back to the message that announced its `server_tool_use`, even
+///     when client tool results sit between them (the deferred-call shape).
 ///
 /// **Note:** The input should NOT include the system prompt message --
 /// the caller should strip it before calling this function and re-add it
@@ -162,6 +165,28 @@ pub fn split_messages_for_compaction(messages: &[Message]) -> (Vec<Message>, Vec
     {
         cutoff -= 1;
     }
+    // A provider server tool's result can arrive in a later assistant message
+    // (a `pause_turn` continuation or a deferred call behind client tool
+    // results), without repeating the `server_tool_use`. If a kept result's use
+    // would be summarised, move the cut back before the use's message.
+    loop {
+        let mut move_to = cutoff;
+        for message in &messages[cutoff..] {
+            for id in server_result_use_ids(message) {
+                if let Some(index) = messages
+                    .iter()
+                    .position(|candidate| server_use_ids(candidate).any(|use_id| use_id == id))
+                    && index < move_to
+                {
+                    move_to = index;
+                }
+            }
+        }
+        if move_to == cutoff {
+            break;
+        }
+        cutoff = move_to;
+    }
     // The history begins with a tool result and has no call to pair it with:
     // there is no safe cut, so keep everything rather than build a request the
     // provider will reject.
@@ -173,6 +198,33 @@ pub fn split_messages_for_compaction(messages: &[Message]) -> (Vec<Message>, Vec
     let to_keep = messages[cutoff..].to_vec();
 
     (to_summarize, to_keep)
+}
+
+/// The `server_tool_use` ids in a message's stored provider blocks.
+fn server_use_ids(message: &Message) -> impl Iterator<Item = &str> {
+    message
+        .provider_content
+        .as_deref()
+        .into_iter()
+        .flatten()
+        .filter(|block| block.get("type").and_then(serde_json::Value::as_str) == Some("server_tool_use"))
+        .filter_map(|block| block.get("id").and_then(serde_json::Value::as_str))
+}
+
+/// The `tool_use_id` of each provider server-tool result block in a message.
+fn server_result_use_ids(message: &Message) -> impl Iterator<Item = &str> {
+    message
+        .provider_content
+        .as_deref()
+        .into_iter()
+        .flatten()
+        .filter(|block| {
+            block
+                .get("type")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|kind| kind != "tool_result" && kind.ends_with("_tool_result"))
+        })
+        .filter_map(|block| block.get("tool_use_id").and_then(serde_json::Value::as_str))
 }
 
 /// Build a summarization prompt from messages that need compacting.
@@ -345,6 +397,7 @@ mod tests {
         assert_eq!(resolved.threshold_tokens, 150_000);
         assert!(!should_compact(Some(149_999), &[], 0, resolved.threshold_tokens));
         assert!(should_compact(Some(150_000), &[], 0, resolved.threshold_tokens));
+        assert!(should_compact(Some(150_001), &[], 0, resolved.threshold_tokens));
     }
 
     #[test]
@@ -583,6 +636,38 @@ mod contract_tests {
         assert_eq!(to_keep[0].tool_calls.as_ref().unwrap().len(), 2);
         assert_eq!(to_keep[1].tool_call_id.as_deref(), Some("tc_1"));
         assert_eq!(to_keep[2].tool_call_id.as_deref(), Some("tc_2"));
+    }
+
+    #[test]
+    fn the_cut_keeps_a_deferred_server_tool_use_with_its_result() {
+        // A server call is announced on assistant A, client tool results follow,
+        // and the server result arrives on assistant B (KYO-979's deferred
+        // shape). The naive cut at index 6 keeps B's result and summarises A.
+        let messages = vec![
+            Message::user("u0"),
+            Message::user("u1"),
+            Message::user("u2"),
+            Message::user("u3"),
+            Message::assistant("").with_provider_content(Some(vec![
+                serde_json::json!({"type": "server_tool_use", "id": "srv1", "name": "web_search", "input": {"query": "x"}}),
+            ])),
+            Message::tool_result("tc_1", "query_datasource", "client result"),
+            Message::assistant("").with_provider_content(Some(vec![
+                serde_json::json!({"type": "web_search_tool_result", "tool_use_id": "srv1", "content": []}),
+            ])),
+            Message::user("u4"),
+            Message::assistant("a4"),
+            Message::user("u5"),
+            Message::assistant("a5"),
+            Message::user("u6"),
+        ];
+
+        let (to_summarize, to_keep) = split_messages_for_compaction(&messages);
+
+        assert_eq!(to_summarize.len(), 4, "the server use's message joins the kept tail");
+        assert_eq!(to_keep[0].role, MessageRole::Assistant);
+        assert!(server_use_ids(&to_keep[0]).any(|id| id == "srv1"));
+        assert!(to_keep.iter().any(|m| server_result_use_ids(m).any(|id| id == "srv1")));
     }
 
     #[test]

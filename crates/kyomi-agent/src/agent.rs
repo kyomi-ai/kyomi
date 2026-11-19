@@ -1668,7 +1668,9 @@ impl CustomAgent {
             // to keep it going.
             let prompt_tokens = (prompt.len() / crate::compaction::CHARS_PER_TOKEN as usize) as u64;
             let fast_window = u64::from(compaction.client.context_window());
-            let required = prompt_tokens + prompt_tokens / 10 + u64::from(compaction.options.max_tokens);
+            // 25% covers token-dense SQL/JSON (about 3 chars/token) plus the
+            // summary's own output budget.
+            let required = prompt_tokens + prompt_tokens / 4 + u64::from(compaction.options.max_tokens);
             let use_fast = fast_window > 0 && required <= fast_window;
             let summary_client: &dyn LLMProvider = if use_fast {
                 compaction.client.as_ref()
