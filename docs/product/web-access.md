@@ -6,7 +6,7 @@ Web access is **off until configured**: there is no default backend. It is avail
 
 ## What leaves Kyomi
 
-Search queries and the URLs the agent fetches are sent to the configured provider (and, depending on the provider, to its underlying search engine). Kyomi instructs the agent never to put datasource values, customer or personal data, credentials or internal identifiers in a query or URL, but this is an instruction to the model, not a filter: do not enable web access where that is unacceptable. A conversation that holds restricted personal data from an external MCP connection cannot use web access at all.
+Search queries and the URLs the agent fetches are sent to the configured provider (and, depending on the provider, to its underlying search engine). Kyomi instructs the agent never to put datasource values, customer or personal data, credentials or internal identifiers in a query or URL, but this is an instruction to the model, not a filter: do not enable web access where that is unacceptable.
 
 Web content is treated as untrusted data. The agent is told not to follow instructions found in it, and nothing in a web page can run a query or change anything without the normal checks. For backends where the model provider itself runs the search (`anthropic`, `openrouter`), Kyomi cannot wrap the content the way it does for the other backends; the same instruction applies.
 

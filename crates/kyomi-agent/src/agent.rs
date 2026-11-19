@@ -1318,12 +1318,9 @@ impl CustomAgent {
     /// with the per-turn allowance still left as `max_uses`: the monthly budget is
     /// checked once, when the turn's first request is built, never mid-turn. A tool
     /// whose allowance is used up is left out of a request that is not a
-    /// continuation. A session holding restricted personal data may not send queries
-    /// to a third party (the same rule the native tools enforce) and a tool call can
-    /// make a session restricted mid-turn, so privacy is checked on every such
-    /// request; an unknown state fails closed. `allow_server_tools = false` (the
-    /// forced wrap-up call) sends none. The history is sent exactly as stored,
-    /// stored server-tool blocks included, whichever tools are offered.
+    /// continuation. `allow_server_tools = false` (the forced wrap-up call) sends
+    /// none. The history is sent exactly as stored, stored server-tool blocks
+    /// included, whichever tools are offered.
     async fn call_options(&self, allow_server_tools: bool) -> crate::provider::RequestOptions {
         let mut options = self.config.request_options();
         if allow_server_tools {
@@ -1341,10 +1338,6 @@ impl CustomAgent {
     async fn turn_request_server_tools(&self) -> Vec<serde_json::Value> {
         let allowed = self.turn_server_tools.get_or_init(|| self.turn_start_server_tools()).await;
         if allowed.is_empty() {
-            return Vec::new();
-        }
-        if self.session_restricted().await {
-            warn!("provider web tools withheld from this request: the session holds restricted personal data");
             return Vec::new();
         }
         let caps = &self.tool_context.config.web_tools.caps;
@@ -1370,19 +1363,6 @@ impl CustomAgent {
             self.turn_server_tools = tokio::sync::OnceCell::new();
         }
         self.call_options(true).await
-    }
-
-    /// Whether the session holds restricted personal data, so provider web tools
-    /// must not run. An unknown privacy state fails closed.
-    async fn session_restricted(&self) -> bool {
-        let ctx = &self.tool_context;
-        match ctx.session_id.as_deref() {
-            Some(session) => kyomi_auth::personal_mcp_privacy::restricted_owner(&ctx.db, session)
-                .await
-                .map(|o| o.is_some())
-                .unwrap_or(true),
-            None => false,
-        }
     }
 
     /// The configured provider tools this turn may use (indices into
@@ -4205,16 +4185,42 @@ Second chart:\n{CHARTML_STRIPPED_NOTE}\nDone."
         assert!(agent.request_options_for_call(true).await.server_tools.is_empty());
     }
 
+    fn openrouter_server_tool_agent_config() -> AgentConfig {
+        AgentConfig {
+            max_iterations: 6,
+            server_tools: vec![crate::web::server_tools::ServerTool {
+                kind: kyomi_core::web_tools::WebToolKind::Search,
+                backend: kyomi_core::web_tools::WebBackendKind::OpenRouter,
+                entry: serde_json::json!({"type": "openrouter:web_search", "parameters": {"max_uses": 5}}),
+            }],
+            ..Default::default()
+        }
+    }
+
     #[tokio::test]
-    async fn restricted_personal_data_sessions_never_get_provider_web_tools() {
+    async fn a_session_holding_personal_data_still_gets_the_anthropic_provider_web_tool() {
+        // KYO-981 (owner decision): provider-run web tools are no longer
+        // withheld from a session that holds restricted personal-MCP data.
         let (mut agent, _calls) = scripted_agent_with_config(server_tool_agent_config(), vec![], Reply::Text("x".into())).await;
-        assert_eq!(agent.request_options_for_call(false).await.server_tools.len(), 1);
         crate::test_support::seed_user_and_workspace(&agent.tool_context.db).await;
         kyomi_core::db_execute!(&agent.tool_context.db, "INSERT INTO chat_sessions (session_id,user_id,workspace_id) VALUES ('s-web','user-a','ws-1')").unwrap();
         agent.tool_context.session_id = Some("s-web".into());
-        assert_eq!(agent.request_options_for_call(false).await.server_tools.len(), 1, "unrestricted session");
         kyomi_core::db_execute!(&agent.tool_context.db, "UPDATE chat_sessions SET personal_data_owner_id='user-a' WHERE session_id='s-web'").unwrap();
-        assert!(agent.request_options_for_call(false).await.server_tools.is_empty(), "restricted session is withheld");
+        let options = agent.request_options_for_call(false).await;
+        assert_eq!(options.server_tools.len(), 1, "restricted session keeps its Anthropic web tool");
+        assert_eq!(options.server_tools[0]["type"], "web_search_20250305");
+    }
+
+    #[tokio::test]
+    async fn a_session_holding_personal_data_still_gets_the_openrouter_provider_web_tool() {
+        let (mut agent, _calls) = scripted_agent_with_config(openrouter_server_tool_agent_config(), vec![], Reply::Text("x".into())).await;
+        crate::test_support::seed_user_and_workspace(&agent.tool_context.db).await;
+        kyomi_core::db_execute!(&agent.tool_context.db, "INSERT INTO chat_sessions (session_id,user_id,workspace_id) VALUES ('s-web','user-a','ws-1')").unwrap();
+        agent.tool_context.session_id = Some("s-web".into());
+        kyomi_core::db_execute!(&agent.tool_context.db, "UPDATE chat_sessions SET personal_data_owner_id='user-a' WHERE session_id='s-web'").unwrap();
+        let options = agent.request_options_for_call(false).await;
+        assert_eq!(options.server_tools.len(), 1, "restricted session keeps its OpenRouter web tool");
+        assert_eq!(options.server_tools[0]["type"], "openrouter:web_search");
     }
 
     #[tokio::test]
@@ -4235,8 +4241,6 @@ Second chart:\n{CHARTML_STRIPPED_NOTE}\nDone."
     struct RestrictSessionTool;
     #[async_trait::async_trait]
     impl crate::tools::AgentTool for RestrictSessionTool {
-        // A read-only native tool name: the privacy wrapper does not count it as a publication
-        // (which would itself block the restriction from being recorded).
         fn name(&self) -> &str { "list_datasources" }
         fn description(&self) -> &str { "restricts the session" }
         fn parameters_schema(&self) -> serde_json::Value { serde_json::json!({"type": "object", "properties": {}}) }
@@ -4248,9 +4252,9 @@ Second chart:\n{CHARTML_STRIPPED_NOTE}\nDone."
     }
 
     #[tokio::test]
-    async fn sources_gathered_before_a_mid_run_restriction_are_still_shown_but_later_requests_are_withheld() {
+    async fn sources_gathered_before_a_mid_run_restriction_are_still_shown_and_later_requests_keep_the_tool() {
         // Sources are inbound web data, not outbound private data: showing them discloses
-        // nothing. Only further requests are withheld.
+        // nothing. A restriction that appears mid-run does not withhold the tool either.
         let tool_call = ToolCall { id: "tc_1".into(), name: "list_datasources".into(), arguments: serde_json::json!({}), arguments_error: None };
         let first = server_response("tool_use", Some(vec![tool_call]));
         let seen = Arc::new(Mutex::new(Vec::<usize>::new()));
@@ -4274,7 +4278,7 @@ Second chart:\n{CHARTML_STRIPPED_NOTE}\nDone."
         ctx.session_id = Some("s-late".into());
         let mut agent = CustomAgent::new(Box::new(Spy(Arc::clone(&seen), inner)), server_tool_agent_config(), Arc::new(registry), ctx, HashMap::new());
         let answer = agent.chat("hi", CancellationToken::new(), None, None, None).await.unwrap();
-        assert_eq!(*seen.lock().unwrap(), vec![1, 0], "first request carries the tool, the one after the restriction does not");
+        assert_eq!(*seen.lock().unwrap(), vec![1, 1], "both requests carry the tool, including the one after the restriction");
         assert!(answer.starts_with("final") && answer.contains("**Sources**"), "{answer}");
     }
 

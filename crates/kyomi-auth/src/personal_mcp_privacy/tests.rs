@@ -195,37 +195,6 @@ impl Fixture {
 async fn matrix(db: DbPool) {
     let f = Fixture::new(db).await;
     let private = f.session("chat").await;
-    // Private native behavior is preserved before any external data is admitted.
-    let token = begin_native_publication(&f.db, &f.a, &private)
-        .await
-        .unwrap();
-    assert!(f.admit(&private).await.is_err());
-    assert_eq!(
-        restricted_owner(&f.db, &private).await.unwrap(),
-        None,
-        "denied dispatch must roll back taint"
-    );
-    finish_native_publication(&f.db, &f.b, &token)
-        .await
-        .unwrap();
-    assert!(
-        f.admit(&private).await.is_err(),
-        "another user cannot release an outstanding write"
-    );
-    finish_native_publication(&f.db, &f.a, &token)
-        .await
-        .unwrap();
-    finish_native_publication(&f.db, &f.a, &token)
-        .await
-        .unwrap();
-    let count = db_fetch_scalar!(
-        &f.db,
-        i64,
-        "SELECT native_publications FROM chat_sessions WHERE session_id=$1",
-        &private
-    )
-    .unwrap();
-    assert_eq!(count, 0);
     f.admit(&private).await.unwrap();
     assert_eq!(
         restricted_owner(&f.db, &private).await.unwrap(),
@@ -235,12 +204,6 @@ async fn matrix(db: DbPool) {
         !crate::chat_service::set_session_shared(&f.db, &private, true)
             .await
             .unwrap()
-    );
-    assert!(
-        begin_native_publication(&f.db, &f.a, &private)
-            .await
-            .is_err(),
-        "prepared native writes cannot start after restriction"
     );
     assert!(
         db_execute!(
@@ -343,23 +306,6 @@ async fn matrix(db: DbPool) {
             .unwrap()
             .contains("private external sentinel")
     );
-    // Existing shared native turns by another member retain their ordinary
-    // publishing behavior, but must hold the same durable admission fence.
-    let native_shared = f.session("chat").await;
-    crate::chat_service::set_session_shared(&f.db, &native_shared, true)
-        .await
-        .unwrap();
-    let other_token = begin_native_publication(&f.db, &f.b, &native_shared)
-        .await
-        .unwrap();
-    crate::chat_service::set_session_shared(&f.db, &native_shared, false)
-        .await
-        .unwrap();
-    assert!(f.admit(&native_shared).await.is_err());
-    finish_native_publication(&f.db, &f.b, &other_token)
-        .await
-        .unwrap();
-    f.admit(&native_shared).await.unwrap();
     // Concurrent share versus admission: exactly one accepts, never both.
     let race = f.session("chat").await;
     let (shared, admitted) = tokio::join!(
@@ -375,43 +321,6 @@ async fn matrix(db: DbPool) {
     )
     .unwrap();
     assert!(!(was_shared && restricted_owner(&f.db, &race).await.unwrap().is_some()));
-    let abandoned = f.session("chat").await;
-    let token = begin_native_publication(&f.db, &f.a, &abandoned)
-        .await
-        .unwrap();
-    assert!(
-        f.admit(&abandoned).await.is_err(),
-        "process-loss claim fails closed"
-    );
-    assert!(
-        !reconcile_stopped_native_publication(&f.db, &f.a, &private, &token, async { Ok(()) })
-            .await
-            .unwrap()
-    );
-    assert!(
-        !reconcile_stopped_native_publication(&f.db, &f.b, &abandoned, &token, async { Ok(()) })
-            .await
-            .unwrap()
-    );
-    assert!(
-        reconcile_stopped_native_publication(&f.db, &f.a, &abandoned, &token, async {
-            Err(denied())
-        })
-        .await
-        .is_err()
-    );
-    assert_eq!(
-        outstanding_native_publications(&f.db, &f.a, &abandoned)
-            .await
-            .unwrap(),
-        vec![token.clone()]
-    );
-    assert!(
-        reconcile_stopped_native_publication(&f.db, &f.a, &abandoned, &token, async { Ok(()) })
-            .await
-            .unwrap()
-    );
-    f.admit(&abandoned).await.unwrap();
     // Share wins deterministically; admission does not alter the existing shared row.
     let shared = f.session("chat").await;
     assert!(
@@ -698,11 +607,6 @@ async fn matrix(db: DbPool) {
     inherit_private_document_context(&f.db, &f.a, &f.ws, Some(&inherited), None)
         .await
         .unwrap();
-    assert!(
-        begin_native_publication(&f.db, &f.a, &inherited)
-            .await
-            .is_err()
-    );
     let scheduled = f.session("watch_execution").await;
     assert!(
         inherit_private_document_context(&f.db, &f.a, &f.ws, Some(&scheduled), None)

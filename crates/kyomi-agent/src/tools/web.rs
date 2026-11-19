@@ -361,7 +361,7 @@ pub fn register_web_tools(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::build_ctx;
+    use crate::test_support::{build_ctx, seed_user_and_workspace, test_pool};
     use crate::web::{FetchedPage, SearchResults, WebUsage};
     use kyomi_core::web_tools::{ResolvedBackend, WebBackendConfig, WebBackendKind};
     use std::sync::Mutex;
@@ -429,6 +429,48 @@ mod tests {
 
     fn parse(s: &str) -> Value {
         serde_json::from_str(s).unwrap()
+    }
+
+    #[tokio::test]
+    async fn kyomi_executed_web_tools_run_in_a_session_holding_personal_data() {
+        // KYO-981 (owner decision): the Kyomi-executed search and fetch
+        // backends are ordinary native tools and must run in a restricted
+        // session. Executed through the registry, the production path.
+        let db = test_pool().await;
+        seed_user_and_workspace(&db).await;
+        kyomi_core::db_execute!(
+            &db,
+            "INSERT INTO chat_sessions (session_id,user_id,workspace_id) VALUES ('s-restricted','user-a','ws-1')"
+        )
+        .unwrap();
+        kyomi_core::db_execute!(
+            &db,
+            "UPDATE chat_sessions SET personal_data_owner_id='user-a' WHERE session_id='s-restricted'"
+        )
+        .unwrap();
+        let mut ctx = build_ctx(db);
+        ctx.session_id = Some("s-restricted".into());
+        let mut registry = ToolRegistry::new();
+        registry.register(Arc::new(WebSearchTool::new(FakeSearch::ok("s"), caps())));
+        registry.register(Arc::new(WebFetchTool::new(Arc::new(FakeFetch), caps())));
+        let search = parse(
+            &registry
+                .get_tool("web_search")
+                .unwrap()
+                .execute(json!({"query": "rust"}), &ctx)
+                .await
+                .unwrap(),
+        );
+        assert_eq!(search["available"], true, "{search}");
+        let fetch = parse(
+            &registry
+                .get_tool("web_fetch")
+                .unwrap()
+                .execute(json!({"url": "https://example.com"}), &ctx)
+                .await
+                .unwrap(),
+        );
+        assert_eq!(fetch["available"], true, "{fetch}");
     }
 
     #[tokio::test]
