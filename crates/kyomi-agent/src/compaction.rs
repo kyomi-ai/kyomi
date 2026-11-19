@@ -13,16 +13,20 @@
 //!
 //! 1. [`CustomAgent::maybe_compact`](crate::agent::CustomAgent) checks
 //!    [`should_compact`] at the start of each agent-loop iteration (and before
-//!    the forced wrap-up call), using the actual input token count from the
-//!    previous LLM call (or a character-based estimate as fallback) and the
-//!    threshold resolved from the model's context window (KYO-975).
+//!    the forced wrap-up call). It uses the actual input token count from the
+//!    previous LLM call **and** a character-based estimate of the context that
+//!    would be sent; either reaching the run's resolved threshold (the model's
+//!    context window times the configured fraction, or an absolute override)
+//!    triggers compaction (KYO-975).
 //! 2. If compaction is needed, [`split_messages_for_compaction`] divides
 //!    messages into "to summarize" and "to keep" groups at a tool-pair-safe
 //!    boundary.
 //! 3. [`build_compaction_prompt`] creates a summarization prompt from the
 //!    messages that need compacting.
 //! 4. The agent sends this prompt to the run's fast model (the workspace title
-//!    model, else `LLM_TITLE_MODEL`, else the setup's own model).
+//!    model, else `LLM_TITLE_MODEL`, else the setup's own model) when that
+//!    model's own context window can accept the summarised region; otherwise
+//!    the chat model writes the one summary call.
 //! 5. The agent stores the summary and the cut index on
 //!    [`AgentState`](crate::agent::AgentState); the adapter persists them with
 //!    the session, and

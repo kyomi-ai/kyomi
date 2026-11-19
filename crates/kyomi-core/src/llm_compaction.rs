@@ -157,11 +157,19 @@ pub fn resolve(
 /// the provider's own window-source method supplies the correct label for the
 /// run log.
 pub fn resolve_with_source(
-    context_window: u32,
+    provider_reported_window: u32,
     context_window_source: ContextWindowSource,
     workspace: &LlmCompactionSettings,
     instance: &LlmCompactionSettings,
 ) -> ResolvedCompaction {
+    // A provider that reports no window cannot supply a threshold: substitute
+    // the documented default here, so no caller can derive 0 × fraction = 1
+    // (KYO-975 review). The source then necessarily describes the default.
+    let (context_window, context_window_source) = if provider_reported_window == 0 {
+        (DEFAULT_CONTEXT_WINDOW, ContextWindowSource::Default)
+    } else {
+        (provider_reported_window, context_window_source)
+    };
     let (threshold_tokens, threshold_source) = if let Some(tokens) = workspace.threshold_tokens {
         (tokens, ThresholdSource::WorkspaceAbsolute)
     } else if let Some(tokens) = instance.threshold_tokens {
@@ -349,6 +357,19 @@ mod tests {
         assert_eq!(r.context_window, DEFAULT_CONTEXT_WINDOW);
         assert_eq!(r.context_window_source, ContextWindowSource::Default);
         assert_eq!(r.threshold_tokens, 150_000);
+    }
+
+    #[test]
+    fn a_zero_provider_window_never_derives_a_one_token_threshold() {
+        // `resolve_with_source` receives the provider's raw window; a provider
+        // that reports none must still get the documented default, whatever
+        // source label its caller believed.
+        for source in [ContextWindowSource::Provider, ContextWindowSource::Default] {
+            let r = resolve_with_source(0, source, &settings(None, None), &settings(None, None));
+            assert_eq!(r.context_window, DEFAULT_CONTEXT_WINDOW);
+            assert_eq!(r.context_window_source, ContextWindowSource::Default);
+            assert_eq!(r.threshold_tokens, 150_000, "source={source:?}");
+        }
     }
 
     #[test]

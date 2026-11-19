@@ -929,6 +929,13 @@ mod tests {
         let resolved = resolve_compaction(&ws, &self_hosted, 200_000, kyomi_core::llm_compaction::ContextWindowSource::Provider);
         assert_eq!(resolved.threshold_tokens, 90_000);
         assert_eq!(resolved.threshold_source, ThresholdSource::InstanceAbsolute);
+
+        // A provider that reports no window gets the documented 200K default,
+        // never a one-token threshold (KYO-975 review).
+        self_hosted.llm_compaction.threshold_tokens = None;
+        let resolved = resolve_compaction(&ws, &self_hosted, 0, kyomi_core::llm_compaction::ContextWindowSource::Default);
+        assert_eq!(resolved.context_window, 200_000);
+        assert_eq!(resolved.threshold_tokens, 100_000, "workspace fraction 0.5 of the default window");
     }
 
     #[test]

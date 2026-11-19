@@ -669,7 +669,9 @@ pub async fn execute_agent_chat_with(
             resolved_context_window,
             source,
         )
-    };    // A batch watch run talks to the provider only through its batch API and is
+    };
+
+    // A batch watch run talks to the provider only through its batch API and is
     // billed from its persisted calls, so it cannot make the extra summary call.
     let compaction_enabled = extras.watch_batch.is_none();
     info!(
