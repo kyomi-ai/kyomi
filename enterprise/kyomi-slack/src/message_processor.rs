@@ -222,8 +222,7 @@ pub async fn process_and_build_slack_blocks(
     if !extraction.specs.is_empty() {
         let user_palette = chart_palettes::get_user_palette(&query_ctx.db, &query_ctx.user_id).await;
 
-        for idx in 0..charts_to_render {
-            let spec = &extraction.specs[idx];
+        for (idx, spec) in extraction.specs.iter().take(charts_to_render).enumerate() {
 
             // Resolve chart data (execute queries → inline rows)
             let resolved_spec = match chart_data_resolver::resolve_chart_data(spec, query_ctx).await
