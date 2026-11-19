@@ -382,6 +382,9 @@ fn paused_single_fetch_chain() -> (serde_json::Value, serde_json::Value) {
 struct CardRun {
     answer: String,
     cards: Vec<serde_json::Value>,
+    /// The full `tool_execution_end` event data, in order, so tests can inspect
+    /// the recorded outcome as well as the card schema.
+    events: Vec<serde_json::Value>,
     outcomes: Vec<(String, String)>,
 }
 
@@ -422,12 +425,14 @@ async fn run_capturing_cards(input: CardRunInput<'_>) -> CardRun {
         assistant_message_persistence: assistant,
     }).await.expect("turn");
     let mut cards = Vec::new();
+    let mut events = Vec::new();
     while let Ok(frame) = receiver.try_recv() {
         let frame: kyomi_core::WebSocketMessage = serde_json::from_str(&frame).expect("frame");
         if frame.message_type != kyomi_core::MessageType::AgentThinking { continue; }
         let event = frame.data.as_ref().and_then(|data| data.get("event")).expect("thinking event");
         if event.get("event_type").and_then(|kind| kind.as_str()) != Some("tool_execution_end") { continue; }
         cards.push(event.get("data").and_then(|data| data.get("schema")).expect("card schema").clone());
+        events.push(event.clone());
     }
     let run = assistant.durable_run().expect("durable");
     let store = kyomi_auth::conversation_events::ConversationStore::new(db, key, "user-a", "ws-1");
@@ -436,7 +441,7 @@ async fn run_capturing_cards(input: CardRunInput<'_>) -> CardRun {
         agent_runtime::PublicPayload::ToolOutcome { tool_call_id, text, .. } => Some((tool_call_id.as_str().to_string(), text.preview.clone())),
         _ => None,
     }).collect();
-    CardRun { answer, cards, outcomes }
+    CardRun { answer, cards, events, outcomes }
 }
 
 /// KYO-979: a fetch started in a `pause_turn` response and returned at the start
@@ -500,6 +505,8 @@ async fn a_deferred_fetch_behind_client_tool_results_is_recorded_as_a_source_car
     assert_eq!(cards[0]["input"]["url"], url);
     assert_eq!(cards[0]["output"]["url"], url);
     assert!(cards[0]["output"]["title"].as_str().expect("title").contains("Rust Programming Language"));
+    let event = run.events.iter().find(|event| event["data"]["schema"]["tool"] == "web_fetch").expect("fetch event");
+    assert_eq!(event["data"]["success"], true, "a successful provider fetch is recorded as succeeded");
     assert!(run.outcomes.iter().any(|(id, _)| id == &provider_id), "the card is recorded durably under the provider's call id");
 }
 
@@ -613,6 +620,9 @@ async fn a_deferred_fetch_error_still_shows_a_card_with_its_url_and_reason() {
     assert_eq!(cards[0]["output"]["available"], false);
     assert_eq!(cards[0]["output"]["reason"], "url_not_accessible", "only the provider's own code");
     assert!(cards[0]["output"].get("title").is_none(), "no page, so no title");
+    let event = run.events.iter().find(|event| event["data"]["schema"]["tool"] == "web_fetch").expect("fetch event");
+    assert_eq!(event["data"]["success"], false, "a failed provider fetch is recorded as failed, not a green Done");
+    assert_eq!(event["data"]["schema"]["output"]["reason"], "url_not_accessible");
 }
 
 /// KYO-979: when the tool-use budget runs out with a deferred call still

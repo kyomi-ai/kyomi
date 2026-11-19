@@ -1511,7 +1511,10 @@ impl CustomAgent {
                 kyomi_core::web_tools::WebToolKind::Search => serde_json::json!({"query": call.subject}),
                 kyomi_core::web_tools::WebToolKind::Fetch => serde_json::json!({"url": call.subject}),
             };
-            let shown = ProviderToolDisplay { text: crate::tools::web::display_output(call.tool, &call.subject, &call.sources, call.error.as_deref()) };
+            let shown = ProviderToolDisplay {
+                text: crate::tools::web::display_output(call.tool, &call.subject, &call.sources, call.error.as_deref()),
+                succeeded: call.error.is_none(),
+            };
             match context.tool(sink.as_ref(), &shown, agent_runtime::ToolCallId(id), name.to_string(), arguments).await {
                 Ok(_) => carded.extend(call.sources.iter().map(|source| source.url.clone())),
                 Err(error) => warn!(%error, tool = name, "could not record a provider web call as a source card; its sources are listed in the answer instead"),
@@ -1893,16 +1896,18 @@ impl agent_runtime::CompleteProvider for RuntimeProvider<'_> {
     }
 }
 /// A provider-executed call, already finished by the provider: recording it only
-/// stores its normalised result for display; nothing runs.
+/// stores its normalised result for display; nothing runs. A result the provider
+/// flagged as an error is recorded as a rejection, so the card reads as failed.
 struct ProviderToolDisplay {
     text: String,
+    succeeded: bool,
 }
 #[async_trait::async_trait]
 impl agent_runtime::ToolExecution for ProviderToolDisplay {
     async fn execute(&self) -> agent_runtime::ToolOutcome {
         agent_runtime::ToolOutcome {
             transport: agent_runtime::TransportOutcome::Completed,
-            domain: agent_runtime::DomainOutcome::Succeeded,
+            domain: if self.succeeded { agent_runtime::DomainOutcome::Succeeded } else { agent_runtime::DomainOutcome::Rejected },
             text: self.text.clone(),
         }
     }
