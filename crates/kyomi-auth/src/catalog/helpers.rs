@@ -2884,11 +2884,15 @@ mod tests {
 
         // MAX_TABLE_ERRORS_PER_DATASET individual errors, plus one summary line.
         assert_eq!(result.table_errors.len(), MAX_TABLE_ERRORS_PER_DATASET + 1);
-        for i in 0..MAX_TABLE_ERRORS_PER_DATASET {
+        for (i, error) in result
+            .table_errors
+            .iter()
+            .take(MAX_TABLE_ERRORS_PER_DATASET)
+            .enumerate()
+        {
             assert!(
-                result.table_errors[i].starts_with(&format!("proj-1.ds_a.t{i}: ")),
-                "expected table {i}'s error to be individually listed, got: {}",
-                result.table_errors[i]
+                error.starts_with(&format!("proj-1.ds_a.t{i}: ")),
+                "expected table {i}'s error to be individually listed, got: {error}"
             );
         }
         let summary = result.table_errors.last().expect("summary line present");

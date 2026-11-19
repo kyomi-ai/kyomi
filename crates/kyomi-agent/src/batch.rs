@@ -121,14 +121,11 @@ pub(crate) fn is_openrouter(base_url: &str) -> bool {
         .next()
         .unwrap_or_default()
         .to_ascii_lowercase();
-    if host == "openrouter.ai" || host.ends_with(".openrouter.ai") {
-        return true;
-    }
     #[cfg(test)]
     if base_url.contains("/openrouter.ai/") {
         return true;
     }
-    false
+    host == "openrouter.ai" || host.ends_with(".openrouter.ai")
 }
 
 fn http_error(vendor: &str, status: reqwest::StatusCode, body: &str) -> kyomi_core::Error {
