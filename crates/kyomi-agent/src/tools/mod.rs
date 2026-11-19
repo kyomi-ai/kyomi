@@ -553,16 +553,7 @@ mod tests {
         // execution path for every native tool.
         let db = crate::test_support::test_pool().await;
         crate::test_support::seed_user_and_workspace(&db).await;
-        kyomi_core::db_execute!(
-            &db,
-            "INSERT INTO chat_sessions (session_id,user_id,workspace_id) VALUES ('s-restricted','user-a','ws-1')"
-        )
-        .unwrap();
-        kyomi_core::db_execute!(
-            &db,
-            "UPDATE chat_sessions SET personal_data_owner_id='user-a' WHERE session_id='s-restricted'"
-        )
-        .unwrap();
+        crate::test_support::seed_restricted_session(&db, "s-restricted").await;
         let mut ctx = crate::test_support::build_ctx(db);
         ctx.session_id = Some("s-restricted".into());
         let mut registry = ToolRegistry::new();

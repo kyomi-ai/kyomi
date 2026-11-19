@@ -4203,9 +4203,8 @@ Second chart:\n{CHARTML_STRIPPED_NOTE}\nDone."
         // withheld from a session that holds restricted personal-MCP data.
         let (mut agent, _calls) = scripted_agent_with_config(server_tool_agent_config(), vec![], Reply::Text("x".into())).await;
         crate::test_support::seed_user_and_workspace(&agent.tool_context.db).await;
-        kyomi_core::db_execute!(&agent.tool_context.db, "INSERT INTO chat_sessions (session_id,user_id,workspace_id) VALUES ('s-web','user-a','ws-1')").unwrap();
+        crate::test_support::seed_restricted_session(&agent.tool_context.db, "s-web").await;
         agent.tool_context.session_id = Some("s-web".into());
-        kyomi_core::db_execute!(&agent.tool_context.db, "UPDATE chat_sessions SET personal_data_owner_id='user-a' WHERE session_id='s-web'").unwrap();
         let options = agent.request_options_for_call(false).await;
         assert_eq!(options.server_tools.len(), 1, "restricted session keeps its Anthropic web tool");
         assert_eq!(options.server_tools[0]["type"], "web_search_20250305");
@@ -4215,9 +4214,8 @@ Second chart:\n{CHARTML_STRIPPED_NOTE}\nDone."
     async fn a_session_holding_personal_data_still_gets_the_openrouter_provider_web_tool() {
         let (mut agent, _calls) = scripted_agent_with_config(openrouter_server_tool_agent_config(), vec![], Reply::Text("x".into())).await;
         crate::test_support::seed_user_and_workspace(&agent.tool_context.db).await;
-        kyomi_core::db_execute!(&agent.tool_context.db, "INSERT INTO chat_sessions (session_id,user_id,workspace_id) VALUES ('s-web','user-a','ws-1')").unwrap();
+        crate::test_support::seed_restricted_session(&agent.tool_context.db, "s-web").await;
         agent.tool_context.session_id = Some("s-web".into());
-        kyomi_core::db_execute!(&agent.tool_context.db, "UPDATE chat_sessions SET personal_data_owner_id='user-a' WHERE session_id='s-web'").unwrap();
         let options = agent.request_options_for_call(false).await;
         assert_eq!(options.server_tools.len(), 1, "restricted session keeps its OpenRouter web tool");
         assert_eq!(options.server_tools[0]["type"], "openrouter:web_search");

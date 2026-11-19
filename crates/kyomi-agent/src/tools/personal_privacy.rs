@@ -1,12 +1,16 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Registry-level private-document context inheritance, shared by legacy and
-//! durable execution. It does not gate tool use.
+//! durable execution. It does not apply the removed personal-data tool
+//! restriction; its document reads still inherit the private context that keeps
+//! a conversation owner-only.
 use super::{AgentTool, ToolContext};
 use std::sync::Arc;
 
 /// Inherit the workspace's persisted private-document context around document
 /// reads, before their content can enter the model context and again after
-/// they complete. This is conversation confidentiality, not a tool restriction.
+/// they complete. This is conversation confidentiality: a read whose destination
+/// cannot inherit it (a shared or ambiguous session) is refused. It does not
+/// apply the removed personal-data tool restriction.
 pub(super) struct PrivateDocumentContextTool(pub Arc<dyn AgentTool>);
 #[async_trait::async_trait]
 impl AgentTool for PrivateDocumentContextTool {

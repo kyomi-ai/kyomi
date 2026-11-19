@@ -126,6 +126,32 @@ pub(crate) async fn seed_user_and_workspace(db: &kyomi_core::DbPool) {
     seed_membership(sq, "ws-1", "user-a", "workspace_admin", true).await;
 }
 
+/// Insert a `chat_sessions` row for user `"user-a"` in workspace `"ws-1"` and
+/// mark it as holding restricted personal-MCP data. Callers must seed the user
+/// and workspace first ([`seed_user_and_workspace`]). Asserts the marker took
+/// effect, so a test named for a restricted session proves its own premise.
+pub(crate) async fn seed_restricted_session(db: &kyomi_core::DbPool, session_id: &str) {
+    kyomi_core::db_execute!(
+        db,
+        "INSERT INTO chat_sessions (session_id,user_id,workspace_id) VALUES ($1,'user-a','ws-1')",
+        session_id
+    )
+    .expect("seed restricted session");
+    kyomi_core::db_execute!(
+        db,
+        "UPDATE chat_sessions SET personal_data_owner_id='user-a' WHERE session_id=$1",
+        session_id
+    )
+    .expect("mark the session restricted");
+    assert_eq!(
+        kyomi_auth::personal_mcp_privacy::restricted_owner(db, session_id)
+            .await
+            .expect("read the session restriction"),
+        Some("user-a".to_string()),
+        "the test session must actually hold restricted personal data"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // ScriptedProvider — a fake LLMProvider driven by a fixed reply script
 // ---------------------------------------------------------------------------

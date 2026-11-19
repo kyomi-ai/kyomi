@@ -361,7 +361,7 @@ pub fn register_web_tools(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{build_ctx, seed_user_and_workspace, test_pool};
+    use crate::test_support::{build_ctx, seed_restricted_session, seed_user_and_workspace, test_pool};
     use crate::web::{FetchedPage, SearchResults, WebUsage};
     use kyomi_core::web_tools::{ResolvedBackend, WebBackendConfig, WebBackendKind};
     use std::sync::Mutex;
@@ -438,16 +438,7 @@ mod tests {
         // session. Executed through the registry, the production path.
         let db = test_pool().await;
         seed_user_and_workspace(&db).await;
-        kyomi_core::db_execute!(
-            &db,
-            "INSERT INTO chat_sessions (session_id,user_id,workspace_id) VALUES ('s-restricted','user-a','ws-1')"
-        )
-        .unwrap();
-        kyomi_core::db_execute!(
-            &db,
-            "UPDATE chat_sessions SET personal_data_owner_id='user-a' WHERE session_id='s-restricted'"
-        )
-        .unwrap();
+        seed_restricted_session(&db, "s-restricted").await;
         let mut ctx = build_ctx(db);
         ctx.session_id = Some("s-restricted".into());
         let mut registry = ToolRegistry::new();
