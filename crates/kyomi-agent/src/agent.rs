@@ -490,6 +490,10 @@ pub struct CustomAgent {
     /// Sources the provider's web tools used during this run (normalised);
     /// shown to the user as a footer on the final answer.
     web_sources: Vec<crate::web::WebSource>,
+    /// Calls a `pause_turn` response announced without a result yet. The
+    /// continuation returns their results without repeating the
+    /// `server_tool_use` block, so the parser pairs them with these.
+    pending_server_calls: Vec<crate::web::server_tools::ServerToolCall>,
     /// Provider-reported web calls used so far in this run, per tool: the per-turn
     /// allowance is spent across every request of the run, not per request.
     web_usage: HashMap<kyomi_core::web_tools::WebToolKind, u32>,
@@ -524,6 +528,7 @@ impl CustomAgent {
             tool_context,
             user_names,
             web_sources: Vec::new(),
+            pending_server_calls: Vec::new(),
             web_usage: HashMap::new(),
             turn_server_tools: tokio::sync::OnceCell::new(),
             last_server_tools: std::sync::Mutex::new(Vec::new()),
@@ -612,6 +617,7 @@ impl CustomAgent {
     ) -> kyomi_core::Result<String> {
         self.pause_chain_start = None;
         self.web_sources.clear();
+        self.pending_server_calls.clear();
         let result = self.run_chat(user_message, cancel_token, current_time_user_tz, message_source, user_id).await;
         // A failed run keeps none of an open `pause_turn` chain (blocks that end in a
         // call without its result are rejected by the provider on every later turn);
@@ -1436,10 +1442,17 @@ impl CustomAgent {
         if self.config.server_tools.is_empty() {
             return Default::default();
         }
+        let pending = std::mem::take(&mut self.pending_server_calls);
         let activity = match self.config.server_tools.first().map(|t| t.backend) {
             Some(kyomi_core::web_tools::WebBackendKind::OpenRouter) => crate::web::server_tools::parse_openrouter(&response.raw_response),
-            _ => crate::web::server_tools::parse_anthropic(&response.raw_response),
+            _ => crate::web::server_tools::parse_anthropic_with_pending(&response.raw_response, &pending),
         };
+        // A paused turn returns the pending call's result in the continuation
+        // without repeating its `server_tool_use` block; carry the call into
+        // that response so it can still be carded (KYO-979).
+        if response.finish_reason == "pause_turn" {
+            self.pending_server_calls = activity.pending.clone();
+        }
         let ctx = &self.tool_context;
         for (tool, calls) in [
             (kyomi_core::web_tools::WebToolKind::Search, activity.searches),

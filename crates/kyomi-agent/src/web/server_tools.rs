@@ -167,6 +167,11 @@ pub struct ServerToolActivity {
     /// One entry per provider-executed call whose results are known, for the UI's
     /// source cards (the same cards Kyomi-executed calls produce).
     pub calls: Vec<ServerToolCall>,
+    /// Calls this response announced with a `server_tool_use` block but did not
+    /// finish (a `pause_turn` response ends with exactly such a block). The
+    /// continuation carries their result blocks without repeating the
+    /// `server_tool_use`, so it must be parsed with these to card them.
+    pub pending: Vec<ServerToolCall>,
 }
 
 /// One provider-executed search or fetch, normalised for display.
@@ -197,6 +202,13 @@ fn is_server_block(block: &Value) -> bool {
 
 /// Parse the server-tool activity out of a raw Anthropic response.
 pub fn parse_anthropic(raw: &Value) -> ServerToolActivity {
+    parse_anthropic_with_pending(raw, &[])
+}
+
+/// Parse a response that continues a paused server-tool turn. `pending` are the
+/// calls the paused response announced without a result: the continuation
+/// returns their result blocks without repeating the `server_tool_use` block.
+pub fn parse_anthropic_with_pending(raw: &Value, pending: &[ServerToolCall]) -> ServerToolActivity {
     let mut out = ServerToolActivity::default();
     let usage = raw.pointer("/usage/server_tool_use");
     let count = |key: &str| usage.and_then(|u| u.get(key)).and_then(Value::as_u64).unwrap_or(0) as u32;
@@ -244,38 +256,72 @@ pub fn parse_anthropic(raw: &Value) -> ServerToolActivity {
         }
     }
     out.sources = dedupe(if cited.is_empty() { results } else { cited });
-    out.calls = anthropic_calls(blocks);
+    let (calls, unfinished) = anthropic_calls(blocks, pending);
+    out.calls = calls;
+    out.pending = unfinished;
     out
 }
 
-/// Pair each `server_tool_use` block with its result block (by `tool_use_id`) and
-/// normalise the result's pages. A call whose result is an error or missing is
-/// left out: there is nothing to show.
-fn anthropic_calls(blocks: &[Value]) -> Vec<ServerToolCall> {
+/// The tool and its subject (query or URL) of a `server_tool_use` block.
+fn server_tool_intent(block: &Value) -> Option<(&str, WebToolKind, &str)> {
+    let id = block.get("id").and_then(Value::as_str)?;
+    let (tool, subject) = match block.get("name").and_then(Value::as_str)? {
+        "web_search" => (WebToolKind::Search, block.pointer("/input/query")),
+        "web_fetch" => (WebToolKind::Fetch, block.pointer("/input/url")),
+        _ => return None,
+    };
+    Some((id, tool, subject.and_then(Value::as_str).unwrap_or_default()))
+}
+
+/// Pair each result block with its call — the `server_tool_use` in this response,
+/// or a `pending` call from the paused response it continues — and normalise the
+/// result's pages. A call whose result is an error or not in `blocks` is left
+/// out: there is nothing to show; an unfinished call is returned as `pending`.
+fn anthropic_calls(blocks: &[Value], pending: &[ServerToolCall]) -> (Vec<ServerToolCall>, Vec<ServerToolCall>) {
     let mut calls = Vec::new();
-    for block in blocks.iter().filter(|b| b.get("type").and_then(Value::as_str) == Some("server_tool_use")) {
-        let Some(id) = block.get("id").and_then(Value::as_str) else { continue };
-        let (tool, subject) = match block.get("name").and_then(Value::as_str) {
-            Some("web_search") => (WebToolKind::Search, block.pointer("/input/query")),
-            Some("web_fetch") => (WebToolKind::Fetch, block.pointer("/input/url")),
-            _ => continue,
-        };
-        let result = blocks.iter().find(|b| {
-            b.get("tool_use_id").and_then(Value::as_str) == Some(id)
-                && b.get("type").and_then(Value::as_str).is_some_and(is_server_result_type)
-        });
-        let sources = result.map(result_sources).unwrap_or_default();
-        if sources.is_empty() {
-            continue;
+    let mut unfinished = Vec::new();
+    for block in blocks {
+        match block.get("type").and_then(Value::as_str) {
+            Some("server_tool_use") => {
+                let Some((id, tool, subject)) = server_tool_intent(block) else { continue };
+                let finished = blocks.iter().any(|result| {
+                    result.get("tool_use_id").and_then(Value::as_str) == Some(id)
+                        && result.get("type").and_then(Value::as_str).is_some_and(is_server_result_type)
+                });
+                if !finished {
+                    unfinished.push(ServerToolCall {
+                        id: Some(id.to_string()),
+                        tool,
+                        subject: subject.to_string(),
+                        sources: Vec::new(),
+                    });
+                }
+            }
+            Some(kind) if is_server_result_type(kind) => {
+                let Some(id) = block.get("tool_use_id").and_then(Value::as_str) else { continue };
+                let started = blocks.iter().find(|b| {
+                    b.get("type").and_then(Value::as_str) == Some("server_tool_use")
+                        && b.get("id").and_then(Value::as_str) == Some(id)
+                });
+                let intent = if let Some(started) = started {
+                    server_tool_intent(started).map(|(_, tool, subject)| (tool, subject))
+                } else {
+                    pending.iter().find(|call| call.id.as_deref() == Some(id)).map(|call| (call.tool, call.subject.as_str()))
+                };
+                let Some((tool, subject)) = intent else { continue };
+                let sources = result_sources(block);
+                if sources.is_empty() { continue; }
+                calls.push(ServerToolCall {
+                    id: Some(id.to_string()),
+                    tool,
+                    subject: subject.to_string(),
+                    sources,
+                });
+            }
+            _ => {}
         }
-        calls.push(ServerToolCall {
-            id: Some(id.to_string()),
-            tool,
-            subject: subject.and_then(Value::as_str).unwrap_or_default().to_string(),
-            sources,
-        });
     }
-    calls
+    (calls, unfinished)
 }
 
 /// The pages a `web_search_tool_result` / `web_fetch_tool_result` block returned.
@@ -537,6 +583,67 @@ mod tests {
         let msg = crate::types::Message::assistant("x").with_provider_content(a.provider_content);
         let (_, replayed) = crate::anthropic::AnthropicClient::convert_messages_to_anthropic(&[msg], &Default::default());
         assert_eq!(replayed[0]["content"], raw["content"], "continuation sends the paused content unchanged");
+    }
+
+    /// KYO-979: a paused response reports the call it did not finish as pending;
+    /// the live continuation carries that call's result without repeating the
+    /// `server_tool_use`, so it cards only when parsed with the pending call.
+    #[test]
+    fn anthropic_live_pause_continuation_cards_the_pending_fetch() {
+        let paused = fixture("anthropic_pause_turn_message.json");
+        let continuation = fixture("anthropic_pause_turn_continuation_message.json");
+        let paused = parse_anthropic(&paused);
+        assert_eq!(paused.pending.len(), 1, "the trailing call has no result yet");
+        let pending = &paused.pending[0];
+        assert_eq!(pending.tool, WebToolKind::Fetch);
+        assert_eq!(pending.subject, "https://httpbin.org/get?n=7");
+        assert_eq!(pending.id.as_deref(), Some("srvtoolu_012xukXbd42Crxsb9Xav9PqW"));
+
+        let alone = parse_anthropic(&continuation);
+        assert_eq!(alone.calls.len(), 9, "without the paused call the orphan result cannot pair");
+        let resumed = parse_anthropic_with_pending(&continuation, &paused.pending);
+        assert_eq!(resumed.calls.len(), 10, "every result in the continuation is now a card");
+        assert!(resumed.pending.is_empty(), "nothing is left pending");
+        let orphan = resumed.calls.iter().find(|call| call.id.as_deref() == pending.id.as_deref()).expect("the pending call's card");
+        assert_eq!(orphan.tool, WebToolKind::Fetch);
+        assert_eq!(orphan.subject, pending.subject);
+        assert_eq!(orphan.sources[0].url, "https://httpbin.org/get?n=7");
+    }
+
+    #[test]
+    fn a_paused_search_result_keeps_the_query_from_its_paused_call() {
+        let pending = ServerToolCall {
+            id: Some("srvtoolu_search".into()),
+            tool: WebToolKind::Search,
+            subject: "latest stable rust".into(),
+            sources: Vec::new(),
+        };
+        let raw = json!({
+            "content": [{"type": "web_search_tool_result", "tool_use_id": "srvtoolu_search", "content": [
+                {"type": "web_search_result", "url": "https://blog.rust-lang.org/", "title": "Rust Blog", "encrypted_content": "E", "page_age": null}
+            ]}],
+            "usage": {"server_tool_use": {"web_search_requests": 1}}
+        });
+        let a = parse_anthropic_with_pending(&raw, &[pending]);
+        assert_eq!(a.calls.len(), 1);
+        assert_eq!(a.calls[0].subject, "latest stable rust");
+        assert_eq!(a.calls[0].sources[0].url, "https://blog.rust-lang.org/");
+        assert!(a.pending.is_empty());
+    }
+
+    #[test]
+    fn an_error_result_resolves_a_call_instead_of_leaving_it_pending() {
+        let raw = json!({
+            "content": [
+                {"type": "server_tool_use", "id": "srvtoolu_2", "name": "web_fetch", "input": {"url": "https://c.example"}},
+                {"type": "web_fetch_tool_result", "tool_use_id": "srvtoolu_2", "content": {"error_code": "url_not_accessible"}}
+            ],
+            "usage": {"server_tool_use": {"web_fetch_requests": 1}}
+        });
+        let a = parse_anthropic(&raw);
+        assert!(a.calls.is_empty(), "an error result has nothing to show");
+        assert!(a.pending.is_empty(), "the call finished, with an error");
+        assert_eq!(a.errors, ["web_fetch: url_not_accessible"]);
     }
 
     #[test]
