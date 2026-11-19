@@ -116,9 +116,10 @@ pub fn openrouter_tool_entry(tool: WebToolKind, cfg: &WebBackendConfig, caps: &W
 /// usage is `usage.server_tool_use_details` (`web_search_requests`,
 /// `tool_calls_executed`). No block needs verbatim replay on this API.
 ///
-/// This API reports counts, not per-call data: every call that ran still gets a
-/// card, carrying only what the response returned (a fetch reports no URL and
-/// no pages; nothing is invented).
+/// This API reports counts, not per-call data: every reported tool kind still
+/// gets a card, carrying only what the response returned (a fetch reports no
+/// URL and no pages; nothing is invented). A count above one is one card for
+/// that kind, because the response does not identify individual calls.
 pub fn parse_openrouter(raw: &Value) -> ServerToolActivity {
     let mut out = ServerToolActivity::default();
     let details = raw.pointer("/usage/server_tool_use_details");
@@ -147,9 +148,9 @@ pub fn parse_openrouter(raw: &Value) -> ServerToolActivity {
         }
     }
     out.sources = dedupe(sources);
-    // Chat Completions reports counts, not per-call data. Every call that ran
-    // still gets a card, carrying only what the response returned: no URL, no
-    // query and no pages when the provider did not report them (KYO-979).
+    // Chat Completions reports counts, not per-call data. Every reported tool
+    // kind still gets a card, carrying only what the response returned: no URL,
+    // no query and no pages when the provider did not report them (KYO-979).
     if out.searches > 0 {
         out.calls.push(ServerToolCall { id: None, tool: WebToolKind::Search, subject: String::new(), sources: out.sources.clone() });
     }
@@ -173,8 +174,9 @@ pub struct ServerToolActivity {
     pub fetches: u32,
     /// Error codes the tool reported (`web_search_tool_result_error`, ...).
     pub errors: Vec<String>,
-    /// One entry per provider-executed call whose results are known, for the UI's
-    /// source cards (the same cards Kyomi-executed calls produce).
+    /// One entry per provider-executed call, for the UI's source cards (the same
+    /// card a Kyomi-executed call produces). A backend that reports only counts
+    /// has one card per tool kind with no known results; nothing is invented.
     pub calls: Vec<ServerToolCall>,
     /// Calls this response announced with a `server_tool_use` block but did not
     /// finish. A `pause_turn` and a server call deferred behind client tool

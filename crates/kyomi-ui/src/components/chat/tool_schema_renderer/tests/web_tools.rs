@@ -104,7 +104,8 @@ fn a_provider_search_without_a_reported_query_still_lists_its_sources() {
 }
 
 /// KYO-979: OpenRouter reports only a count for a fetch, so the card has no URL
-/// and no sources. It still renders as the fetch card, with nothing invented.
+/// and no sources. It still renders as the fetch card — heading only, with no
+/// empty subject box and nothing invented.
 #[test]
 fn a_fetch_without_a_reported_url_still_shows_its_card() {
     let html = render(json!({
@@ -113,7 +114,7 @@ fn a_fetch_without_a_reported_url_still_shows_its_card() {
         "output": {"tool": "web_fetch", "available": true}
     }));
     assert!(html.contains("Fetching page:"), "{html}");
-    assert!(!html.contains("href=\"\""), "no empty link: {html}");
+    assert!(!html.contains("bg-muted p-2"), "no empty subject box: {html}");
     assert!(!html.contains("Sources:"), "{html}");
 }
 

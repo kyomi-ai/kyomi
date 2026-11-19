@@ -106,9 +106,11 @@ fn source_json(s: &WebSource) -> Option<Value> {
     Some(v)
 }
 
-/// The result payload the UI's source card reads for one search or fetch, in the
-/// same shape the Kyomi-executed tools return. Used to show a provider-executed
-/// call (whose results never pass through a Kyomi tool) with the same card.
+/// The result payload the UI's source card reads for one search or fetch, using
+/// the keys a Kyomi-executed tool returns when the provider reported them. Shows
+/// a provider-executed call (whose results never pass through a Kyomi tool) with
+/// the same card; a backend that reports nothing but a count gets the card with
+/// only the fields it has.
 pub(crate) fn display_output(tool: kyomi_core::web_tools::WebToolKind, subject: &str, sources: &[WebSource]) -> String {
     use kyomi_core::web_tools::WebToolKind;
     match tool {
