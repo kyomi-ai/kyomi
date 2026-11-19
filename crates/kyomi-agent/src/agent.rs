@@ -490,9 +490,9 @@ pub struct CustomAgent {
     /// Sources the provider's web tools used during this run (normalised);
     /// shown to the user as a footer on the final answer.
     web_sources: Vec<crate::web::WebSource>,
-    /// Calls a `pause_turn` response announced without a result yet. The
-    /// continuation returns their results without repeating the
-    /// `server_tool_use` block, so the parser pairs them with these.
+    /// Calls the previous response announced without a result yet. The next
+    /// response returns their results without repeating the `server_tool_use`
+    /// block, so the parser pairs them with these.
     pending_server_calls: Vec<crate::web::server_tools::ServerToolCall>,
     /// Provider-reported web calls used so far in this run, per tool: the per-turn
     /// allowance is spent across every request of the run, not per request.
@@ -1447,12 +1447,13 @@ impl CustomAgent {
             Some(kyomi_core::web_tools::WebBackendKind::OpenRouter) => crate::web::server_tools::parse_openrouter(&response.raw_response),
             _ => crate::web::server_tools::parse_anthropic_with_pending(&response.raw_response, &pending),
         };
-        // A paused turn returns the pending call's result in the continuation
-        // without repeating its `server_tool_use` block; carry the call into
-        // that response so it can still be carded (KYO-979).
-        if response.finish_reason == "pause_turn" {
-            self.pending_server_calls = activity.pending.clone();
-        }
+        // A server call the provider announced without a result is returned by
+        // the next response (its continuation) without repeating the
+        // `server_tool_use` block. That happens when the turn paused
+        // (`pause_turn`) and when a server call is deferred behind client tool
+        // results in the same parallel group (`stop_reason: "tool_use"`).
+        // Carry it into that response so it can still be carded (KYO-979).
+        self.pending_server_calls = activity.pending.clone();
         let ctx = &self.tool_context;
         for (tool, calls) in [
             (kyomi_core::web_tools::WebToolKind::Search, activity.searches),

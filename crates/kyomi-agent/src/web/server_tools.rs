@@ -169,9 +169,10 @@ pub struct ServerToolActivity {
     /// source cards (the same cards Kyomi-executed calls produce).
     pub calls: Vec<ServerToolCall>,
     /// Calls this response announced with a `server_tool_use` block but did not
-    /// finish (a `pause_turn` response ends with exactly such a block). The
-    /// continuation carries their result blocks without repeating the
-    /// `server_tool_use`, so it must be parsed with these to card them.
+    /// finish. A `pause_turn` and a server call deferred behind client tool
+    /// results both leave one unresolved; the next response carries its result
+    /// without repeating the `server_tool_use`, so it must be parsed with these
+    /// to card it.
     pub pending: Vec<ServerToolCall>,
 }
 
@@ -209,8 +210,8 @@ pub fn parse_anthropic(raw: &Value) -> ServerToolActivity {
     parse_anthropic_with_pending(raw, &[])
 }
 
-/// Parse a response that continues a paused server-tool turn. `pending` are the
-/// calls the paused response announced without a result: the continuation
+/// Parse a response that continues a turn whose previous response announced a
+/// server call without a result. `pending` are those calls: this response
 /// returns their result blocks without repeating the `server_tool_use` block.
 pub fn parse_anthropic_with_pending(raw: &Value, pending: &[ServerToolCall]) -> ServerToolActivity {
     let mut out = ServerToolActivity::default();
@@ -278,7 +279,7 @@ fn server_tool_intent(block: &Value) -> Option<(&str, WebToolKind, &str)> {
 }
 
 /// Pair each result block with its call — the `server_tool_use` in this response,
-/// or a `pending` call from the paused response it continues — and normalise the
+/// or a `pending` call from the response it continues — and normalise the
 /// result's pages. A call whose result is an error or not in `blocks` is left
 /// out: there is nothing to show; an unfinished call is returned as `pending`.
 fn anthropic_calls(blocks: &[Value], pending: &[ServerToolCall]) -> (Vec<ServerToolCall>, Vec<ServerToolCall>) {
