@@ -287,7 +287,10 @@ impl ToolRegistry {
     /// Register a tool. If a tool with the same name already exists,
     /// it will be replaced.
     pub fn register(&mut self, tool: Arc<dyn AgentTool>) {
-        self.tools.insert(tool.name().to_string(), Arc::new(personal_privacy::NativePrivacyTool(tool)));
+        self.tools.insert(
+            tool.name().to_string(),
+            Arc::new(personal_privacy::PrivateDocumentContextTool(tool)),
+        );
     }
 
     /// External registration never replaces native or another remote tool.
@@ -541,6 +544,26 @@ mod tests {
         registry.try_register_external(Arc::new(TestTool::new(&other, "remote first"))).unwrap();
         assert!(registry.try_register_external(Arc::new(TestTool::new(&other, "remote duplicate"))).is_err());
         assert_eq!(registry.get_tool(&other).unwrap().description(), "remote first");
+    }
+
+    #[tokio::test]
+    async fn a_session_holding_personal_data_can_execute_native_tools() {
+        // KYO-981 (owner decision): no tool is refused because the session
+        // holds restricted personal-MCP data. The registry is the production
+        // execution path for every native tool.
+        let db = crate::test_support::test_pool().await;
+        crate::test_support::seed_user_and_workspace(&db).await;
+        crate::test_support::seed_restricted_session(&db, "s-restricted").await;
+        let mut ctx = crate::test_support::build_ctx(db);
+        ctx.session_id = Some("s-restricted".into());
+        let mut registry = ToolRegistry::new();
+        registry.register(Arc::new(TestTool::new("create_dashboard", "A native publishing tool")));
+        let result = registry
+            .get_tool("create_dashboard")
+            .unwrap()
+            .execute(serde_json::json!({"query": "q"}), &ctx)
+            .await;
+        assert_eq!(result.unwrap(), "create_dashboard executed");
     }
 
     #[test]

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! Durable confidentiality and publication ordering for personal external data.
-//! No network is performed under these transactions. Destination/tool consent is
-//! independently checked by the grants adapter; model/remote content cannot grant it.
+//! Durable confidentiality for personal external data. No network is performed
+//! under these transactions. Destination/tool consent is independently checked by
+//! the grants adapter; model/remote content cannot grant it.
 use kyomi_core::{Config, DbPool, Error, Result, db_fetch_optional, db_with_pool};
 
 fn denied() -> Error {
@@ -28,8 +28,8 @@ pub struct ExternalDispatch<'a> {
 }
 
 /// Commit the permanent restriction BEFORE the adapter emits tool intent or sends
-/// external bytes. The session UPDATE serializes with sharing, native publication
-/// admission, and durable read authorization. Connection lifecycle ordering and
+/// external bytes. The session UPDATE serializes with sharing and durable read
+/// authorization. Connection lifecycle ordering and
 /// exact destination consent remain mandatory independent gates in the adapter.
 pub async fn admit_external_dispatch(
     db: &DbPool,
@@ -43,7 +43,7 @@ pub async fn admit_external_dispatch(
     db_with_pool!(db, |pool| {
         let mut tx = pool.begin().await?;
         let row: Option<(String, Option<String>)> = sqlx::query_as(
-            "UPDATE chat_sessions SET event_sequence = event_sequence WHERE session_id=$1 AND workspace_id=$2 AND user_id=$3 AND NOT COALESCE(shared,FALSE) AND native_publications=0 AND platform_type IS NULL AND (($4 AND session_type='chat') OR (NOT $4 AND session_type IN ('dashboard_copilot','knowledge_copilot'))) AND EXISTS (SELECT 1 FROM workspace_users wu JOIN users u ON u.user_id=wu.user_id WHERE wu.workspace_id=$2 AND wu.user_id=$3 AND wu.active=TRUE AND u.active=TRUE) RETURNING user_id,personal_data_owner_id"
+            "UPDATE chat_sessions SET event_sequence = event_sequence WHERE session_id=$1 AND workspace_id=$2 AND user_id=$3 AND NOT COALESCE(shared,FALSE) AND platform_type IS NULL AND (($4 AND session_type='chat') OR (NOT $4 AND session_type IN ('dashboard_copilot','knowledge_copilot'))) AND EXISTS (SELECT 1 FROM workspace_users wu JOIN users u ON u.user_id=wu.user_id WHERE wu.workspace_id=$2 AND wu.user_id=$3 AND wu.active=TRUE AND u.active=TRUE) RETURNING user_id,personal_data_owner_id"
         ).bind(scope.session).bind(scope.workspace).bind(scope.actor)
          .bind(scope.surface == PersonalMcpSurface::InteractiveChat)
          .fetch_optional(&mut *tx).await?;
@@ -94,42 +94,6 @@ pub async fn admit_external_dispatch(
     Ok(())
 }
 
-/// Admission for a potentially publishing native action. The counter is durable:
-/// a process lost mid-effect fails closed instead of admitting MCP concurrently.
-/// Call finish_native_publication after the awaited tool, including on errors.
-/// Never reset this counter on reconnect; a lost worker requires reconciliation.
-pub async fn begin_native_publication(db: &DbPool, actor: &str, session: &str) -> Result<String> {
-    let token = uuid::Uuid::new_v4().to_string();
-    db_with_pool!(db, |pool| {
-        let mut tx = pool.begin().await?;
-        let admitted: Option<(String,)> = sqlx::query_as("UPDATE chat_sessions SET native_publications=native_publications+1 WHERE session_id=$1 AND personal_data_owner_id IS NULL AND (user_id=$2 OR COALESCE(shared,FALSE)) AND EXISTS (SELECT 1 FROM workspace_users wu JOIN users u ON u.user_id=wu.user_id WHERE wu.workspace_id=chat_sessions.workspace_id AND wu.user_id=$2 AND wu.active=TRUE AND u.active=TRUE) RETURNING session_id")
-            .bind(session).bind(actor).fetch_optional(&mut *tx).await?;
-        if admitted.is_none() {
-            return Err(denied());
-        }
-        sqlx::query("INSERT INTO personal_mcp_native_publications (publication_id,session_id,actor_id) VALUES ($1,$2,$3)")
-            .bind(&token).bind(session).bind(actor).execute(&mut *tx).await?;
-        tx.commit().await?;
-    });
-    Ok(token)
-}
-/// Idempotent release of this exact completed operation, never another worker's
-/// lease. Cancellation drops the execution future; its counter is retained until
-/// the effect's worker has actually completed (the agent wrapper owns that task).
-pub async fn finish_native_publication(db: &DbPool, actor: &str, token: &str) -> Result<()> {
-    db_with_pool!(db, |pool| {
-        let mut tx = pool.begin().await?;
-        let row: Option<(String,)> = sqlx::query_as("DELETE FROM personal_mcp_native_publications WHERE publication_id=$1 AND actor_id=$2 RETURNING session_id")
-            .bind(token).bind(actor).fetch_optional(&mut *tx).await?;
-        if let Some((session,)) = row {
-            sqlx::query("UPDATE chat_sessions SET native_publications=native_publications-1 WHERE session_id=$1 AND native_publications>0")
-                .bind(session).execute(&mut *tx).await?;
-        }
-        tx.commit().await?;
-    });
-    Ok(())
-}
-
 /// Owner private export/history remains usable. Shared exports/copies have no
 /// exception: this predicate must precede any future destination-copy adapter.
 pub async fn authorize_private_read(db: &DbPool, actor: &str, session: &str) -> Result<()> {
@@ -157,7 +121,7 @@ pub async fn is_private_copilot_destination(
 #[cfg(test)]
 mod tests;
 
-/// Persisted owner restriction, reused by tools and server authorization paths.
+/// Persisted owner restriction, used by conversation read and delivery paths.
 pub async fn restricted_owner(db: &DbPool, session: &str) -> Result<Option<String>> {
     Ok(db_fetch_optional!(
         db,
@@ -188,59 +152,13 @@ pub async fn inherit_private_document_context(
     let admitted = db_fetch_optional!(
         db,
         (String,),
-        "UPDATE chat_sessions SET personal_data_owner_id=$1, personal_data_document_id=$4 WHERE session_id=$2 AND workspace_id=$3 AND user_id=$1 AND NOT COALESCE(shared,FALSE) AND platform_type IS NULL AND native_publications=0 AND (session_type='chat' OR (session_type IN ('dashboard_copilot','knowledge_copilot') AND $4 IS NOT NULL AND EXISTS (SELECT 1 FROM personal_mcp_private_documents p WHERE p.dashboard_id=$4 AND p.owner_user_id=$1))) AND (personal_data_owner_id IS NULL OR personal_data_document_id IS NOT DISTINCT FROM $4) RETURNING session_id",
+        "UPDATE chat_sessions SET personal_data_owner_id=$1, personal_data_document_id=$4 WHERE session_id=$2 AND workspace_id=$3 AND user_id=$1 AND NOT COALESCE(shared,FALSE) AND platform_type IS NULL AND (session_type='chat' OR (session_type IN ('dashboard_copilot','knowledge_copilot') AND $4 IS NOT NULL AND EXISTS (SELECT 1 FROM personal_mcp_private_documents p WHERE p.dashboard_id=$4 AND p.owner_user_id=$1))) AND (personal_data_owner_id IS NULL OR personal_data_document_id IS NOT DISTINCT FROM $4) RETURNING session_id",
         actor,
         session,
         workspace,
         document
     )?;
     admitted.map(|_| ()).ok_or_else(denied)
-}
-
-/// Bounded, owner-scoped diagnostics for a run blocked by outstanding native work.
-/// No TTL cleanup is allowed: process/transport completion must be established by
-/// the host before passing a specific operation to finish_native_publication.
-/// A fresh conversation remains usable while an uncertain old run stays closed.
-pub async fn outstanding_native_publications(
-    db: &DbPool,
-    actor: &str,
-    session: &str,
-) -> Result<Vec<String>> {
-    let rows = kyomi_core::db_fetch_all!(
-        db,
-        (String,),
-        "SELECT publication_id FROM personal_mcp_native_publications WHERE actor_id=$1 AND session_id=$2 ORDER BY publication_id LIMIT 100",
-        actor,
-        session
-    )?;
-    Ok(rows.into_iter().map(|r| r.0).collect())
-}
-
-/// Explicit host-only recovery, deliberately not an AgentTool or server function.
-/// `confirm_worker_stopped` must establish that the identified operation's worker
-/// has terminated and cannot resume sending/writing. A terminal run flag, elapsed
-/// time, disconnected browser or expired lease is NOT this evidence. Do not call
-/// it from model/remote content. It cannot undo an already committed remote effect.
-/// Verification runs before DB locking; exact actor/session/token scope prevents
-/// releasing a different operation. Operators can enumerate at most 100 owned
-/// claims with outstanding_native_publications and reconcile confirmed lost work.
-pub async fn reconcile_stopped_native_publication<F>(
-    db: &DbPool,
-    actor: &str,
-    session: &str,
-    token: &str,
-    confirm_worker_stopped: F,
-) -> Result<bool>
-where
-    F: std::future::Future<Output = Result<()>>,
-{
-    confirm_worker_stopped.await?;
-    let owned = db_fetch_optional!(db,(String,), "SELECT publication_id FROM personal_mcp_native_publications WHERE publication_id=$1 AND actor_id=$2 AND session_id=$3", token,actor,session)?.is_some();
-    if !owned {
-        return Ok(false);
-    }
-    finish_native_publication(db, actor, token).await?;
-    Ok(true)
 }
 
 /// Defense at legacy message submission/Redis receipt. The socket transport also

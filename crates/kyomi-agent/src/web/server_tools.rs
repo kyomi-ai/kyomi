@@ -32,8 +32,8 @@ use serde_json::{Value, json};
 use super::WebSource;
 
 /// A provider-executed tool entry plus which tool it is, so the agent can gate
-/// each one: the monthly budget once per turn, the per-turn allowance and privacy
-/// before each request that is not a `pause_turn` continuation.
+/// each one: the monthly budget once per turn and the per-turn allowance before
+/// each request that is not a `pause_turn` continuation.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ServerTool {
     pub kind: WebToolKind,
