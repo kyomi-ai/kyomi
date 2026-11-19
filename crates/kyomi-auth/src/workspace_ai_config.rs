@@ -117,6 +117,12 @@ pub struct WorkspaceAiConfig {
     pub watch_llm: kyomi_core::watch_llm::WatchLlmSettings,
     /// Stored watch LLM values that failed validation and were ignored.
     pub watch_llm_warnings: Vec<String>,
+    /// Conversation compaction threshold (KYO-975) from
+    /// `settings.custom_settings`: fraction of the context window and an
+    /// absolute token override that wins over it.
+    pub compaction: kyomi_core::llm_compaction::LlmCompactionSettings,
+    /// Stored compaction values that failed validation and were ignored.
+    pub compaction_warnings: Vec<String>,
 }
 
 impl WorkspaceAiConfig {
@@ -134,6 +140,8 @@ impl WorkspaceAiConfig {
             sampling_warnings: Vec::new(),
             watch_llm: Default::default(),
             watch_llm_warnings: Vec::new(),
+            compaction: Default::default(),
+            compaction_warnings: Vec::new(),
         }
     }
 
@@ -281,6 +289,14 @@ pub async fn load(
 
     let (mut watch_llm, mut watch_llm_warnings) =
         kyomi_core::watch_llm::read_workspace_watch_llm(&row.settings);
+    let (compaction, compaction_warnings) =
+        kyomi_core::llm_compaction::read_workspace(&row.settings);
+    for warning in &compaction_warnings {
+        tracing::debug!(
+            workspace_id = %workspace_id,
+            "ignoring invalid stored compaction value: {warning}"
+        );
+    }
     if let Some(ct) = row.watch_ai_api_key_encrypted.as_deref() {
         // A key that cannot be decrypted is dropped with a warning rather than
         // failing every LLM call in the workspace: watches then report the
@@ -312,6 +328,8 @@ pub async fn load(
         sampling_warnings,
         watch_llm,
         watch_llm_warnings,
+        compaction,
+        compaction_warnings,
     })
 }
 
@@ -761,6 +779,8 @@ mod tests {
         sampling_warnings: Vec::new(),
         watch_llm: Default::default(),
         watch_llm_warnings: Vec::new(),
+        compaction: Default::default(),
+        compaction_warnings: Vec::new(),
         };
         assert!(!cfg.is_byok());
     }
@@ -783,6 +803,8 @@ mod tests {
         sampling_warnings: Vec::new(),
         watch_llm: Default::default(),
         watch_llm_warnings: Vec::new(),
+            compaction: Default::default(),
+            compaction_warnings: Vec::new(),
             };
             assert!(cfg.is_byok(), "expected BYOK for {p:?}");
         }
@@ -966,6 +988,51 @@ mod tests {
         let user_id = format!("user-{workspace_id}");
         seed_user(sq, &user_id, &format!("{workspace_id}@test.local")).await;
         seed_workspace(sq, workspace_id, &user_id).await;
+    }
+
+    // --- Conversation compaction (KYO-975) --------------------------------
+
+    #[tokio::test]
+    async fn compaction_settings_round_trip_and_invalid_stored_values_warn() {
+        use kyomi_core::llm_compaction::{WORKSPACE_FRACTION_KEY, WORKSPACE_THRESHOLD_KEY};
+
+        let db = test_sqlite_pool().await;
+        let ws = "ws-compaction";
+        insert_test_workspace(&db, ws).await;
+
+        // Unset everywhere: the instance value or the default applies.
+        let cfg = load(&db, ws).await.unwrap();
+        assert_eq!(cfg.compaction, Default::default());
+        assert!(cfg.compaction_warnings.is_empty());
+
+        // Valid workspace values are read independently of the other settings.
+        crate::workspace_service::update_workspace_settings_with(&db, ws, |current| {
+            let mut settings = current.clone().unwrap_or_else(|| serde_json::json!({}));
+            settings["custom_settings"][WORKSPACE_FRACTION_KEY] = serde_json::json!(0.5);
+            settings["custom_settings"][WORKSPACE_THRESHOLD_KEY] = serde_json::json!(90_000);
+            settings["custom_settings"]["title_model"] = serde_json::json!("keep-me");
+            Ok(settings)
+        })
+        .await
+        .unwrap();
+        let cfg = load(&db, ws).await.unwrap();
+        assert_eq!(cfg.compaction.fraction, Some(0.5));
+        assert_eq!(cfg.compaction.threshold_tokens, Some(90_000));
+        assert!(cfg.compaction_warnings.is_empty());
+        assert_eq!(cfg.title_model.as_deref(), Some("keep-me"), "unrelated settings survive");
+
+        // Invalid values are ignored (as unset) and reported, never fatal.
+        crate::workspace_service::update_workspace_settings_with(&db, ws, |current| {
+            let mut settings = current.clone().unwrap_or_else(|| serde_json::json!({}));
+            settings["custom_settings"][WORKSPACE_FRACTION_KEY] = serde_json::json!(2);
+            settings["custom_settings"][WORKSPACE_THRESHOLD_KEY] = serde_json::json!(0);
+            Ok(settings)
+        })
+        .await
+        .unwrap();
+        let cfg = load(&db, ws).await.unwrap();
+        assert_eq!(cfg.compaction, Default::default());
+        assert_eq!(cfg.compaction_warnings.len(), 2, "{:?}", cfg.compaction_warnings);
     }
 
     // --- Watch LLM override (KYO-973) -------------------------------------

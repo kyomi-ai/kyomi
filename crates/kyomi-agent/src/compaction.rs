@@ -2,30 +2,47 @@
 
 //! Context compaction for the agent system.
 //!
-//! When conversations approach the token limit (~200K context window),
-//! old messages are summarized into a compact summary. This module provides
-//! the utility functions for deciding when to compact, splitting messages,
-//! building the summarization prompt, and reconstructing context.
+//! When a conversation reaches the run's resolved input-token threshold, older
+//! messages are summarized into a compact summary. This module provides the
+//! utility functions for deciding when to compact, splitting messages, building
+//! the summarization prompt, and reconstructing context.
 //!
 //! # Architecture
 //!
 //! The compaction flow:
 //!
-//! 1. After each LLM call, check [`should_compact`] using the actual
-//!    input token count (or a character-based estimate as fallback).
+//! 1. [`CustomAgent::maybe_compact`](crate::agent::CustomAgent) checks
+//!    [`should_compact`] at the start of each agent-loop iteration (and before
+//!    the forced wrap-up call), using the actual input token count from the
+//!    previous LLM call (or a character-based estimate as fallback) and the
+//!    threshold resolved from the model's context window (KYO-975).
 //! 2. If compaction is needed, [`split_messages_for_compaction`] divides
-//!    messages into "to summarize" and "to keep" groups.
+//!    messages into "to summarize" and "to keep" groups at a tool-pair-safe
+//!    boundary.
 //! 3. [`build_compaction_prompt`] creates a summarization prompt from the
 //!    messages that need compacting.
-//! 4. The caller sends this prompt to a fast model (e.g., Haiku).
-//! 5. [`build_context_with_compaction`] reconstructs the LLM message list
-//!    using the summary + recent messages.
-//!
-//! The agent's [`build_llm_context`](crate::agent::CustomAgent) method
-//! already handles the compacted state during the agent loop -- this module
-//! provides the preparation utilities.
+//! 4. The agent sends this prompt to the run's fast model (the workspace title
+//!    model, else `LLM_TITLE_MODEL`, else the setup's own model).
+//! 5. The agent stores the summary and the cut index on
+//!    [`AgentState`](crate::agent::AgentState); the adapter persists them with
+//!    the session, and
+//!    [`build_llm_context`](crate::agent::CustomAgent) reconstructs the LLM
+//!    message list from the summary + recent messages on later calls.
 
+use crate::provider::{LLMProvider, RequestOptions};
 use crate::types::{Message, MessageRole};
+
+/// What the agent needs to compact: the threshold the run resolved (KYO-975)
+/// and the fast model that writes the summary.
+pub struct CompactionRuntime {
+    /// Input-token count at or above which older turns are summarised.
+    pub threshold_tokens: u32,
+    /// Fast model used only for the summary (the workspace title model, else
+    /// `LLM_TITLE_MODEL`, else the setup's own model).
+    pub client: Box<dyn LLMProvider>,
+    /// Request options for the summary call (title/background sampling).
+    pub options: RequestOptions,
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -52,9 +69,6 @@ pub(crate) fn floor_char_boundary(s: &str, max_bytes: usize) -> usize {
 // Constants
 // ---------------------------------------------------------------------------
 
-/// Token threshold for triggering compaction (~75% of 200K context window).
-pub const COMPACTION_TOKEN_THRESHOLD: u32 = 150_000;
-
 /// Rough character-to-token ratio for fallback estimation.
 pub const CHARS_PER_TOKEN: u32 = 4;
 
@@ -71,18 +85,23 @@ pub const MESSAGES_TO_KEEP: usize = 6;
 /// Falls back to a character-based estimate (total chars / [`CHARS_PER_TOKEN`])
 /// that includes the system prompt length.
 ///
+/// `threshold_tokens` is the value a run resolved from the model's context
+/// window and the configured fraction/absolute override (KYO-975); there is no
+/// built-in default here.
+///
 /// Returns `true` if the estimated or actual token count is at or above
-/// [`COMPACTION_TOKEN_THRESHOLD`].
+/// `threshold_tokens`.
 pub fn should_compact(
     last_input_tokens: Option<u32>,
     messages: &[Message],
     system_prompt_len: usize,
+    threshold_tokens: u32,
 ) -> bool {
     // Prefer actual token count from the LLM response.
     if let Some(actual) = last_input_tokens
         && actual > 0
     {
-        return actual >= COMPACTION_TOKEN_THRESHOLD;
+        return actual >= threshold_tokens;
     }
 
     // Fallback: estimate from message content lengths.
@@ -108,15 +127,19 @@ pub fn should_compact(
     }
 
     let estimated_tokens = total_chars as u32 / CHARS_PER_TOKEN;
-    estimated_tokens >= COMPACTION_TOKEN_THRESHOLD
+    estimated_tokens >= threshold_tokens
 }
 
 /// Split messages into (to_summarize, to_keep) for compaction.
 ///
 /// - If `messages.len() <= MESSAGES_TO_KEEP`, all messages are kept and
 ///   the "to summarize" vec is empty.
-/// - Otherwise, the last [`MESSAGES_TO_KEEP`] messages are kept and the
-///   rest are returned for summarization.
+/// - Otherwise, at least the last [`MESSAGES_TO_KEEP`] messages are kept.
+/// - The cut never separates a tool call from its result: if the first kept
+///   message would be a tool result, the whole batch (its assistant tool-call
+///   message and every result) joins the summarised part instead. A request
+///   with a tool result whose call was summarised away is rejected by the
+///   providers.
 ///
 /// **Note:** The input should NOT include the system prompt message --
 /// the caller should strip it before calling this function and re-add it
@@ -126,7 +149,17 @@ pub fn split_messages_for_compaction(messages: &[Message]) -> (Vec<Message>, Vec
         return (Vec::new(), messages.to_vec());
     }
 
-    let cutoff = messages.len() - MESSAGES_TO_KEEP;
+    let mut cutoff = messages.len() - MESSAGES_TO_KEEP;
+    while cutoff > 0 && messages[cutoff].role == MessageRole::Tool {
+        cutoff -= 1;
+    }
+    // The history begins with a tool result and has no call to pair it with:
+    // there is no safe cut, so keep everything rather than build a request the
+    // provider will reject.
+    if cutoff == 0 {
+        return (Vec::new(), messages.to_vec());
+    }
+
     let to_summarize = messages[..cutoff].to_vec();
     let to_keep = messages[cutoff..].to_vec();
 
@@ -250,33 +283,36 @@ mod tests {
 
     // -- should_compact tests ------------------------------------------------
 
+    /// The threshold these tests pass in; resolution itself is tested below.
+    const THRESHOLD: u32 = 150_000;
+
     #[test]
     fn the_character_estimate_counts_stored_provider_blocks() {
         // Text alone is far below the threshold; the stored search results are not.
-        let blocks = vec![serde_json::json!({"type": "text", "text": "x".repeat(CHARS_PER_TOKEN as usize * COMPACTION_TOKEN_THRESHOLD as usize)})];
+        let blocks = vec![serde_json::json!({"type": "text", "text": "x".repeat(CHARS_PER_TOKEN as usize * THRESHOLD as usize)})];
         let plain = vec![Message::user("q"), Message::assistant("a")];
         let with_blocks = vec![Message::user("q"), Message::assistant("a").with_provider_content(Some(blocks))];
-        assert!(!should_compact(None, &plain, 0));
-        assert!(should_compact(None, &with_blocks, 0));
+        assert!(!should_compact(None, &plain, 0, THRESHOLD));
+        assert!(should_compact(None, &with_blocks, 0, THRESHOLD));
     }
 
     #[test]
     fn should_compact_returns_false_below_threshold_with_actual_tokens() {
         // 100K tokens is well below the 150K threshold.
-        let result = should_compact(Some(100_000), &[], 0);
+        let result = should_compact(Some(100_000), &[], 0, THRESHOLD);
         assert!(!result);
     }
 
     #[test]
     fn should_compact_returns_true_at_threshold_with_actual_tokens() {
         // Exactly at threshold should trigger compaction.
-        let result = should_compact(Some(COMPACTION_TOKEN_THRESHOLD), &[], 0);
+        let result = should_compact(Some(THRESHOLD), &[], 0, THRESHOLD);
         assert!(result);
     }
 
     #[test]
     fn should_compact_returns_true_above_threshold_with_actual_tokens() {
-        let result = should_compact(Some(COMPACTION_TOKEN_THRESHOLD + 10_000), &[], 0);
+        let result = should_compact(Some(THRESHOLD + 10_000), &[], 0, THRESHOLD);
         assert!(result);
     }
 
@@ -285,7 +321,7 @@ mod tests {
         // With None for actual tokens, use character estimation.
         // 1000 chars / 4 = 250 tokens -- well below threshold.
         let messages = vec![Message::user("x".repeat(1000))];
-        let result = should_compact(None, &messages, 0);
+        let result = should_compact(None, &messages, 0, THRESHOLD);
         assert!(!result);
     }
 
@@ -295,7 +331,7 @@ mod tests {
         // Create a message with enough content.
         let big_content = "x".repeat(600_001);
         let messages = vec![Message::user(big_content)];
-        let result = should_compact(None, &messages, 0);
+        let result = should_compact(None, &messages, 0, THRESHOLD);
         assert!(result);
     }
 
@@ -305,7 +341,7 @@ mod tests {
         // 600_000 / 4 = 150_000 tokens = threshold.
         let messages = vec![Message::user("abcd")];
         let system_prompt_len = 599_996;
-        let result = should_compact(None, &messages, system_prompt_len);
+        let result = should_compact(None, &messages, system_prompt_len, THRESHOLD);
         assert!(result);
     }
 
@@ -313,8 +349,44 @@ mod tests {
     fn should_compact_zero_actual_tokens_uses_fallback() {
         // Some(0) should fall through to the estimation path.
         let messages = vec![Message::user("short message")];
-        let result = should_compact(Some(0), &messages, 0);
+        let result = should_compact(Some(0), &messages, 0, THRESHOLD);
         assert!(!result);
+    }
+
+    // -- Resolved thresholds (KYO-975) --------------------------------------
+
+    #[test]
+    fn a_one_million_token_model_compacts_at_the_derived_threshold_not_150k() {
+        use kyomi_core::llm_compaction::{LlmCompactionSettings, resolve};
+
+        let resolved = resolve(1_000_000, &LlmCompactionSettings::default(), &LlmCompactionSettings::default());
+        assert_eq!(resolved.threshold_tokens, 750_000);
+        assert!(!should_compact(Some(150_000), &[], 0, resolved.threshold_tokens));
+        assert!(!should_compact(Some(749_999), &[], 0, resolved.threshold_tokens));
+        assert!(should_compact(Some(750_000), &[], 0, resolved.threshold_tokens));
+    }
+
+    #[test]
+    fn a_two_hundred_thousand_token_model_compacts_at_its_own_threshold() {
+        use kyomi_core::llm_compaction::{LlmCompactionSettings, resolve};
+
+        let resolved = resolve(200_000, &LlmCompactionSettings::default(), &LlmCompactionSettings::default());
+        assert_eq!(resolved.threshold_tokens, 150_000);
+        assert!(!should_compact(Some(149_999), &[], 0, resolved.threshold_tokens));
+        assert!(should_compact(Some(150_000), &[], 0, resolved.threshold_tokens));
+    }
+
+    #[test]
+    fn an_unknown_model_uses_the_documented_default_window() {
+        use kyomi_core::llm_compaction::{ContextWindowSource, LlmCompactionSettings, resolve};
+
+        let resolved = resolve(0, &LlmCompactionSettings::default(), &LlmCompactionSettings::default());
+        assert_eq!(resolved.context_window, kyomi_core::llm_compaction::DEFAULT_CONTEXT_WINDOW);
+        assert_eq!(resolved.context_window_source, ContextWindowSource::Default);
+        assert_eq!(resolved.threshold_tokens, 150_000);
+        assert!(!should_compact(Some(149_999), &[], 0, resolved.threshold_tokens));
+        assert!(should_compact(Some(150_000), &[], 0, resolved.threshold_tokens));
+        assert!(should_compact(Some(150_001), &[], 0, resolved.threshold_tokens));
     }
 
     // -- split_messages_for_compaction tests ----------------------------------
@@ -464,12 +536,8 @@ mod tests {
 
     #[test]
     fn constants_are_reasonable_values() {
-        assert_eq!(COMPACTION_TOKEN_THRESHOLD, 150_000);
         assert_eq!(CHARS_PER_TOKEN, 4);
         assert_eq!(MESSAGES_TO_KEEP, 6);
-
-        // Threshold should be less than 200K context window.
-        const { assert!(COMPACTION_TOKEN_THRESHOLD < 200_000) };
         // MESSAGES_TO_KEEP should be even (pairs of user+assistant).
         assert_eq!(MESSAGES_TO_KEEP % 2, 0);
     }
@@ -483,6 +551,8 @@ mod tests {
 mod contract_tests {
     use super::*;
     use crate::types::ToolCall;
+
+    const THRESHOLD: u32 = 150_000;
 
     // -- Large message handling -----------------------------------------------
 
@@ -518,6 +588,112 @@ mod contract_tests {
         assert_eq!(to_summarize.len(), 1);
         assert_eq!(to_keep.len(), MESSAGES_TO_KEEP);
         assert_eq!(to_summarize[0].content, "Message 0");
+    }
+
+    // -- Tool-pair-safe cut points (KYO-975) ----------------------------------
+
+    fn tool_call(id: &str, name: &str) -> ToolCall {
+        ToolCall {
+            id: id.into(),
+            name: name.into(),
+            arguments: serde_json::json!({"sql": "SELECT 1"}),
+            arguments_error: None,
+        }
+    }
+
+    fn assistant_with_calls(ids: &[&str]) -> Message {
+        Message::assistant_with_tool_calls(
+            "",
+            ids.iter().map(|id| tool_call(id, "query_datasource")).collect(),
+        )
+    }
+
+    #[test]
+    fn the_cut_does_not_start_the_kept_tail_with_a_tool_result() {
+        // A naive `len - 6` cut lands exactly on tc_2's result. The cut must
+        // move back before tc_2's assistant call so call and result stay
+        // together in the kept tail.
+        let messages = vec![
+            Message::user("first"),
+            assistant_with_calls(&["tc_1"]),
+            Message::tool_result("tc_1", "query_datasource", "one"),
+            assistant_with_calls(&["tc_2"]),
+            Message::tool_result("tc_2", "query_datasource", "two"),
+            Message::user("q2"),
+            Message::assistant("a2"),
+            Message::user("q3"),
+            Message::assistant("a3"),
+            Message::user("q4"),
+        ];
+
+        let (to_summarize, to_keep) = split_messages_for_compaction(&messages);
+
+        assert_eq!(to_summarize.len(), 3, "tc_1's whole batch is summarised");
+        assert_eq!(to_keep[0].role, MessageRole::Assistant);
+        assert_eq!(to_keep[0].tool_calls.as_ref().unwrap()[0].id, "tc_2");
+        assert_eq!(to_keep[1].role, MessageRole::Tool);
+        assert_eq!(to_keep[1].tool_call_id.as_deref(), Some("tc_2"));
+    }
+
+    #[test]
+    fn the_cut_moves_past_every_result_of_a_multi_call_batch() {
+        let messages = vec![
+            Message::user("first"),
+            assistant_with_calls(&["tc_1", "tc_2"]),
+            Message::tool_result("tc_1", "query_datasource", "one"),
+            Message::tool_result("tc_2", "query_datasource", "two"),
+            Message::user("q2"),
+            Message::assistant("a2"),
+            Message::user("q3"),
+            Message::assistant("a3"),
+            Message::user("q4"),
+        ];
+
+        let (to_summarize, to_keep) = split_messages_for_compaction(&messages);
+
+        assert_eq!(to_summarize.len(), 1, "only the first user message is summarised");
+        assert_eq!(to_keep[0].role, MessageRole::Assistant);
+        assert_eq!(to_keep[0].tool_calls.as_ref().unwrap().len(), 2);
+        assert_eq!(to_keep[1].tool_call_id.as_deref(), Some("tc_1"));
+        assert_eq!(to_keep[2].tool_call_id.as_deref(), Some("tc_2"));
+    }
+
+    #[test]
+    fn a_plain_history_still_keeps_exactly_the_last_six_messages() {
+        let messages: Vec<Message> = (0..10)
+            .map(|i| Message::user(format!("Message {i}")))
+            .collect();
+
+        let (to_summarize, to_keep) = split_messages_for_compaction(&messages);
+
+        assert_eq!(to_summarize.len(), 4);
+        assert_eq!(to_keep.len(), MESSAGES_TO_KEEP);
+    }
+
+    #[test]
+    fn a_history_with_no_non_tool_message_to_keep_is_not_compacted() {
+        let messages: Vec<Message> = (0..10)
+            .map(|i| Message::tool_result(format!("tc_{i}"), "query_datasource", "r"))
+            .collect();
+
+        let (to_summarize, to_keep) = split_messages_for_compaction(&messages);
+
+        assert!(to_summarize.is_empty(), "no safe cut: every message is a tool result");
+        assert_eq!(to_keep.len(), messages.len());
+    }
+
+    #[test]
+    fn an_old_unpaired_tool_result_moves_into_the_summarised_part() {
+        // The first message is a tool result with no call (broken history), but
+        // the kept tail still starts at a non-tool message, so the cut is safe.
+        let mut messages = vec![Message::tool_result("tc_1", "query_datasource", "one")];
+        messages.extend((0..9).map(|i| Message::user(format!("Message {i}"))));
+
+        let (to_summarize, to_keep) = split_messages_for_compaction(&messages);
+
+        assert_eq!(to_summarize.len(), 4);
+        assert_eq!(to_keep[0].role, MessageRole::User);
+        assert!(to_keep.iter().all(|m| m.role != MessageRole::Tool));
     }
 
     // -- Message type preservation in compaction prompt ------------------------
@@ -676,14 +852,14 @@ mod contract_tests {
 
         // With 100K chars in args alone, at 4 chars/token = 25K tokens
         // This is well below threshold, but ensures args ARE counted
-        let result = should_compact(None, &[msg.clone()], 0);
+        let result = should_compact(None, &[msg.clone()], 0, THRESHOLD);
         // 100K chars + some overhead < 600K chars needed for 150K tokens
         assert!(!result);
 
         // Now add enough system prompt to push over the edge
         // Need total of 600K chars = 150K tokens
         // Already have ~100K in args, need 500K more
-        let result = should_compact(None, &[msg], 500_001);
+        let result = should_compact(None, &[msg], 500_001, THRESHOLD);
         assert!(result);
     }
 

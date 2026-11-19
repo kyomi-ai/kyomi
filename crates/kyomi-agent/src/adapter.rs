@@ -480,7 +480,13 @@ impl ChatAgentAdapter {
                 chrono::Utc::now().timestamp_millis(), &metadata,
             ).await.map_err(|e| kyomi_core::Error::ServiceUnavailable(e.to_string()))?;
         } else {
-            chat_service::update_session(&self.db, session_id, None, None, Some(&metadata)).await?;
+            // The legacy session row stores `agent_state` directly; the summary
+            // it now carries is conversation content and must be encrypted like
+            // the durable path's copy (`fenced_session_metadata` does this
+            // itself).
+            let protected =
+                kyomi_auth::encryption::protect_chat_config(&metadata, &self.encryption_key)?;
+            chat_service::update_session(&self.db, session_id, None, None, Some(&protected)).await?;
         }
 
         info!(
@@ -2458,6 +2464,68 @@ mod tests {
         let mut legacy = adapter_over(db.clone(), "user-a", &session_id, key.clone());
         legacy.load_context().await.expect("legacy adapter restores encrypted config");
         assert_eq!(legacy.agent_state().compacted_summary.as_deref(), Some(SUMMARY));
+    }
+
+    #[tokio::test]
+    async fn a_real_compaction_persists_an_encrypted_summary_and_cut_index_that_a_restart_restores() {
+        let db = crate::test_support::test_pool().await;
+        crate::test_support::seed_user_and_workspace(&db).await;
+        let key = Arc::new([7u8; 32]);
+        let session_id = "sess-real-compaction";
+        chat_service::create_session_with_id(&db, "user-a", "ws-1", session_id, None, "chat", None)
+            .await
+            .expect("create session");
+        // 14 turns, large enough that the character estimate crosses the low
+        // threshold without any provider-reported token count.
+        for i in 0..14 {
+            let role = if i % 2 == 0 { "user" } else { "assistant" };
+            chat_service::add_message(
+                &db, &key, session_id, role, &format!("history {i} {}", "x".repeat(4_000)),
+                None, None, None, Some("web"), Some("user-a"), None, None, None,
+                chat_service::MessageStatus::Complete,
+            ).await.expect("seed history");
+        }
+
+        const SUMMARY: &str = "the history was about revenue";
+        let summary_calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let summarizer = crate::test_support::ScriptedProvider {
+            script: std::sync::Mutex::new(vec![crate::test_support::Reply::Text(SUMMARY.into())].into()),
+            after_script: crate::test_support::Reply::Text("unused".into()),
+            calls: Arc::clone(&summary_calls),
+        };
+        let mut first = adapter_with_provider(
+            db.clone(), "user-a", session_id, key.clone(),
+            Box::new(TextReplyProvider { reply: "answer after compaction" }),
+        );
+        first.agent.set_compaction(crate::compaction::CompactionRuntime {
+            threshold_tokens: 100,
+            client: Box::new(summarizer),
+            options: crate::provider::RequestOptions::new(512),
+        });
+        let user = UserMessagePersistence::default();
+        let assistant = AssistantMessagePersistence::adapter_inserts_with_new_id();
+        first.chat(ChatParams {
+            message: "one more question", cancel_token: CancellationToken::new(), current_time_user_tz: None,
+            message_source: Some("web"), user_id: Some("user-a"), user_message_persistence: &user,
+            assistant_message_persistence: &assistant,
+        }).await.expect("the turn compacts and persists");
+
+        assert_eq!(summary_calls.lock().expect("summary log").len(), 1);
+        let index = first.agent_state().messages_since_compaction_index;
+        assert!(index > 0, "the cut index advanced");
+
+        let raw = chat_service::get_session(&db, session_id).await.expect("raw session").expect("session");
+        assert!(
+            !raw.config.expect("persisted state").to_string().contains(SUMMARY),
+            "the summary is stored encrypted, never as plaintext"
+        );
+
+        // A new adapter over the same database is the restart: it must restore
+        // both the summary and the exact cut index.
+        let mut restarted = adapter_over(db.clone(), "user-a", session_id, key);
+        restarted.load_context().await.expect("restart restores context");
+        assert_eq!(restarted.agent_state().compacted_summary.as_deref(), Some(SUMMARY));
+        assert_eq!(restarted.agent_state().messages_since_compaction_index, index);
     }
 
     #[tokio::test]

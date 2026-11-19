@@ -482,6 +482,15 @@ impl MeteredClient {
     pub fn ledger(&self) -> UsageLedger {
         self.ledger.clone()
     }
+
+    /// Record this client's calls in an existing ledger. Used for a run's
+    /// auxiliary calls (the compaction summary, KYO-975) so they are billed with
+    /// the run and covered by its drop/lease safety, instead of owning a ledger
+    /// nothing would bill when the run is dropped.
+    pub fn with_ledger(mut self, ledger: UsageLedger) -> Self {
+        self.ledger = ledger;
+        self
+    }
 }
 
 #[async_trait]
@@ -560,8 +569,7 @@ mod tests {
     }
 
     #[test]
-    fn metadata_lists_each_call_with_its_breakdown() {
-        let l = UsageLedger::default();
+    fn metadata_lists_each_call_with_its_breakdown() {        let l = UsageLedger::default();
         l.record("claude-sonnet-5-5", &response(10, 100, 5000, 0, 40));
         l.record("claude-sonnet-5-5", &response(20, 200, 0, 5000, 60));
         let m = l.extra_metadata().unwrap();
@@ -576,8 +584,7 @@ mod tests {
     }
 
     #[test]
-    fn billing_row_sums_cost_tokens_and_cache_for_the_whole_run() {
-        let l = UsageLedger::default();
+    fn billing_row_sums_cost_tokens_and_cache_for_the_whole_run() {        let l = UsageLedger::default();
         l.record("claude-sonnet-5-5", &response(10, 100, 5000, 0, 40));
         l.record("claude-sonnet-5-5", &response(20, 200, 0, 5000, 60));
         let row = l.billing_row(false, "anthropic", "m", "chat_agent").unwrap();
@@ -635,5 +642,50 @@ mod tests {
         l.record("gpt", &r);
         assert_eq!(l.totals().cache_read_input_tokens, 4);
         assert!(l.extra_metadata().unwrap()["calls"][0]["message_id"].is_null());
+    }
+
+    /// A summariser client shares the run's ledger (KYO-975), so its call is
+    /// billed with the run and shows its own model in the per-call metadata.
+    #[tokio::test]
+    async fn a_client_with_an_existing_ledger_records_into_that_ledger() {
+        struct Fixed(ScriptedReply);
+
+        #[async_trait::async_trait]
+        impl LLMProvider for Fixed {
+            async fn complete(
+                &self,
+                _messages: &[Message],
+                _tools: &[Tool],
+                _options: &RequestOptions,
+                _user_names: &std::collections::HashMap<String, String>,
+            ) -> kyomi_core::Result<LLMResponse> {
+                Ok(self.0.response())
+            }
+            fn model(&self) -> &str {
+                "claude-haiku-5-5"
+            }
+        }
+
+        struct ScriptedReply;
+        impl ScriptedReply {
+            fn response(&self) -> LLMResponse {
+                let mut r = response(1000, 50, 0, 0, 0);
+                r.call_detail = None;
+                r
+            }
+        }
+
+        let run_ledger = UsageLedger::default();
+        let summarizer = MeteredClient::new(Box::new(Fixed(ScriptedReply)))
+            .with_ledger(run_ledger.clone());
+        summarizer
+            .complete(&[], &[], &RequestOptions::new(512), &std::collections::HashMap::new())
+            .await
+            .expect("summary call");
+
+        let totals = run_ledger.totals();
+        assert_eq!((totals.fresh_input_tokens, totals.output_tokens), (1000, 50));
+        let meta = run_ledger.extra_metadata().expect("shared ledger metadata");
+        assert_eq!(meta["calls"][0]["model"], "claude-haiku-5-5");
     }
 }

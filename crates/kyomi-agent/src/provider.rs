@@ -502,6 +502,29 @@ fn resolve_workspace_provider_config_for(
 // Config resolver
 // ---------------------------------------------------------------------------
 
+/// Resolve the conversation-compaction threshold for a run (KYO-975).
+///
+/// Workspace overrides apply only on self-hosted deployments, matching the
+/// other workspace LLM settings: SaaS controls the model and its tuning
+/// entirely, so a value chosen for a different model must not leak in.
+pub fn resolve_compaction(
+    ws_config: &kyomi_auth::workspace_ai_config::WorkspaceAiConfig,
+    app_config: &kyomi_core::Config,
+    provider_context_window: u32,
+) -> kyomi_core::llm_compaction::ResolvedCompaction {
+    let none = kyomi_core::llm_compaction::LlmCompactionSettings::default();
+    let workspace = if app_config.self_hosted {
+        &ws_config.compaction
+    } else {
+        &none
+    };
+    kyomi_core::llm_compaction::resolve(
+        provider_context_window,
+        workspace,
+        &app_config.llm_compaction,
+    )
+}
+
 /// Build an [`LLMProviderConfig`] from application-level [`Config`](kyomi_core::Config).
 ///
 /// Resolution order:
@@ -799,6 +822,8 @@ mod tests {
             sampling_warnings: Vec::new(),
             watch_llm: Default::default(),
             watch_llm_warnings: Vec::new(),
+            compaction: Default::default(),
+            compaction_warnings: Vec::new(),
         };
 
         let provider = create_provider_from_workspace(&ws, &fallback, None)
@@ -824,6 +849,8 @@ mod tests {
             sampling_warnings: Vec::new(),
             watch_llm: Default::default(),
             watch_llm_warnings: Vec::new(),
+            compaction: Default::default(),
+            compaction_warnings: Vec::new(),
         };
         for self_hosted in [false, true] {
             let mut fallback = kyomi_core::Config::test_config();
@@ -835,6 +862,36 @@ mod tests {
             let title = create_provider_from_workspace(&ws, &fallback, Some("claude-haiku-5-5")).unwrap();
             assert_eq!(title.model(), "claude-haiku-5-5", "self_hosted={self_hosted}: requested model wins");
         }
+    }
+
+    #[test]
+    fn compaction_resolution_applies_workspace_values_only_on_self_hosted() {
+        use kyomi_auth::workspace_ai_config::WorkspaceAiConfig;
+        use kyomi_core::llm_compaction::ThresholdSource;
+
+        let mut ws = WorkspaceAiConfig::kyomi_default();
+        ws.compaction.fraction = Some(0.5);
+
+        let mut saas = kyomi_core::Config::test_config();
+        saas.self_hosted = false;
+        let resolved = resolve_compaction(&ws, &saas, 200_000);
+        assert_eq!(
+            resolved.threshold_tokens, 150_000,
+            "SaaS ignores the workspace fraction and uses the instance/default value"
+        );
+        assert_eq!(resolved.threshold_source, ThresholdSource::DefaultFraction);
+
+        let mut self_hosted = kyomi_core::Config::test_config();
+        self_hosted.self_hosted = true;
+        let resolved = resolve_compaction(&ws, &self_hosted, 200_000);
+        assert_eq!(resolved.threshold_tokens, 100_000);
+        assert_eq!(resolved.threshold_source, ThresholdSource::WorkspaceFraction);
+
+        // An instance absolute threshold beats the workspace fraction.
+        self_hosted.llm_compaction.threshold_tokens = Some(90_000);
+        let resolved = resolve_compaction(&ws, &self_hosted, 200_000);
+        assert_eq!(resolved.threshold_tokens, 90_000);
+        assert_eq!(resolved.threshold_source, ThresholdSource::InstanceAbsolute);
     }
 
     #[test]
@@ -856,6 +913,8 @@ mod tests {
             sampling_warnings: Vec::new(),
             watch_llm: Default::default(),
             watch_llm_warnings: Vec::new(),
+            compaction: Default::default(),
+            compaction_warnings: Vec::new(),
         };
 
         let provider = create_provider_from_workspace(&ws, &fallback, None).unwrap();
@@ -886,6 +945,8 @@ mod tests {
             sampling_warnings: Vec::new(),
             watch_llm: Default::default(),
             watch_llm_warnings: Vec::new(),
+            compaction: Default::default(),
+            compaction_warnings: Vec::new(),
         };
 
         let provider = create_provider_from_workspace(&ws, &fallback, None)
@@ -911,6 +972,8 @@ mod tests {
             sampling_warnings: Vec::new(),
             watch_llm: Default::default(),
             watch_llm_warnings: Vec::new(),
+            compaction: Default::default(),
+            compaction_warnings: Vec::new(),
         };
 
         let provider = create_provider_from_workspace(&ws, &fallback, None).unwrap();
@@ -935,6 +998,8 @@ mod tests {
             sampling_warnings: Vec::new(),
             watch_llm: Default::default(),
             watch_llm_warnings: Vec::new(),
+            compaction: Default::default(),
+            compaction_warnings: Vec::new(),
         };
 
         let err = match create_provider_from_workspace(&ws, &fallback, None) {
@@ -969,6 +1034,8 @@ mod tests {
             sampling_warnings: Vec::new(),
             watch_llm: Default::default(),
             watch_llm_warnings: Vec::new(),
+            compaction: Default::default(),
+            compaction_warnings: Vec::new(),
         };
 
         // SaaS mode should ignore BYOK and use server config

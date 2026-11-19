@@ -257,6 +257,13 @@ pub struct Config {
     /// Uses the cheapest model for the provider when absent.
     pub llm_title_model: Option<String>,
 
+    /// Conversation compaction threshold (KYO-975): the fraction of the model's
+    /// resolved context window at which older turns are summarised
+    /// (`LLM_COMPACTION_FRACTION`), and an absolute token override
+    /// (`LLM_COMPACTION_THRESHOLD`) that wins over any fraction. See
+    /// [`crate::llm_compaction`].
+    pub llm_compaction: crate::llm_compaction::LlmCompactionSettings,
+
     /// Instance-default reasoning effort / temperature per call profile
     /// (`LLM_REASONING_EFFORT`, `LLM_TITLE_REASONING_EFFORT`,
     /// `LLM_WATCH_REASONING_EFFORT`, `LLM_TEMPERATURE`,
@@ -516,6 +523,7 @@ impl Config {
             llm_base_url: env::var("LLM_BASE_URL").ok(),
             llm_context_window: context_window_from(|k| env::var(k).ok()),
             llm_title_model: env::var("LLM_TITLE_MODEL").ok(),
+            llm_compaction: crate::llm_compaction::from_env(|k| env::var(k).ok()),
             llm_sampling: llm_sampling_from_env(),
             llm_watch: crate::watch_llm::watch_llm_from_env(|k| env::var(k).ok())
                 .unwrap_or_else(|e| panic!("{e}")),
@@ -604,6 +612,7 @@ impl Config {
             llm_base_url: None,
             llm_context_window: 0,
             llm_title_model: None,
+            llm_compaction: crate::llm_compaction::LlmCompactionSettings::default(),
             llm_sampling: crate::llm_sampling::LlmSamplingSettings::default(),
             llm_watch: crate::watch_llm::WatchLlmSettings::default(),
 

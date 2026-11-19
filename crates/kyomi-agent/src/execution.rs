@@ -565,21 +565,23 @@ pub async fn execute_agent_chat_with(
     };
 
     // 2. Create LLM provider via the BYOK-aware factory.
-    let (client, provider_kind, is_byok, sampling, llm_base_url) = {
-        let mut ws_config =
-            kyomi_auth::workspace_ai_config::load(db, &config.workspace_id)
-                .await
-                .map_err(|e| {
-                    kyomi_core::Error::Internal(format!(
-                        "failed to load workspace AI config for {}: {e}",
-                        config.workspace_id
-                    ))
-                })?;
-            // Per-request model override (from AgentExecutionConfig) always
-            // wins over the workspace default.
+    let ws_config = {
+        let mut ws_config = kyomi_auth::workspace_ai_config::load(db, &config.workspace_id)
+            .await
+            .map_err(|e| {
+                kyomi_core::Error::Internal(format!(
+                    "failed to load workspace AI config for {}: {e}",
+                    config.workspace_id
+                ))
+            })?;
+        // Per-request model override (from AgentExecutionConfig) always
+        // wins over the workspace default.
         if let Some(ref model) = config.model_name {
             ws_config.model = Some(model.clone());
         }
+        ws_config
+    };
+    let (client, provider_kind, is_byok, sampling, llm_base_url) = {
         // Resolved once per execution so the value is stable for the whole
         // conversation turn (effort changes invalidate Anthropic's prompt
         // cache).
@@ -636,6 +638,31 @@ pub async fn execute_agent_chat_with(
     let provider_context_window = client.context_window();
     // Every provider call of this run is recorded here by the metered client (KYO-974).
     let usage_ledger = client.ledger();
+
+    // Conversation compaction (KYO-975): resolve the window and threshold once
+    // per run and log both with their sources, so tuning can be done from real
+    // data. The window is the same one the context display uses below.
+    let resolved_context_window = if config.context_window > 0 {
+        config.context_window
+    } else {
+        provider_context_window
+    };
+    let resolved_compaction =
+        crate::provider::resolve_compaction(&ws_config, app_config, resolved_context_window);
+    // A batch watch run talks to the provider only through its batch API and is
+    // billed from its persisted calls, so it cannot make the extra summary call.
+    let compaction_enabled = extras.watch_batch.is_none();
+    info!(
+        session_id = %config.session_id,
+        model = %model_name,
+        context_window = resolved_compaction.context_window,
+        context_window_source = resolved_compaction.context_window_source.as_str(),
+        compaction_threshold = resolved_compaction.threshold_tokens,
+        compaction_threshold_source = resolved_compaction.threshold_source.as_str(),
+        compaction_enabled,
+        "compaction threshold resolved"
+    );
+
     let billing = crate::usage_ledger::OwnedBilling {
         db: db.clone(),
         encryption_key: **encryption_key,
@@ -735,6 +762,23 @@ pub async fn execute_agent_chat_with(
     let user_names = sender_display_names(db, &config.user_id).await?;
     let mut agent = CustomAgent::new(Box::new(client), agent_config, registry, tool_context, user_names);
 
+    // 6b. Wire conversation compaction (KYO-975). The summary is written by the
+    // fast/title model, and its calls join this run's usage ledger so they are
+    // billed with the run (including the durable drop/lease safety).
+    if compaction_enabled {
+        let summary_model = ws_config
+            .title_model
+            .clone()
+            .or_else(|| app_config.llm_title_model.clone());
+        let summary_client =
+            create_provider_from_workspace(&ws_config, app_config, summary_model.as_deref())?;
+        agent.set_compaction(crate::compaction::CompactionRuntime {
+            threshold_tokens: resolved_compaction.threshold_tokens,
+            client: Box::new(summary_client.with_ledger(usage_ledger.clone())),
+            options: crate::sampling::background_options(&ws_config, app_config, 4_096),
+        });
+    }
+
     // The system prompt must be the first message in the agent's state.
     // Each LLM provider implementation extracts it and maps it to
     // the appropriate vendor-specific API field.
@@ -786,13 +830,9 @@ pub async fn execute_agent_chat_with(
         })?;
 
     // 9. Create thinking tracker.
-    // Context window comes from the provider (which gets it from the workspace
-    // config or falls back to hardcoded values per model).
-    let resolved_context_window = if config.context_window > 0 {
-        config.context_window
-    } else {
-        provider_context_window
-    };
+    // The context window was resolved once near the top (provider request
+    // window, or the caller's explicit value) so the tracker and the compaction
+    // threshold cannot disagree.
     // Only a `CallerPreInserted` assistant row (chat) has a placeholder a
     // mid-run read can already see — copilot/Slack/watch (`AdapterInserts`)
     // have no row to flush into until `persist_after_chat` inserts one at
