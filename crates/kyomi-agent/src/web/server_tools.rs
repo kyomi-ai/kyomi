@@ -11,10 +11,11 @@
 //!
 //! * **Verbatim replay.** For a multi-turn exchange these blocks (including
 //!   `encrypted_content` / `encrypted_index`) must be sent back exactly as
-//!   received; a modified or missing value is a 400. [`parse_anthropic`]
-//!   returns the assistant `content` array untouched as
-//!   [`ServerToolActivity::provider_content`], which the agent stores on the
-//!   assistant [`crate::types::Message`] and the adapter replays unchanged.
+//!   received; a modified or missing value is a 400.
+//!   [`parse_anthropic_with_pending`] returns the assistant `content` array
+//!   untouched as [`ServerToolActivity::provider_content`], which the agent
+//!   stores on the assistant [`crate::types::Message`] and the adapter replays
+//!   unchanged.
 //! * **Tool version.** Deliberately `web_search_20250305` / `web_fetch_20250910`:
 //!   these are called directly by the model. Newer versions default
 //!   `allowed_callers` to code execution (dynamic filtering), which would pull a
@@ -200,7 +201,10 @@ fn is_server_block(block: &Value) -> bool {
     }
 }
 
-/// Parse the server-tool activity out of a raw Anthropic response.
+/// Parse the server-tool activity out of a raw Anthropic response that does not
+/// continue a paused turn. Tests use it; production always parses through
+/// [`parse_anthropic_with_pending`], which carries a paused call's result over.
+#[cfg(test)]
 pub fn parse_anthropic(raw: &Value) -> ServerToolActivity {
     parse_anthropic_with_pending(raw, &[])
 }
