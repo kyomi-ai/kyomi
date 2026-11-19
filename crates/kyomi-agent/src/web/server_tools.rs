@@ -294,8 +294,9 @@ fn server_tool_intent(block: &Value) -> Option<(&str, WebToolKind, &str)> {
 /// Pair each result block with its call — the `server_tool_use` in this response,
 /// or a `pending` call from the response it continues — and normalise the
 /// result's pages. Every call whose result is in `blocks` gets a card, including
-/// an error result or a zero-result search, carrying only what the provider
-/// returned. A call with no result block is returned as `pending`.
+/// an error result or a zero-result search: the card carries the call's own
+/// query/URL plus only the fields the provider's result returned. A call with no
+/// result block is returned as `pending`.
 fn anthropic_calls(blocks: &[Value], pending: &[ServerToolCall]) -> (Vec<ServerToolCall>, Vec<ServerToolCall>) {
     let mut calls = Vec::new();
     let mut unfinished = Vec::new();

@@ -106,11 +106,12 @@ fn source_json(s: &WebSource) -> Option<Value> {
     Some(v)
 }
 
-/// The result payload the UI's source card reads for one search or fetch, using
-/// the keys a Kyomi-executed tool returns when the provider reported them. Shows
-/// a provider-executed call (whose results never pass through a Kyomi tool) with
-/// the same card; a backend that reports nothing but a count gets the card with
-/// only the fields it has.
+/// The result payload the UI's source card reads for one search or fetch. The
+/// subject is the call's query/URL; the sources/URL/title are the result fields
+/// the provider reported, when it reported them. Shows a provider-executed call
+/// (whose results never pass through a Kyomi tool) with the same card; a
+/// backend that reports nothing but a count gets the card with only the fields
+/// it has.
 pub(crate) fn display_output(
     tool: kyomi_core::web_tools::WebToolKind,
     subject: &str,
@@ -128,9 +129,11 @@ pub(crate) fn display_output(
         WebToolKind::Fetch => {
             let page = sources.first();
             let mut output = json!({"tool": "web_fetch", "available": error.is_none()});
-            // Only what the call carried: a provider that reports no URL and no
-            // page (OpenRouter) still gets its card, without invented fields.
-            if let Some(url) = page.and_then(|p| safe_url(&p.url)).or_else(|| (!subject.is_empty()).then_some(subject)) {
+            // Only a returned page supplies a source URL/title; the call's URL is
+            // the card's subject. A result with no page (a blocked fetch, an empty
+            // result, or a counts-only backend) therefore shows no source row and
+            // no invented fields.
+            if let Some(url) = page.and_then(|p| safe_url(&p.url)) {
                 output["url"] = json!(url);
             }
             if let Some(page) = page {
@@ -139,8 +142,8 @@ pub(crate) fn display_output(
             output
         }
     };
-    // The provider's own error code, when its result carried one: the card shows
-    // that the attempt happened and why it failed, and nothing more.
+    // The call's own URL/query stays on the card; the provider's reason is the
+    // only failure field it returned.
     if let Some(error) = error {
         output["reason"] = json!(error);
     }
@@ -497,14 +500,14 @@ mod tests {
         assert_eq!(shown, json!({"tool": "web_fetch", "available": true}));
     }
 
-    /// KYO-979: a failed call still shows its URL/query and the provider's own
-    /// error code; a successful search that found nothing shows an empty result
-    /// list. Neither invents a source or a reason.
+    /// KYO-979: a failed call still shows the call's URL/query and the provider's
+    /// own error code; a successful search that found nothing shows an empty
+    /// result list. Neither invents a source or a reason.
     #[test]
-    fn failed_and_zero_result_calls_show_only_what_the_provider_returned() {
+    fn failed_and_zero_result_calls_show_the_call_and_only_the_provider_reason() {
         let failed_fetch = parse(&display_output(kyomi_core::web_tools::WebToolKind::Fetch, "https://blocked.example", &[], Some("url_not_accessible")));
         assert_eq!(failed_fetch["available"], false);
-        assert_eq!(failed_fetch["url"], "https://blocked.example");
+        assert!(failed_fetch.get("url").is_none(), "the call URL is the card subject, not a returned source");
         assert_eq!(failed_fetch["reason"], "url_not_accessible");
         assert!(failed_fetch.get("title").is_none() && failed_fetch.get("results").is_none());
 
@@ -519,6 +522,9 @@ mod tests {
         assert_eq!(empty_search["query"], "q");
         assert_eq!(empty_search["results"], json!([]));
         assert!(empty_search.get("reason").is_none());
+
+        let no_page = parse(&display_output(kyomi_core::web_tools::WebToolKind::Fetch, "https://empty.example", &[], None));
+        assert_eq!(no_page, json!({"tool": "web_fetch", "available": true}), "the call URL is the card subject, not a returned source");
     }
 
     #[tokio::test]

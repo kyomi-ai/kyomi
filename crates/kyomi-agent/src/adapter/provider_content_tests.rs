@@ -609,7 +609,7 @@ async fn a_deferred_fetch_error_still_shows_a_card_with_its_url_and_reason() {
     let cards: Vec<_> = run.cards.iter().filter(|schema| schema["tool"] == "web_fetch").collect();
     assert_eq!(cards.len(), 1, "the failed fetch still gets a card: {:?}", run.cards);
     assert_eq!(cards[0]["input"]["url"], "https://blocked.example");
-    assert_eq!(cards[0]["output"]["url"], "https://blocked.example");
+    assert!(cards[0]["output"].get("url").is_none(), "the call URL is the card subject, not a returned source");
     assert_eq!(cards[0]["output"]["available"], false);
     assert_eq!(cards[0]["output"]["reason"], "url_not_accessible", "only the provider's own code");
     assert!(cards[0]["output"].get("title").is_none(), "no page, so no title");
@@ -630,6 +630,7 @@ async fn a_wrap_up_response_carrying_a_pending_fetch_result_is_still_recorded() 
     let provider_id = first["content"][1]["id"].as_str().expect("id").to_string();
     let url = first["content"][1]["input"]["url"].as_str().expect("url").to_string();
     let first = crate::anthropic::AnthropicClient::parse_response("claude", &first, None).expect("parse first");
+    let second_content = second["content"].as_array().expect("content").clone();
     let second = crate::anthropic::AnthropicClient::parse_response("claude", &second, None).expect("parse second");
     let (user, assistant) = claim_durable_turn(&db, &key, &session_id, chrono::Utc::now().timestamp_millis(), 30_000).await;
     let mut config = anthropic_server_tool_config();
@@ -645,6 +646,7 @@ async fn a_wrap_up_response_carrying_a_pending_fetch_result_is_still_recorded() 
         .find(|message| message.contains("provider web tool used"))
         .expect("the wrap-up's provider web call is counted");
     assert!(line.contains("tool=\"web_fetch\""), "{line}");
+    assert!(line.contains("billable_calls=1"), "the wrap-up's call is counted once: {line}");
     assert!(!run.answer.contains("**Sources**"), "the wrap-up card replaces its footer source: {}", run.answer);
     let cards: Vec<_> = run.cards.iter().filter(|schema| schema["tool"] == "web_fetch").collect();
     assert_eq!(cards.len(), 1, "the wrap-up result gets its card: {:?}", run.cards);
@@ -652,6 +654,9 @@ async fn a_wrap_up_response_carrying_a_pending_fetch_result_is_still_recorded() 
     assert_eq!(cards[0]["output"]["url"], url);
     assert!(cards[0]["output"]["title"].as_str().expect("title").contains("Rust Programming Language"));
     assert!(run.outcomes.iter().any(|(id, _)| id == &provider_id), "the card is recorded durably under the provider's call id");
+    let history = chat_service::get_agent_messages(&db, &key, &session_id, None).await.expect("history");
+    let final_row = history.iter().find(|message| message.message_id == assistant.tag_id().expect("assistant id")).expect("final assistant row");
+    assert_eq!(final_row.provider_content.as_ref(), Some(&serde_json::Value::Array(second_content.clone())), "the wrap-up blocks are stored verbatim");
 }
 
 #[tokio::test]

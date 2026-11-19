@@ -118,6 +118,20 @@ fn a_fetch_without_a_reported_url_still_shows_its_card() {
     assert!(!html.contains("Sources:"), "{html}");
 }
 
+/// KYO-979: a successful fetch that returned no page shows the call's URL as the
+/// subject, with no "Sources:" row pretending the call URL was a source.
+#[test]
+fn a_successful_fetch_without_a_page_shows_the_call_url_and_no_sources() {
+    let html = render(json!({
+        "tool": "web_fetch",
+        "input": {"url": "https://empty.example"},
+        "output": {"tool": "web_fetch", "available": true}
+    }));
+    assert!(html.contains("Fetching page:"), "{html}");
+    assert!(html.contains("https://empty.example"), "{html}");
+    assert!(!html.contains("Sources:"), "{html}");
+}
+
 /// Card titles come from the web: bidi controls, zero-width and TAG characters are
 /// removed and the length is capped, by the same shared rule the answer footer uses.
 #[test]
