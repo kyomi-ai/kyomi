@@ -115,6 +115,10 @@ pub fn openrouter_tool_entry(tool: WebToolKind, cfg: &WebBackendConfig, caps: &W
 /// url_citation:{url,title,content}}]` (search only: fetch returns none);
 /// usage is `usage.server_tool_use_details` (`web_search_requests`,
 /// `tool_calls_executed`). No block needs verbatim replay on this API.
+///
+/// This API reports counts, not per-call data: every call that ran still gets a
+/// card, carrying only what the response returned (a fetch reports no URL and
+/// no pages; nothing is invented).
 pub fn parse_openrouter(raw: &Value) -> ServerToolActivity {
     let mut out = ServerToolActivity::default();
     let details = raw.pointer("/usage/server_tool_use_details");
@@ -143,10 +147,14 @@ pub fn parse_openrouter(raw: &Value) -> ServerToolActivity {
         }
     }
     out.sources = dedupe(sources);
-    // OpenRouter reports citations for the response as a whole (search only), not
-    // per call, and not the query: one display entry without an id or subject.
-    if !out.sources.is_empty() {
+    // Chat Completions reports counts, not per-call data. Every call that ran
+    // still gets a card, carrying only what the response returned: no URL, no
+    // query and no pages when the provider did not report them (KYO-979).
+    if out.searches > 0 {
         out.calls.push(ServerToolCall { id: None, tool: WebToolKind::Search, subject: String::new(), sources: out.sources.clone() });
+    }
+    if out.fetches > 0 {
+        out.calls.push(ServerToolCall { id: None, tool: WebToolKind::Fetch, subject: String::new(), sources: Vec::new() });
     }
     out
 }
@@ -689,6 +697,34 @@ mod tests {
         let a = parse_openrouter(&fixture("openrouter_fetch_chat_completion.json"));
         assert_eq!((a.searches, a.fetches), (0, 1));
         assert!(a.sources.is_empty());
+    }
+
+    /// KYO-979: OpenRouter reports only a count for a fetch — no URL and no
+    /// annotations. The card must still be shown, with only what the response
+    /// carries (nothing is invented).
+    #[test]
+    fn openrouter_fetch_without_url_or_sources_still_reports_a_card() {
+        let a = parse_openrouter(&fixture("openrouter_fetch_chat_completion.json"));
+        assert_eq!((a.searches, a.fetches), (0, 1));
+        assert!(a.sources.is_empty(), "the Chat Completions response carries no URL or annotations");
+        assert_eq!(a.calls.len(), 1, "the fetch still gets a card");
+        assert_eq!(a.calls[0].tool, WebToolKind::Fetch);
+        assert!(a.calls[0].subject.is_empty(), "no URL was reported, so none is shown");
+        assert!(a.calls[0].sources.is_empty());
+    }
+
+    /// The same rule for a search whose response carries no annotations: the
+    /// search ran, so its card exists; the sources are simply absent.
+    #[test]
+    fn openrouter_search_without_annotations_still_reports_a_card() {
+        let raw = json!({
+            "choices": [{"message": {"role": "assistant", "content": "No sources."}}],
+            "usage": {"server_tool_use_details": {"web_search_requests": 1, "tool_calls_executed": 1}}
+        });
+        let a = parse_openrouter(&raw);
+        assert_eq!(a.calls.len(), 1);
+        assert_eq!(a.calls[0].tool, WebToolKind::Search);
+        assert!(a.calls[0].sources.is_empty());
     }
 
     #[test]

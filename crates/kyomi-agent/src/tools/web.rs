@@ -120,12 +120,16 @@ pub(crate) fn display_output(tool: kyomi_core::web_tools::WebToolKind, subject: 
         }),
         WebToolKind::Fetch => {
             let page = sources.first();
-            json!({
-                "tool": "web_fetch",
-                "available": true,
-                "url": page.and_then(|p| safe_url(&p.url)).unwrap_or(subject),
-                "title": page.map(|p| fence_untrusted(&p.title)),
-            })
+            let mut output = json!({"tool": "web_fetch", "available": true});
+            // Only what the call carried: a provider that reports no URL and no
+            // page (OpenRouter) still gets its card, without invented fields.
+            if let Some(url) = page.and_then(|p| safe_url(&p.url)).or_else(|| (!subject.is_empty()).then_some(subject)) {
+                output["url"] = json!(url);
+            }
+            if let Some(page) = page {
+                output["title"] = json!(fence_untrusted(&page.title));
+            }
+            output
         }
     }
     .to_string()
@@ -470,6 +474,15 @@ mod tests {
         assert_eq!(shown["tool"], real["tool"]);
         assert_eq!(shown["available"], real["available"]);
         assert_eq!(shown["url"], "https://example.com/");
+    }
+
+    /// KYO-979: OpenRouter reports only a count for a fetch, so there is no URL
+    /// or page to show. The payload carries only what exists — no empty url or
+    /// invented title that the card would render as a blank link.
+    #[test]
+    fn a_fetch_without_a_url_or_page_reports_only_what_exists() {
+        let shown = parse(&display_output(kyomi_core::web_tools::WebToolKind::Fetch, "", &[]));
+        assert_eq!(shown, json!({"tool": "web_fetch", "available": true}));
     }
 
     #[tokio::test]

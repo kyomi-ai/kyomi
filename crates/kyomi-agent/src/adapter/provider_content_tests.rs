@@ -66,23 +66,47 @@ fn anthropic_server_tool_config() -> crate::agent::AgentConfig {
     }
 }
 
-fn adapter_with_server_tools(
+fn openrouter_server_tool_config() -> crate::agent::AgentConfig {
+    use kyomi_core::web_tools::{WebBackendConfig, WebBackendKind, WebCaps, WebToolKind};
+    let cfg = WebBackendConfig { kind: WebBackendKind::OpenRouter, ..Default::default() };
+    let caps = WebCaps::default();
+    let entry = |tool| crate::web::server_tools::openrouter_tool_entry(tool, &cfg, &caps);
+    crate::agent::AgentConfig {
+        server_tools: vec![
+            crate::web::server_tools::ServerTool { kind: WebToolKind::Search, backend: WebBackendKind::OpenRouter, entry: entry(WebToolKind::Search) },
+            crate::web::server_tools::ServerTool { kind: WebToolKind::Fetch, backend: WebBackendKind::OpenRouter, entry: entry(WebToolKind::Fetch) },
+        ],
+        ..Default::default()
+    }
+}
+
+fn adapter_with_config(
     db: &kyomi_core::DbPool,
     session_id: &str,
     key: &Arc<[u8; 32]>,
     provider: CapturedThenText,
+    config: crate::agent::AgentConfig,
 ) -> ChatAgentAdapter {
     let mut ctx = crate::test_support::build_ctx(db.clone());
     ctx.session_id = Some(session_id.to_string());
     let agent = CustomAgent::new(
         Box::new(provider),
-        anthropic_server_tool_config(),
+        config,
         Arc::new(crate::tools::ToolRegistry::new()),
         ctx,
         std::collections::HashMap::new(),
     );
     ChatAgentAdapter::new(agent, "user-a".to_string(), "ws-1".to_string(), Some(session_id.to_string()),
         "custom_agent".to_string(), db.clone(), key.clone())
+}
+
+fn adapter_with_server_tools(
+    db: &kyomi_core::DbPool,
+    session_id: &str,
+    key: &Arc<[u8; 32]>,
+    provider: CapturedThenText,
+) -> ChatAgentAdapter {
+    adapter_with_config(db, session_id, key, provider, anthropic_server_tool_config())
 }
 
 /// The reply the provider actually returned for a web-search turn (live capture).
@@ -363,17 +387,24 @@ struct CardRun {
 
 /// Run one durable turn with a thinking tracker attached and capture the exact
 /// frames the live chat receives plus the durable tool outcomes.
-async fn run_capturing_cards(
-    db: &kyomi_core::DbPool,
-    key: &Arc<[u8; 32]>,
-    session_id: &str,
-    user: &UserMessagePersistence,
-    assistant: &AssistantMessagePersistence,
-    prompt: &str,
+struct CardRunInput<'a> {
+    db: &'a kyomi_core::DbPool,
+    key: &'a Arc<[u8; 32]>,
+    session_id: &'a str,
+    user: &'a UserMessagePersistence,
+    assistant: &'a AssistantMessagePersistence,
+    prompt: &'a str,
+    config: crate::agent::AgentConfig,
     script: Vec<crate::types::LLMResponse>,
-) -> CardRun {
-    let mut adapter = adapter_with_server_tools(db, session_id, key,
-        CapturedThenText { script: std::sync::Mutex::new(script.into()), fail_when_exhausted: false, seen: Arc::new(std::sync::Mutex::new(Vec::new())) });
+}
+
+/// Run one durable turn with a thinking tracker attached and capture the exact
+/// frames the live chat receives plus the durable tool outcomes.
+async fn run_capturing_cards(input: CardRunInput<'_>) -> CardRun {
+    let CardRunInput { db, key, session_id, user, assistant, prompt, config, script } = input;
+    let mut adapter = adapter_with_config(db, session_id, key,
+        CapturedThenText { script: std::sync::Mutex::new(script.into()), fail_when_exhausted: false, seen: Arc::new(std::sync::Mutex::new(Vec::new())) },
+        config);
     let manager = kyomi_auth::websocket::WebSocketManager::new(None, db.clone());
     let (_, mut receiver) = manager.connect("user-a").expect("connect");
     let tracker = Arc::new(tokio::sync::Mutex::new(crate::thinking::AgentThinkingTracker::new(
@@ -425,8 +456,11 @@ async fn a_paused_fetch_result_in_a_continuation_with_client_tool_calls_is_recor
     let continuation = crate::anthropic::AnthropicClient::parse_response("claude", &continuation, None).expect("parse continuation");
     let (user, assistant) = claim_durable_turn(&db, &key, &session_id, chrono::Utc::now().timestamp_millis(), 30_000).await;
 
-    let run = run_capturing_cards(&db, &key, &session_id, &user, &assistant,
-        "fetch n=7 and list my datasources", vec![paused, continuation]).await;
+    let run = run_capturing_cards(CardRunInput {
+        db: &db, key: &key, session_id: &session_id, user: &user, assistant: &assistant,
+        prompt: "fetch n=7 and list my datasources", config: anthropic_server_tool_config(),
+        script: vec![paused, continuation],
+    }).await;
     assert!(!run.answer.contains("**Sources**"), "the fetch card replaces its footer source: {}", run.answer);
     let cards: Vec<_> = run.cards.iter().filter(|schema| schema["tool"] == "web_fetch").collect();
     assert_eq!(cards.len(), 1, "one web fetch card, streamed to the UI: {:?}", run.cards);
@@ -455,8 +489,11 @@ async fn a_deferred_fetch_behind_client_tool_results_is_recorded_as_a_source_car
     let second = crate::anthropic::AnthropicClient::parse_response("claude", &second, None).expect("parse second");
     let (user, assistant) = claim_durable_turn(&db, &key, &session_id, chrono::Utc::now().timestamp_millis(), 30_000).await;
 
-    let run = run_capturing_cards(&db, &key, &session_id, &user, &assistant,
-        "look at the Rust site and list my datasources", vec![first, second]).await;
+    let run = run_capturing_cards(CardRunInput {
+        db: &db, key: &key, session_id: &session_id, user: &user, assistant: &assistant,
+        prompt: "look at the Rust site and list my datasources", config: anthropic_server_tool_config(),
+        script: vec![first, second],
+    }).await;
     assert!(!run.answer.contains("**Sources**"), "the deferred fetch card replaces its footer source: {}", run.answer);
     let cards: Vec<_> = run.cards.iter().filter(|schema| schema["tool"] == "web_fetch").collect();
     assert_eq!(cards.len(), 1, "one web fetch card, streamed to the UI: {:?}", run.cards);
@@ -485,14 +522,53 @@ async fn a_deferred_search_behind_client_tool_results_keeps_its_query_and_is_rec
     let second = crate::anthropic::AnthropicClient::parse_response("claude", &second, None).expect("parse second");
     let (user, assistant) = claim_durable_turn(&db, &key, &session_id, chrono::Utc::now().timestamp_millis(), 30_000).await;
 
-    let run = run_capturing_cards(&db, &key, &session_id, &user, &assistant,
-        "search for rust news and list my datasources", vec![first, second]).await;
+    let run = run_capturing_cards(CardRunInput {
+        db: &db, key: &key, session_id: &session_id, user: &user, assistant: &assistant,
+        prompt: "search for rust news and list my datasources", config: anthropic_server_tool_config(),
+        script: vec![first, second],
+    }).await;
     assert!(!run.answer.contains("**Sources**"), "the deferred search card replaces its footer source: {}", run.answer);
     let cards: Vec<_> = run.cards.iter().filter(|schema| schema["tool"] == "web_search").collect();
     assert_eq!(cards.len(), 1, "one web search card, streamed to the UI: {:?}", run.cards);
     assert_eq!(cards[0]["input"]["query"], query);
     assert_eq!(cards[0]["output"]["results"][0]["url"], result_url);
     assert!(run.outcomes.iter().any(|(id, _)| id == &provider_id), "the card is recorded durably under the provider's call id");
+}
+
+/// KYO-979, OpenRouter: the Chat Completions response reports only a count for a
+/// fetch — no URL and no annotations. The card is still shown, with only what
+/// the provider returned; nothing is invented.
+#[tokio::test]
+async fn a_provider_fetch_without_a_reported_url_or_sources_still_shows_a_card() {
+    let db = crate::test_support::test_pool().await;
+    crate::test_support::seed_user_and_workspace(&db).await;
+    let key = Arc::new([7u8; 32]);
+    let session_id = uuid::Uuid::new_v4().to_string();
+    let captured: serde_json::Value =
+        serde_json::from_str(include_str!("../web/fixtures/openrouter_fetch_chat_completion.json")).expect("fixture");
+    let response = crate::types::LLMResponse {
+        raw_response: captured,
+        content: "The title of the webpage is \"Example Domain\".".into(),
+        finish_reason: "stop".into(),
+        usage: Default::default(),
+        tool_calls: None,
+        cost: None,
+        thinking_content: None,
+        call_detail: None,
+    };
+    let (user, assistant) = claim_durable_turn(&db, &key, &session_id, chrono::Utc::now().timestamp_millis(), 30_000).await;
+
+    let run = run_capturing_cards(CardRunInput {
+        db: &db, key: &key, session_id: &session_id, user: &user, assistant: &assistant,
+        prompt: "read https://example.com", config: openrouter_server_tool_config(),
+        script: vec![response],
+    }).await;
+    assert!(!run.answer.contains("**Sources**"), "there is no footer source to stand in: {}", run.answer);
+    let cards: Vec<_> = run.cards.iter().filter(|schema| schema["tool"] == "web_fetch").collect();
+    assert_eq!(cards.len(), 1, "the fetch card is shown even without a URL: {:?}", run.cards);
+    assert_eq!(cards[0]["input"]["url"], "");
+    assert!(cards[0]["output"].get("url").is_none(), "no URL is invented: {}", cards[0]["output"]);
+    assert!(cards[0]["output"].get("title").is_none(), "no title is invented: {}", cards[0]["output"]);
 }
 
 #[tokio::test]
@@ -748,3 +824,4 @@ async fn a_provider_error_inside_a_pause_chain_leaves_no_stored_rows_from_the_ru
     let history = chat_service::get_agent_messages(&turns.db, &key, &turns.session_id, None).await.unwrap();
     assert!(history.iter().all(|m| m.role != "assistant" || !m.content.contains("I'll fetch each URL")), "no partial text row");
 }
+
