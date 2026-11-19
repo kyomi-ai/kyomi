@@ -1176,6 +1176,7 @@ impl CustomAgent {
         // The wrap-up is an LLM call like any other, so it counts.
         self.state.global_iteration += 1;
 
+        let wrap_up_started = std::time::Instant::now();
         let wrap_up = tokio::select! {
             result = self.call_llm_with(&wrap_up_messages, &[], false) => result,
             _ = cancel_token.cancelled() => {
@@ -1197,6 +1198,11 @@ impl CustomAgent {
                 ));
             }
         };
+
+        // The wrap-up can carry the result of a call deferred before the budget
+        // ran out. Record it exactly like a loop response: usage, card, sources
+        // and the verbatim blocks (KYO-979).
+        let server_activity = self.note_server_tools(&response, wrap_up_started.elapsed()).await;
 
         let content = final_response_text(response);
 
@@ -1247,7 +1253,7 @@ impl CustomAgent {
         };
 
         let content = self.with_web_sources(content);
-        self.state.messages.push(Message::assistant(&content));
+        self.state.messages.push(Message::assistant(&content).with_provider_content(server_activity.provider_content));
         Ok(content)
     }
 
@@ -1505,7 +1511,7 @@ impl CustomAgent {
                 kyomi_core::web_tools::WebToolKind::Search => serde_json::json!({"query": call.subject}),
                 kyomi_core::web_tools::WebToolKind::Fetch => serde_json::json!({"url": call.subject}),
             };
-            let shown = ProviderToolDisplay { text: crate::tools::web::display_output(call.tool, &call.subject, &call.sources) };
+            let shown = ProviderToolDisplay { text: crate::tools::web::display_output(call.tool, &call.subject, &call.sources, call.error.as_deref()) };
             match context.tool(sink.as_ref(), &shown, agent_runtime::ToolCallId(id), name.to_string(), arguments).await {
                 Ok(_) => carded.extend(call.sources.iter().map(|source| source.url.clone())),
                 Err(error) => warn!(%error, tool = name, "could not record a provider web call as a source card; its sources are listed in the answer instead"),

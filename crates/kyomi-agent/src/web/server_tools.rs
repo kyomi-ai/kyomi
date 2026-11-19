@@ -152,10 +152,10 @@ pub fn parse_openrouter(raw: &Value) -> ServerToolActivity {
     // kind still gets a card, carrying only what the response returned: no URL,
     // no query and no pages when the provider did not report them (KYO-979).
     if out.searches > 0 {
-        out.calls.push(ServerToolCall { id: None, tool: WebToolKind::Search, subject: String::new(), sources: out.sources.clone() });
+        out.calls.push(ServerToolCall { id: None, tool: WebToolKind::Search, subject: String::new(), sources: out.sources.clone(), error: None });
     }
     if out.fetches > 0 {
-        out.calls.push(ServerToolCall { id: None, tool: WebToolKind::Fetch, subject: String::new(), sources: Vec::new() });
+        out.calls.push(ServerToolCall { id: None, tool: WebToolKind::Fetch, subject: String::new(), sources: Vec::new(), error: None });
     }
     out
 }
@@ -196,6 +196,9 @@ pub struct ServerToolCall {
     /// The query (search) or URL (fetch) the model used; empty when not reported.
     pub subject: String,
     pub sources: Vec<WebSource>,
+    /// The provider's error code for this call, when its result carried one
+    /// (for example `url_not_accessible`). Shown as returned, never synthesised.
+    pub error: Option<String>,
 }
 
 /// A server tool's result block type (`web_search_tool_result`, ...); the
@@ -290,8 +293,9 @@ fn server_tool_intent(block: &Value) -> Option<(&str, WebToolKind, &str)> {
 
 /// Pair each result block with its call — the `server_tool_use` in this response,
 /// or a `pending` call from the response it continues — and normalise the
-/// result's pages. A call whose result is an error or not in `blocks` is left
-/// out: there is nothing to show; an unfinished call is returned as `pending`.
+/// result's pages. Every call whose result is in `blocks` gets a card, including
+/// an error result or a zero-result search, carrying only what the provider
+/// returned. A call with no result block is returned as `pending`.
 fn anthropic_calls(blocks: &[Value], pending: &[ServerToolCall]) -> (Vec<ServerToolCall>, Vec<ServerToolCall>) {
     let mut calls = Vec::new();
     let mut unfinished = Vec::new();
@@ -309,6 +313,7 @@ fn anthropic_calls(blocks: &[Value], pending: &[ServerToolCall]) -> (Vec<ServerT
                         tool,
                         subject: subject.to_string(),
                         sources: Vec::new(),
+                        error: None,
                     });
                 }
             }
@@ -325,12 +330,13 @@ fn anthropic_calls(blocks: &[Value], pending: &[ServerToolCall]) -> (Vec<ServerT
                 };
                 let Some((tool, subject)) = intent else { continue };
                 let sources = result_sources(block);
-                if sources.is_empty() { continue; }
+                let error = block.pointer("/content/error_code").and_then(Value::as_str).map(str::to_string);
                 calls.push(ServerToolCall {
                     id: Some(id.to_string()),
                     tool,
                     subject: subject.to_string(),
                     sources,
+                    error,
                 });
             }
             _ => {}
@@ -632,6 +638,7 @@ mod tests {
             tool: WebToolKind::Search,
             subject: "latest stable rust".into(),
             sources: Vec::new(),
+            error: None,
         };
         let raw = json!({
             "content": [{"type": "web_search_tool_result", "tool_use_id": "srvtoolu_search", "content": [
@@ -647,7 +654,7 @@ mod tests {
     }
 
     #[test]
-    fn an_error_result_resolves_a_call_instead_of_leaving_it_pending() {
+    fn an_error_result_still_reports_a_card_with_its_url_and_provider_error() {
         let raw = json!({
             "content": [
                 {"type": "server_tool_use", "id": "srvtoolu_2", "name": "web_fetch", "input": {"url": "https://c.example"}},
@@ -656,9 +663,68 @@ mod tests {
             "usage": {"server_tool_use": {"web_fetch_requests": 1}}
         });
         let a = parse_anthropic(&raw);
-        assert!(a.calls.is_empty(), "an error result has nothing to show");
+        assert_eq!(a.calls.len(), 1, "a failed fetch is exactly what the user needs to see");
+        assert_eq!(a.calls[0].tool, WebToolKind::Fetch);
+        assert_eq!(a.calls[0].subject, "https://c.example");
+        assert!(a.calls[0].sources.is_empty(), "an error result has no sources");
+        assert_eq!(a.calls[0].error.as_deref(), Some("url_not_accessible"), "only the provider's own code");
         assert!(a.pending.is_empty(), "the call finished, with an error");
         assert_eq!(a.errors, ["web_fetch: url_not_accessible"]);
+    }
+
+    #[test]
+    fn a_zero_result_search_still_reports_a_card_with_its_query() {
+        let raw = json!({
+            "content": [
+                {"type": "server_tool_use", "id": "srvtoolu_3", "name": "web_search", "input": {"query": "nothing matches this"}},
+                {"type": "web_search_tool_result", "tool_use_id": "srvtoolu_3", "content": []}
+            ],
+            "usage": {"server_tool_use": {"web_search_requests": 1}}
+        });
+        let a = parse_anthropic(&raw);
+        assert_eq!(a.calls.len(), 1, "the search ran even though it found nothing");
+        assert_eq!(a.calls[0].tool, WebToolKind::Search);
+        assert_eq!(a.calls[0].subject, "nothing matches this");
+        assert!(a.calls[0].sources.is_empty());
+        assert!(a.calls[0].error.is_none());
+    }
+
+    #[test]
+    fn a_fetch_result_without_a_page_still_reports_a_card_with_its_url() {
+        let raw = json!({
+            "content": [
+                {"type": "server_tool_use", "id": "srvtoolu_4", "name": "web_fetch", "input": {"url": "https://empty.example"}},
+                {"type": "web_fetch_tool_result", "tool_use_id": "srvtoolu_4", "content": {"type": "web_fetch_result"}}
+            ],
+            "usage": {"server_tool_use": {"web_fetch_requests": 1}}
+        });
+        let a = parse_anthropic(&raw);
+        assert_eq!(a.calls.len(), 1, "the fetch ran even though no page was returned");
+        assert_eq!(a.calls[0].tool, WebToolKind::Fetch);
+        assert_eq!(a.calls[0].subject, "https://empty.example");
+        assert!(a.calls[0].sources.is_empty());
+        assert!(a.calls[0].error.is_none());
+    }
+
+    #[test]
+    fn a_deferred_call_whose_result_is_an_error_still_reports_a_card() {
+        let pending = ServerToolCall {
+            id: Some("srvtoolu_5".into()),
+            tool: WebToolKind::Fetch,
+            subject: "https://blocked.example".into(),
+            sources: Vec::new(),
+            error: None,
+        };
+        let raw = json!({
+            "content": [{"type": "web_fetch_tool_result", "tool_use_id": "srvtoolu_5", "content": {"error_code": "url_not_allowed"}}],
+            "usage": {"server_tool_use": {"web_fetch_requests": 1}}
+        });
+        let a = parse_anthropic_with_pending(&raw, &[pending]);
+        assert_eq!(a.calls.len(), 1);
+        assert_eq!(a.calls[0].subject, "https://blocked.example");
+        assert_eq!(a.calls[0].error.as_deref(), Some("url_not_allowed"));
+        assert!(a.calls[0].sources.is_empty());
+        assert!(a.pending.is_empty());
     }
 
     #[test]

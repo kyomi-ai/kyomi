@@ -571,6 +571,89 @@ async fn a_provider_fetch_without_a_reported_url_or_sources_still_shows_a_card()
     assert!(cards[0]["output"].get("title").is_none(), "no title is invented: {}", cards[0]["output"]);
 }
 
+/// KYO-979: a deferred call whose result is an error still gets a card with the
+/// model's URL and the provider's own error code; no sources, no footer.
+#[tokio::test]
+async fn a_deferred_fetch_error_still_shows_a_card_with_its_url_and_reason() {
+    let db = crate::test_support::test_pool().await;
+    crate::test_support::seed_user_and_workspace(&db).await;
+    let key = Arc::new([7u8; 32]);
+    let session_id = uuid::Uuid::new_v4().to_string();
+    let first = serde_json::json!({
+        "id": "msg_error_1", "type": "message", "role": "assistant", "stop_reason": "tool_use",
+        "content": [
+            {"type": "text", "text": "I'll fetch that page."},
+            {"type": "server_tool_use", "id": "srvtoolu_error", "name": "web_fetch", "input": {"url": "https://blocked.example"}},
+            {"type": "tool_use", "id": "toolu_kyo979", "name": "list_datasources", "input": {}}
+        ],
+        "usage": {"input_tokens": 10, "output_tokens": 5, "server_tool_use": {"web_fetch_requests": 0}},
+    });
+    let second = serde_json::json!({
+        "id": "msg_error_2", "type": "message", "role": "assistant", "stop_reason": "end_turn",
+        "content": [
+            {"type": "web_fetch_tool_result", "tool_use_id": "srvtoolu_error", "content": {"error_code": "url_not_accessible"}},
+            {"type": "text", "text": "The page could not be fetched."}
+        ],
+        "usage": {"input_tokens": 20, "output_tokens": 10, "server_tool_use": {"web_fetch_requests": 1}},
+    });
+    let first = crate::anthropic::AnthropicClient::parse_response("claude", &first, None).expect("parse first");
+    let second = crate::anthropic::AnthropicClient::parse_response("claude", &second, None).expect("parse second");
+    let (user, assistant) = claim_durable_turn(&db, &key, &session_id, chrono::Utc::now().timestamp_millis(), 30_000).await;
+
+    let run = run_capturing_cards(CardRunInput {
+        db: &db, key: &key, session_id: &session_id, user: &user, assistant: &assistant,
+        prompt: "fetch https://blocked.example and list my datasources", config: anthropic_server_tool_config(),
+        script: vec![first, second],
+    }).await;
+    assert!(!run.answer.contains("**Sources**"), "there is no footer source to stand in: {}", run.answer);
+    let cards: Vec<_> = run.cards.iter().filter(|schema| schema["tool"] == "web_fetch").collect();
+    assert_eq!(cards.len(), 1, "the failed fetch still gets a card: {:?}", run.cards);
+    assert_eq!(cards[0]["input"]["url"], "https://blocked.example");
+    assert_eq!(cards[0]["output"]["url"], "https://blocked.example");
+    assert_eq!(cards[0]["output"]["available"], false);
+    assert_eq!(cards[0]["output"]["reason"], "url_not_accessible", "only the provider's own code");
+    assert!(cards[0]["output"].get("title").is_none(), "no page, so no title");
+}
+
+/// KYO-979: when the tool-use budget runs out with a deferred call still
+/// pending, the forced wrap-up response carries that call's result. It must go
+/// through the same recording as every other response: a card and a usage count.
+#[tokio::test]
+async fn a_wrap_up_response_carrying_a_pending_fetch_result_is_still_recorded() {
+    let db = crate::test_support::test_pool().await;
+    crate::test_support::seed_user_and_workspace(&db).await;
+    let key = Arc::new([7u8; 32]);
+    let session_id = uuid::Uuid::new_v4().to_string();
+    let captured = captured_fetch_message();
+    let (first, second) = deferred_server_call(&captured, 0, 1,
+        serde_json::json!({"web_fetch_requests": 0}), serde_json::json!({"web_fetch_requests": 1}));
+    let provider_id = first["content"][1]["id"].as_str().expect("id").to_string();
+    let url = first["content"][1]["input"]["url"].as_str().expect("url").to_string();
+    let first = crate::anthropic::AnthropicClient::parse_response("claude", &first, None).expect("parse first");
+    let second = crate::anthropic::AnthropicClient::parse_response("claude", &second, None).expect("parse second");
+    let (user, assistant) = claim_durable_turn(&db, &key, &session_id, chrono::Utc::now().timestamp_millis(), 30_000).await;
+    let mut config = anthropic_server_tool_config();
+    config.max_iterations = 1;
+
+    let capture = kyomi_test_tracing::capture_tracing();
+    let run = run_capturing_cards(CardRunInput {
+        db: &db, key: &key, session_id: &session_id, user: &user, assistant: &assistant,
+        prompt: "fetch the Rust site and list my datasources", config, script: vec![first, second],
+    }).await;
+    let line = capture.events_at(tracing::Level::INFO).into_iter()
+        .map(|(_, message)| message)
+        .find(|message| message.contains("provider web tool used"))
+        .expect("the wrap-up's provider web call is counted");
+    assert!(line.contains("tool=\"web_fetch\""), "{line}");
+    assert!(!run.answer.contains("**Sources**"), "the wrap-up card replaces its footer source: {}", run.answer);
+    let cards: Vec<_> = run.cards.iter().filter(|schema| schema["tool"] == "web_fetch").collect();
+    assert_eq!(cards.len(), 1, "the wrap-up result gets its card: {:?}", run.cards);
+    assert_eq!(cards[0]["input"]["url"], url);
+    assert_eq!(cards[0]["output"]["url"], url);
+    assert!(cards[0]["output"]["title"].as_str().expect("title").contains("Rust Programming Language"));
+    assert!(run.outcomes.iter().any(|(id, _)| id == &provider_id), "the card is recorded durably under the provider's call id");
+}
+
 #[tokio::test]
 async fn blocks_stored_through_the_legacy_insert_and_placeholder_paths_reload_too() {
     let db = crate::test_support::test_pool().await;
