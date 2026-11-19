@@ -121,6 +121,18 @@ async fn compaction_compacts_persists_and_restores_on_a_real_conversation() {
         .find(|message| message.contains("conversation compacted"))
         .expect("the run compacts at the low threshold");
     eprintln!("KYO-975 live: {compacted}");
+    let summary_log = capture
+        .events_at(tracing::Level::INFO)
+        .into_iter()
+        .map(|(_, message)| message)
+        .find(|message| message.contains("conversation compaction summary"))
+        .expect("the summary call logs which model wrote it");
+    assert!(
+        summary_log.contains(&format!("summary_model=\"{MODEL}\"")),
+        "{summary_log}"
+    );
+    assert!(summary_log.contains("fast_summary=true"), "{summary_log}");
+    eprintln!("KYO-975 live: {summary_log}");
 
     // Persisted state: encrypted summary + cut index.
     let raw = chat_service::get_session(&db, &session_id)
