@@ -514,6 +514,10 @@ impl LLMProvider for MeteredClient {
     fn context_window(&self) -> u32 {
         self.inner.context_window()
     }
+
+    fn context_window_source(&self) -> kyomi_core::llm_compaction::ContextWindowSource {
+        self.inner.context_window_source()
+    }
 }
 
 #[cfg(test)]
@@ -569,7 +573,8 @@ mod tests {
     }
 
     #[test]
-    fn metadata_lists_each_call_with_its_breakdown() {        let l = UsageLedger::default();
+    fn metadata_lists_each_call_with_its_breakdown() {
+        let l = UsageLedger::default();
         l.record("claude-sonnet-5-5", &response(10, 100, 5000, 0, 40));
         l.record("claude-sonnet-5-5", &response(20, 200, 0, 5000, 60));
         let m = l.extra_metadata().unwrap();
@@ -584,7 +589,8 @@ mod tests {
     }
 
     #[test]
-    fn billing_row_sums_cost_tokens_and_cache_for_the_whole_run() {        let l = UsageLedger::default();
+    fn billing_row_sums_cost_tokens_and_cache_for_the_whole_run() {
+        let l = UsageLedger::default();
         l.record("claude-sonnet-5-5", &response(10, 100, 5000, 0, 40));
         l.record("claude-sonnet-5-5", &response(20, 200, 0, 5000, 60));
         let row = l.billing_row(false, "anthropic", "m", "chat_agent").unwrap();

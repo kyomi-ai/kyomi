@@ -147,6 +147,20 @@ async fn compaction_compacts_persists_and_restores_on_a_real_conversation() {
         "the summary is stored encrypted, never as plaintext"
     );
 
+    // The turn's reported usage includes the summary call: it must equal the
+    // run's billed row, which shares the ledger (KYO-975).
+    if let kyomi_core::DbPool::Sqlite(sq) = &db {
+        let (row_in, row_out): (i32, i32) = sqlx::query_as(
+            "SELECT input_tokens, output_tokens FROM api_usage_log ORDER BY id DESC LIMIT 1",
+        )
+        .fetch_one(sq)
+        .await
+        .expect("the run's usage row");
+        let reported = first.token_usage.as_ref().expect("reported token usage");
+        assert_eq!(reported["input_tokens"].as_i64(), Some(i64::from(row_in)));
+        assert_eq!(reported["output_tokens"].as_i64(), Some(i64::from(row_out)));
+    }
+
     // Tool-pair safety in the kept tail. `execute_agent_chat` puts the system
     // prompt first, so the DB index is the state index minus one.
     let messages = chat_service::get_agent_messages(&db, &encryption_key, &session_id, None)

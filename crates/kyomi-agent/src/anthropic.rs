@@ -104,6 +104,18 @@ impl AnthropicClient {
             .unwrap_or_else(|| crate::anthropic_pricing::context_window(&self.base.model))
     }
 
+    /// Whether [`Self::context_window`] is the model's own value or the table's
+    /// 200K default for an unrecognised model (KYO-975).
+    pub fn context_window_source(&self) -> kyomi_core::llm_compaction::ContextWindowSource {
+        if self.context_window_override.is_some()
+            || crate::anthropic_pricing::is_known_model(&self.base.model)
+        {
+            kyomi_core::llm_compaction::ContextWindowSource::Provider
+        } else {
+            kyomi_core::llm_compaction::ContextWindowSource::Default
+        }
+    }
+
     /// Return the model name this client is configured with.
     pub fn model(&self) -> &str {
         self.base.model()
@@ -1524,6 +1536,26 @@ mod tests {
         let r = AnthropicClient::parse_response("claude-future-9", &response, None).unwrap();
         assert!(r.cost.unwrap() > 0.0);
         assert!(!r.call_detail.unwrap().price_known);
+    }
+
+    #[test]
+    fn context_window_source_distinguishes_a_real_model_from_the_200k_fallback() {
+        use kyomi_core::llm_compaction::ContextWindowSource;
+
+        let known = AnthropicClient::new("k".into(), Some("claude-sonnet-5-5".into())).unwrap();
+        assert_eq!(known.context_window_source(), ContextWindowSource::Provider);
+
+        let unknown = AnthropicClient::new("k".into(), Some("claude-future-9".into())).unwrap();
+        assert_eq!(unknown.context_window(), 200_000);
+        assert_eq!(
+            unknown.context_window_source(),
+            ContextWindowSource::Default,
+            "the 200K table fallback is not a provider-reported window"
+        );
+
+        let mut explicit = unknown;
+        explicit.set_context_window(300_000);
+        assert_eq!(explicit.context_window_source(), ContextWindowSource::Provider);
     }
 
     #[test]

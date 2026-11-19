@@ -142,6 +142,26 @@ pub fn resolve(
     instance: &LlmCompactionSettings,
 ) -> ResolvedCompaction {
     let (context_window, context_window_source) = resolve_context_window(provider_reported_window);
+    resolve_with_source(
+        context_window,
+        context_window_source,
+        workspace,
+        instance,
+    )
+}
+
+/// [`resolve`] with the window source reported by the provider itself.
+///
+/// Anthropic reports its table's 200K fallback for an unrecognised model, so a
+/// plain non-zero value cannot distinguish a real 200K model from the default;
+/// the provider's own window-source method supplies the correct label for the
+/// run log.
+pub fn resolve_with_source(
+    context_window: u32,
+    context_window_source: ContextWindowSource,
+    workspace: &LlmCompactionSettings,
+    instance: &LlmCompactionSettings,
+) -> ResolvedCompaction {
     let (threshold_tokens, threshold_source) = if let Some(tokens) = workspace.threshold_tokens {
         (tokens, ThresholdSource::WorkspaceAbsolute)
     } else if let Some(tokens) = instance.threshold_tokens {

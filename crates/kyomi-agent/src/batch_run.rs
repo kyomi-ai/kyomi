@@ -463,6 +463,10 @@ impl LLMProvider for BatchingProvider {
     fn context_window(&self) -> u32 {
         self.inner.context_window()
     }
+
+    fn context_window_source(&self) -> kyomi_core::llm_compaction::ContextWindowSource {
+        self.inner.context_window_source()
+    }
 }
 
 #[cfg(test)]

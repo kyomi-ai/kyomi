@@ -410,7 +410,8 @@ pub async fn update_compaction_settings(values: CompactionValues) -> Result<(), 
 }
 
 #[cfg(feature = "ssr")]
-fn watch_llm_values(s: &kyomi_core::watch_llm::WatchLlmSettings) -> WatchLlmValues {    WatchLlmValues {
+fn watch_llm_values(s: &kyomi_core::watch_llm::WatchLlmSettings) -> WatchLlmValues {
+    WatchLlmValues {
         provider: s.provider.clone().unwrap_or_default(),
         model: s.model.clone().unwrap_or_default(),
         base_url: s.base_url.clone().unwrap_or_default(),

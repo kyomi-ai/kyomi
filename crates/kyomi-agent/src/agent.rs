@@ -753,8 +753,9 @@ impl CustomAgent {
 
             // Build LLM context (handles compaction), then append any
             // ephemeral ChartML retry messages so the LLM sees them.
-            accumulated_tokens += self.maybe_compact(&cancel_token).await?;
-            let mut llm_messages = self.build_llm_context();
+            let (mut llm_messages, compaction_tokens) =
+                self.maybe_compact(&cancel_token).await?;
+            accumulated_tokens += compaction_tokens;
             // A `pause_turn` continuation must end with the paused assistant message
             // exactly as received: nothing may follow it.
             let pausing = last_was_pause;
@@ -1167,15 +1168,7 @@ impl CustomAgent {
         // The wrap-up is another provider call, so it gets the same compaction
         // decision as every loop iteration (KYO-975). Its own summary tokens
         // cannot affect a later guard (the wrap-up is the final call).
-        self.maybe_compact(&cancel_token).await?;
-
-        // Forced wrap-up turn: everything gathered so far, plus an ephemeral
-        // instruction to answer from it, and **no tools**.  With an empty tool
-        // slice every provider omits the `tools` key entirely, so the model
-        // cannot request another tool and must produce prose.  The instruction
-        // stays out of `self.state.messages` for the same reason the budget
-        // notice does — it must never reach the transcript.
-        let mut wrap_up_messages = self.build_llm_context();
+        let (mut wrap_up_messages, _) = self.maybe_compact(&cancel_token).await?;
         // Carry over any ChartML retry messages still pending when the budget
         // ran out, in the same order the loop above uses (context, then
         // retry messages, then the most-recent ephemeral instruction last —
@@ -1592,55 +1585,62 @@ impl CustomAgent {
         context
     }
 
-    /// Summarise older turns once the input reaches the run's resolved
-    /// threshold (KYO-975).
+    /// Compact if needed and return the message list to send.
     ///
     /// Called at the start of every loop iteration — so it sees the previous
-    /// model call's input size, and also compacts a conversation that is
-    /// already over the threshold before its first new call — and before the
-    /// forced wrap-up call. The adapter persists the summary and cut index with
-    /// the session, so the next run starts from the compacted state.
+    /// model call's input size, and also estimates the new turn's context (a
+    /// restored `last_input_tokens` describes the *previous* request, not the
+    /// message the user just added) — and before the forced wrap-up call. The
+    /// adapter persists the summary and cut index with the session, so the next
+    /// run starts from the compacted state.
     ///
-    /// The estimate is taken over the context that would actually be sent
-    /// (`build_llm_context`), never over `state.messages`: the latter still
-    /// holds the turns an earlier compaction replaced, so counting it would
-    /// re-trigger compaction on every iteration.
+    /// The estimate is taken over the context that would actually be sent,
+    /// never over `state.messages`: the latter still holds the turns an earlier
+    /// compaction replaced, so counting it would re-trigger compaction on every
+    /// iteration.
     ///
     /// A failed or empty summary fails the run. Carrying on uncompacted would
     /// only defer the context-limit failure to the next provider call.
     ///
-    /// Returns the summary call's billable tokens (0 when nothing compacted), so
-    /// the run's `max_total_tokens` guard covers the extra call too.
+    /// Returns the context to send and the summary call's billable tokens (0
+    /// when nothing compacted), so the run's `max_total_tokens` guard covers
+    /// the extra call too.
     async fn maybe_compact(
         &mut self,
         cancel_token: &CancellationToken,
-    ) -> kyomi_core::Result<u64> {
+    ) -> kyomi_core::Result<(Vec<Message>, u64)> {
+        // Built once: the caller sends exactly this list, so the decision and
+        // the request cannot disagree.
+        let context = self.build_llm_context();
         let Some(threshold_tokens) = self.compaction.as_ref().map(|c| c.threshold_tokens) else {
-            return Ok(0);
+            return Ok((context, 0));
         };
-        let actual = (self.state.last_input_tokens > 0).then_some(self.state.last_input_tokens);
-        if actual.is_some_and(|tokens| tokens < threshold_tokens) {
-            return Ok(0);
+        // A `pause_turn` chain is one logical answer whose blocks must be
+        // resent exactly as received. Compacting it would rewrite the prefix
+        // mid-chain (and a failed chain is truncated back to its start), so wait
+        // until the chain completes.
+        if self.pause_chain_start.is_some() {
+            return Ok((context, 0));
         }
+        let actual = (self.state.last_input_tokens > 0).then_some(self.state.last_input_tokens);
 
         // Strip the system prompt: `split_messages_for_compaction` and the
         // summary prompt take only the conversation turns.
-        let mut context = self.build_llm_context();
-        let system_messages = if context
+        let system_offset = usize::from(
+            context
+                .first()
+                .is_some_and(|message| message.role == crate::types::MessageRole::System),
+        );
+        let system_prompt_len = context
             .first()
-            .is_some_and(|message| message.role == crate::types::MessageRole::System)
-        {
-            let len = context.remove(0).content.len();
-            (len, 1)
-        } else {
-            (0, 0)
-        };
-        let (system_prompt_len, system_offset) = system_messages;
-        if !crate::compaction::should_compact(actual, &context, system_prompt_len, threshold_tokens) {
-            return Ok(0);
+            .filter(|_| system_offset == 1)
+            .map_or(0, |message| message.content.len());
+        let conversation = &context[system_offset..];
+        if !crate::compaction::should_compact(actual, conversation, system_prompt_len, threshold_tokens) {
+            return Ok((context, 0));
         }
 
-        let (to_summarize, to_keep) = crate::compaction::split_messages_for_compaction(&context);
+        let (to_summarize, to_keep) = crate::compaction::split_messages_for_compaction(conversation);
         // When a summary already exists, `build_llm_context` starts with the
         // old summary and its acknowledgment; only the messages after them are
         // real state entries that the new cut index can advance over.
@@ -1651,7 +1651,7 @@ impl CustomAgent {
             to_summarize.len()
         };
         if summarised_state_messages == 0 {
-            return Ok(0);
+            return Ok((context, 0));
         }
 
         let prompt = crate::compaction::build_compaction_prompt(&to_summarize);
@@ -1661,8 +1661,30 @@ impl CustomAgent {
                 .compaction
                 .as_ref()
                 .expect("checked for the threshold above");
+            // The fast/title model writes the summary when it can accept the
+            // region. Otherwise the chat model (whose window defines the
+            // threshold) does: sending a 750K-token summary to a 200K title
+            // model would fail the run at exactly the point compaction is meant
+            // to keep it going.
+            let prompt_tokens = (prompt.len() / crate::compaction::CHARS_PER_TOKEN as usize) as u64;
+            let fast_window = u64::from(compaction.client.context_window());
+            let required = prompt_tokens + prompt_tokens / 10 + u64::from(compaction.options.max_tokens);
+            let use_fast = fast_window > 0 && required <= fast_window;
+            let summary_client: &dyn LLMProvider = if use_fast {
+                compaction.client.as_ref()
+            } else {
+                self.client.as_ref()
+            };
+            info!(
+                session_id = self.tool_context.session_id.as_deref().unwrap_or(""),
+                summary_model = summary_client.model(),
+                fast_summary = use_fast,
+                summary_prompt_tokens = prompt_tokens,
+                fast_window,
+                "conversation compaction summary"
+            );
             tokio::select! {
-                result = compaction.client.complete(
+                result = summary_client.complete(
                     &summary_messages,
                     &[],
                     &compaction.options,
@@ -1702,7 +1724,7 @@ impl CustomAgent {
         // next call sends; let the next check use the (small) estimate until
         // the provider reports the new size.
         self.state.last_input_tokens = 0;
-        Ok(call_tokens)
+        Ok((self.build_llm_context(), call_tokens))
     }
 
     // -----------------------------------------------------------------------
@@ -4611,6 +4633,128 @@ Second chart:\n{CHARTML_STRIPPED_NOTE}\nDone."
             summary_calls.lock().expect("summary call log").len(),
             1,
             "the summarized-away messages must not re-trigger compaction"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_open_pause_chain_is_not_compacted() {
+        let summary_calls = Arc::new(Mutex::new(Vec::new()));
+        let (mut agent, _calls) = scripted_agent(1, vec![], Reply::Text("unused".into())).await;
+        agent.set_compaction(compaction_runtime(
+            1_000,
+            vec![Reply::Text("must not be used".into())],
+            Arc::clone(&summary_calls),
+        ));
+        {
+            let state = agent.state_mut();
+            state.messages.push(Message::system("system prompt"));
+            for _ in 0..14 {
+                state.messages.push(Message::user("x".repeat(4_000)));
+            }
+            state.last_input_tokens = 1_000;
+        }
+        agent.pause_chain_start = Some(agent.state().messages.len() - 1);
+
+        let (context, summary_tokens) = agent
+            .maybe_compact(&CancellationToken::new())
+            .await
+            .expect("an open chain is simply left alone");
+        assert_eq!(summary_tokens, 0);
+        assert!(summary_calls.lock().expect("summary call log").is_empty());
+        assert!(context.len() >= agent.state().messages.len());
+        assert_eq!(agent.state().compacted_summary, None);
+    }
+
+    #[tokio::test]
+    async fn a_second_compaction_advances_the_cut_index_and_replaces_the_summary() {
+        let summary_calls = Arc::new(Mutex::new(Vec::new()));
+        let (mut agent, _calls) = scripted_agent(1, vec![], Reply::Text("unused".into())).await;
+        agent.set_compaction(compaction_runtime(
+            1_000,
+            vec![Reply::Text("second summary".into())],
+            Arc::clone(&summary_calls),
+        ));
+        {
+            let state = agent.state_mut();
+            state.messages.push(Message::system("system prompt"));
+            for i in 0..10 {
+                state.messages.push(Message::user(format!("old {i}")));
+            }
+            state.compacted_summary = Some("first summary".into());
+            state.messages_since_compaction_index = 11; // system + 10 old
+            for i in 0..10 {
+                state.messages.push(Message::user(format!("recent {i}")));
+            }
+            state.last_input_tokens = 1_000;
+        }
+
+        let (context, _summary_tokens) = agent
+            .maybe_compact(&CancellationToken::new())
+            .await
+            .expect("the second compaction succeeds");
+        assert_eq!(summary_calls.lock().expect("summary call log").len(), 1);
+        assert_eq!(
+            agent.state().compacted_summary.as_deref(),
+            Some("second summary")
+        );
+        assert_eq!(
+            agent.state().messages_since_compaction_index, 15,
+            "the old index (11) advances over the 4 recent messages summarised"
+        );
+        assert!(context.iter().any(|m| m.content.contains("second summary")));
+    }
+
+    #[tokio::test]
+    async fn a_summary_that_cannot_fit_the_fast_model_uses_the_chat_model() {
+        struct SmallWindowClient;
+        #[async_trait::async_trait]
+        impl LLMProvider for SmallWindowClient {
+            async fn complete(
+                &self,
+                _messages: &[Message],
+                _tools: &[Tool],
+                _options: &crate::provider::RequestOptions,
+                _user_names: &HashMap<String, String>,
+            ) -> kyomi_core::Result<crate::types::LLMResponse> {
+                panic!("the fast summary client cannot fit the region and must not be called")
+            }
+            fn model(&self) -> &str {
+                "small-window-summariser"
+            }
+            fn context_window(&self) -> u32 {
+                10
+            }
+        }
+
+        // Three tool rounds cross 1000 tokens; the fourth call writes the
+        // summary through the chat client, and the fifth is the final answer.
+        let (mut agent, _calls) = scripted_agent(
+            10,
+            vec![
+                Reply::ToolCallWithUsage(billable_usage(1_000)),
+                Reply::ToolCallWithUsage(billable_usage(1_000)),
+                Reply::ToolCallWithUsage(billable_usage(1_000)),
+                Reply::Text("summary via chat model".into()),
+                Reply::Text("final".into()),
+            ],
+            Reply::Text("unexpected".into()),
+        )
+        .await;
+        agent.state_mut().messages.push(Message::system("system prompt"));
+        agent.set_compaction(crate::compaction::CompactionRuntime {
+            threshold_tokens: 1_000,
+            client: Box::new(SmallWindowClient),
+            options: crate::provider::RequestOptions::new(512),
+        });
+
+        let answer = agent
+            .chat("first question", CancellationToken::new(), None, None, None)
+            .await
+            .expect("the chat model writes the summary");
+        assert_eq!(answer, "final");
+        assert_eq!(
+            agent.state().compacted_summary.as_deref(),
+            Some("summary via chat model")
         );
     }
 

@@ -142,6 +142,19 @@ pub trait LLMProvider: Send + Sync {
     /// Return the model's context window size in tokens (0 = unknown).
     fn context_window(&self) -> u32 { 0 }
 
+    /// Whether [`Self::context_window`] is the model's own value or the
+    /// documented default substituted for a model the provider does not know
+    /// (KYO-975). The default implementation reports the default for 0 and the
+    /// model's own value otherwise; Anthropic overrides it because it reports
+    /// its table's 200K fallback as a non-zero number.
+    fn context_window_source(&self) -> kyomi_core::llm_compaction::ContextWindowSource {
+        if self.context_window() > 0 {
+            kyomi_core::llm_compaction::ContextWindowSource::Provider
+        } else {
+            kyomi_core::llm_compaction::ContextWindowSource::Default
+        }
+    }
+
     /// The provider's batch API, when it has one (KYO-973). `None` means
     /// batch mode is unsupported for this provider and endpoint.
     fn batch(&self) -> Option<&dyn crate::batch::BatchLLMProvider> {
@@ -300,6 +313,10 @@ impl LLMProvider for AnthropicClient {
         AnthropicClient::context_window(self)
     }
 
+    fn context_window_source(&self) -> kyomi_core::llm_compaction::ContextWindowSource {
+        AnthropicClient::context_window_source(self)
+    }
+
     fn batch(&self) -> Option<&dyn crate::batch::BatchLLMProvider> {
         // The adapter exists for any Anthropic client; whether a custom base
         // URL (a proxy) may be used for batches is a configuration decision
@@ -428,6 +445,24 @@ fn build_provider_from_workspace(
     create_provider(resolve_workspace_provider_config_for(ws_config, fallback_config, requested_model)?)
 }
 
+/// Create a metered client for a background call (the compaction summary) whose
+/// model is the workspace `title_model` / `LLM_TITLE_MODEL`.
+///
+/// The client deliberately has **no** chat context-window override
+/// (`LLM_CONTEXT_WINDOW` / the workspace `context_window`): that value describes
+/// the chat model. The summary model's own window must be reported so the agent
+/// can decide whether it can accept the summary request (KYO-975).
+pub fn create_background_provider_from_workspace(
+    ws_config: &kyomi_auth::workspace_ai_config::WorkspaceAiConfig,
+    fallback_config: &kyomi_core::Config,
+    requested_model: Option<&str>,
+) -> kyomi_core::Result<Box<dyn LLMProvider>> {
+    let mut config =
+        resolve_workspace_provider_config_for(ws_config, fallback_config, requested_model)?;
+    config.context_window = 0;
+    create_provider(config)
+}
+
 /// The provider configuration [`create_provider_from_workspace`] builds the
 /// client from. Public so other code that depends on *which* provider and base
 /// URL are in effect for a workspace asks the same function instead of
@@ -511,6 +546,7 @@ pub fn resolve_compaction(
     ws_config: &kyomi_auth::workspace_ai_config::WorkspaceAiConfig,
     app_config: &kyomi_core::Config,
     provider_context_window: u32,
+    context_window_source: kyomi_core::llm_compaction::ContextWindowSource,
 ) -> kyomi_core::llm_compaction::ResolvedCompaction {
     let none = kyomi_core::llm_compaction::LlmCompactionSettings::default();
     let workspace = if app_config.self_hosted {
@@ -518,8 +554,9 @@ pub fn resolve_compaction(
     } else {
         &none
     };
-    kyomi_core::llm_compaction::resolve(
+    kyomi_core::llm_compaction::resolve_with_source(
         provider_context_window,
+        context_window_source,
         workspace,
         &app_config.llm_compaction,
     )
@@ -874,7 +911,7 @@ mod tests {
 
         let mut saas = kyomi_core::Config::test_config();
         saas.self_hosted = false;
-        let resolved = resolve_compaction(&ws, &saas, 200_000);
+        let resolved = resolve_compaction(&ws, &saas, 200_000, kyomi_core::llm_compaction::ContextWindowSource::Provider);
         assert_eq!(
             resolved.threshold_tokens, 150_000,
             "SaaS ignores the workspace fraction and uses the instance/default value"
@@ -883,13 +920,13 @@ mod tests {
 
         let mut self_hosted = kyomi_core::Config::test_config();
         self_hosted.self_hosted = true;
-        let resolved = resolve_compaction(&ws, &self_hosted, 200_000);
+        let resolved = resolve_compaction(&ws, &self_hosted, 200_000, kyomi_core::llm_compaction::ContextWindowSource::Provider);
         assert_eq!(resolved.threshold_tokens, 100_000);
         assert_eq!(resolved.threshold_source, ThresholdSource::WorkspaceFraction);
 
         // An instance absolute threshold beats the workspace fraction.
         self_hosted.llm_compaction.threshold_tokens = Some(90_000);
-        let resolved = resolve_compaction(&ws, &self_hosted, 200_000);
+        let resolved = resolve_compaction(&ws, &self_hosted, 200_000, kyomi_core::llm_compaction::ContextWindowSource::Provider);
         assert_eq!(resolved.threshold_tokens, 90_000);
         assert_eq!(resolved.threshold_source, ThresholdSource::InstanceAbsolute);
     }

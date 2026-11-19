@@ -216,6 +216,13 @@ pub fn context_window(model: &str) -> u32 {
     family(model).map_or(WINDOW_200K, |f| f.context_window)
 }
 
+/// Whether the model is in the pricing/window table. An unknown model gets
+/// [`WINDOW_200K`] as a documented default, which the run log labels as such
+/// rather than as a provider-reported value (KYO-975).
+pub fn is_known_model(model: &str) -> bool {
+    family(model).is_some()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

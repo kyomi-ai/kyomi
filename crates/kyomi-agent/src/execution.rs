@@ -34,7 +34,8 @@ use crate::adapter::{AssistantMessagePersistence, ChatAgentAdapter, UserMessageP
 use crate::agent::{AgentConfig, CustomAgent};
 use crate::prompt;
 use crate::provider::{
-    create_provider, create_provider_from_workspace, resolve_provider_config, LLMProvider, ProviderKind,
+    create_background_provider_from_workspace, create_provider, create_provider_from_workspace,
+    resolve_provider_config, LLMProvider, ProviderKind,
 };
 use crate::thinking::AgentThinkingTracker;
 use crate::tools::web::WEB_TOOL_NAMES;
@@ -581,7 +582,7 @@ pub async fn execute_agent_chat_with(
         }
         ws_config
     };
-    let (client, provider_kind, is_byok, sampling, llm_base_url) = {
+    let (client, provider_kind, is_byok, sampling, llm_base_url, watch_summary_provider) = {
         // Resolved once per execution so the value is stable for the whole
         // conversation turn (effort changes invalidate Anthropic's prompt
         // cache).
@@ -601,6 +602,12 @@ pub async fn execute_agent_chat_with(
             let kind = selection.provider_config.provider;
             let llm_base_url = selection.provider_config.base_url.clone();
             let failure_policy = selection.resolved.batch_failure;
+            // A realtime watch may have no main LLM configured at all; its
+            // compaction summary must use the watch connection it already
+            // chose (and that connection's own window, not the chat's).
+            let mut summary_config = selection.provider_config.clone();
+            summary_config.context_window = 0;
+            let summary_provider = create_provider(summary_config)?;
             let mut inner = create_provider(selection.provider_config)?;
             if let Some(run) = &extras.watch_batch {
                 inner = Box::new(crate::batch_run::BatchingProvider::new(
@@ -623,14 +630,14 @@ pub async fn execute_agent_chat_with(
             // A batch run is billed from its persisted calls when it completes
             // (`watch_execution::bill_batch_run`); the in-memory ledger of this
             // attempt is never billed for it (see step 14b).
-            (crate::usage_ledger::MeteredClient::new(inner), kind, selection.workspace_billed, sampling, llm_base_url)
+            (crate::usage_ledger::MeteredClient::new(inner), kind, selection.workspace_billed, sampling, llm_base_url, Some(summary_provider))
         } else {
             let is_byok = is_byok(&ws_config, app_config);
             let llm_config = crate::provider::resolve_workspace_provider_config(&ws_config, app_config)?;
             let provider_kind = llm_config.provider;
             let llm_base_url = llm_config.base_url;
             let client = create_provider_from_workspace(&ws_config, app_config, None)?;
-            (client, provider_kind, is_byok, sampling, llm_base_url)
+            (client, provider_kind, is_byok, sampling, llm_base_url, None)
         }
     };
     // Read the authoritative model name from the provider (not from config defaults).
@@ -647,9 +654,22 @@ pub async fn execute_agent_chat_with(
     } else {
         provider_context_window
     };
-    let resolved_compaction =
-        crate::provider::resolve_compaction(&ws_config, app_config, resolved_context_window);
-    // A batch watch run talks to the provider only through its batch API and is
+    let resolved_compaction = {
+        // An explicit caller/workspace/env window is a provider value; otherwise
+        // ask the provider whether its number is the model's own or the
+        // documented default (an unknown Anthropic model reports 200K, KYO-975).
+        let source = if config.context_window > 0 {
+            kyomi_core::llm_compaction::ContextWindowSource::Provider
+        } else {
+            client.context_window_source()
+        };
+        crate::provider::resolve_compaction(
+            &ws_config,
+            app_config,
+            resolved_context_window,
+            source,
+        )
+    };    // A batch watch run talks to the provider only through its batch API and is
     // billed from its persisted calls, so it cannot make the extra summary call.
     let compaction_enabled = extras.watch_batch.is_none();
     info!(
@@ -763,19 +783,40 @@ pub async fn execute_agent_chat_with(
     let mut agent = CustomAgent::new(Box::new(client), agent_config, registry, tool_context, user_names);
 
     // 6b. Wire conversation compaction (KYO-975). The summary is written by the
-    // fast/title model, and its calls join this run's usage ledger so they are
+    // fast/title model (or, for a realtime watch, the watch connection it
+    // already uses), and its calls join this run's usage ledger so they are
     // billed with the run (including the durable drop/lease safety).
     if compaction_enabled {
-        let summary_model = ws_config
-            .title_model
-            .clone()
-            .or_else(|| app_config.llm_title_model.clone());
+        let summary_provider = match watch_summary_provider {
+            Some(provider) => provider,
+            None => {
+                let summary_model = ws_config
+                    .title_model
+                    .clone()
+                    .or_else(|| app_config.llm_title_model.clone());
+                create_background_provider_from_workspace(
+                    &ws_config,
+                    app_config,
+                    summary_model.as_deref(),
+                )?
+            }
+        };
+        // A watch summary must use the sampling its own connection accepted;
+        // every other run uses the title/background profile.
+        let options = if config.llm_profile == kyomi_core::llm_sampling::LlmProfile::Watch {
+            crate::provider::RequestOptions::new(4_096)
+                .with_temperature(sampling.temperature.clone())
+                .with_reasoning_effort(sampling.reasoning_effort.clone())
+        } else {
+            crate::sampling::background_options(&ws_config, app_config, 4_096)
+        };
         let summary_client =
-            create_provider_from_workspace(&ws_config, app_config, summary_model.as_deref())?;
+            crate::usage_ledger::MeteredClient::new(summary_provider)
+                .with_ledger(usage_ledger.clone());
         agent.set_compaction(crate::compaction::CompactionRuntime {
             threshold_tokens: resolved_compaction.threshold_tokens,
-            client: Box::new(summary_client.with_ledger(usage_ledger.clone())),
-            options: crate::sampling::background_options(&ws_config, app_config, 4_096),
+            client: Box::new(summary_client),
+            options,
         });
     }
 
@@ -830,9 +871,9 @@ pub async fn execute_agent_chat_with(
         })?;
 
     // 9. Create thinking tracker.
-    // The context window was resolved once near the top (provider request
-    // window, or the caller's explicit value) so the tracker and the compaction
-    // threshold cannot disagree.
+    // The tracker uses the provider-reported window (0 when the provider knows
+    // none); the compaction threshold uses the documented default in that case.
+    // Both are derived from the one resolution near the top.
     // Only a `CallerPreInserted` assistant row (chat) has a placeholder a
     // mid-run read can already see — copilot/Slack/watch (`AdapterInserts`)
     // have no row to flush into until `persist_after_chat` inserts one at
@@ -926,16 +967,18 @@ pub async fn execute_agent_chat_with(
         t.finalize();
         let events = t.get_events_for_storage();
         let ft = t.full_texts_for_storage().clone();
-        let inp = t.total_input_tokens();
-        let out = t.total_output_tokens();
-        let cost = t.total_cost();
         let ctx = t.last_input_tokens();
         let ctx_win = t.context_window();
+        // Totals come from the usage ledger, not the tracker: the ledger also
+        // holds the compaction summary call (KYO-975), so the turn's reported
+        // usage matches the `api_usage_log` row that bills it. The context
+        // figures stay the conversation's own.
+        let totals = usage_ledger.totals();
         let usage = serde_json::json!({
-            "input_tokens": inp,
-            "output_tokens": out,
-            "total_tokens": inp + out,
-            "cost": cost,
+            "input_tokens": totals.prompt_tokens(),
+            "output_tokens": totals.output_tokens,
+            "total_tokens": totals.prompt_tokens() + totals.output_tokens,
+            "cost": totals.cost_usd,
             "context_tokens": ctx,
             "context_window": ctx_win,
         });
