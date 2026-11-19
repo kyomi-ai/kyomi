@@ -1165,8 +1165,9 @@ impl CustomAgent {
             return Err(kyomi_core::Error::Internal("Request cancelled".into()));
         }
         // The wrap-up is another provider call, so it gets the same compaction
-        // decision as every loop iteration (KYO-975).
-        accumulated_tokens += self.maybe_compact(&cancel_token).await?;
+        // decision as every loop iteration (KYO-975). Its own summary tokens
+        // cannot affect a later guard (the wrap-up is the final call).
+        self.maybe_compact(&cancel_token).await?;
 
         // Forced wrap-up turn: everything gathered so far, plus an ephemeral
         // instruction to answer from it, and **no tools**.  With an empty tool
