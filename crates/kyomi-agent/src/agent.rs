@@ -1593,11 +1593,11 @@ impl CustomAgent {
     /// Compact if needed and return the message list to send.
     ///
     /// Called at the start of every loop iteration — so it sees the previous
-    /// model call's input size, and also estimates the new turn's context (a
-    /// restored `last_input_tokens` describes the *previous* request, not the
-    /// message the user just added) — and before the forced wrap-up call. The
-    /// adapter persists the summary and cut index with the session, so the next
-    /// run starts from the compacted state.
+    /// model call's input size, and also estimates the context of the new turn
+    /// (the previous count alone would miss the message the user just added) —
+    /// and before the forced wrap-up call. The adapter persists the summary and
+    /// cut index with the session, so the next run starts from the compacted
+    /// state.
     ///
     /// The estimate is taken over the context that would actually be sent,
     /// never over `state.messages`: the latter still holds the turns an earlier

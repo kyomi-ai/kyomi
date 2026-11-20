@@ -375,12 +375,6 @@ impl ChatAgentAdapter {
             {
                 state.messages_since_compaction_index = idx as usize;
             }
-            if let Some(lit) = agent_state
-                .get("last_input_tokens")
-                .and_then(|v| v.as_u64())
-            {
-                state.last_input_tokens = lit as u32;
-            }
         }
 
         // Drop the row the caller already persisted before calling chat()
