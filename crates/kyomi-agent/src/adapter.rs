@@ -463,7 +463,6 @@ impl ChatAgentAdapter {
                 "global_iteration": state.global_iteration,
                 "compacted_summary": state.compacted_summary,
                 "messages_since_compaction_index": state.messages_since_compaction_index,
-                "last_input_tokens": state.last_input_tokens,
             }
         });
 

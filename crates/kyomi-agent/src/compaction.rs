@@ -333,9 +333,9 @@ mod tests {
 
     #[test]
     fn a_one_million_token_model_compacts_at_the_derived_threshold_not_150k() {
-        use kyomi_core::llm_compaction::{LlmCompactionSettings, resolve};
+        use kyomi_core::llm_compaction::{ContextWindowSource, LlmCompactionSettings, resolve_with_source};
 
-        let resolved = resolve(1_000_000, &LlmCompactionSettings::default(), &LlmCompactionSettings::default());
+        let resolved = resolve_with_source(1_000_000, ContextWindowSource::Provider, &LlmCompactionSettings::default(), &LlmCompactionSettings::default());
         assert_eq!(resolved.threshold_tokens, 750_000);
         assert!(!should_compact(Some(150_000), &[], 0, resolved.threshold_tokens));
         assert!(!should_compact(Some(749_999), &[], 0, resolved.threshold_tokens));
@@ -345,9 +345,9 @@ mod tests {
 
     #[test]
     fn a_two_hundred_thousand_token_model_compacts_at_its_own_threshold() {
-        use kyomi_core::llm_compaction::{LlmCompactionSettings, resolve};
+        use kyomi_core::llm_compaction::{ContextWindowSource, LlmCompactionSettings, resolve_with_source};
 
-        let resolved = resolve(200_000, &LlmCompactionSettings::default(), &LlmCompactionSettings::default());
+        let resolved = resolve_with_source(200_000, ContextWindowSource::Provider, &LlmCompactionSettings::default(), &LlmCompactionSettings::default());
         assert_eq!(resolved.threshold_tokens, 150_000);
         assert!(!should_compact(Some(149_999), &[], 0, resolved.threshold_tokens));
         assert!(should_compact(Some(150_000), &[], 0, resolved.threshold_tokens));
@@ -356,9 +356,9 @@ mod tests {
 
     #[test]
     fn an_unknown_model_uses_the_documented_default_window() {
-        use kyomi_core::llm_compaction::{ContextWindowSource, LlmCompactionSettings, resolve};
+        use kyomi_core::llm_compaction::{ContextWindowSource, LlmCompactionSettings, resolve_with_source};
 
-        let resolved = resolve(0, &LlmCompactionSettings::default(), &LlmCompactionSettings::default());
+        let resolved = resolve_with_source(0, ContextWindowSource::Default, &LlmCompactionSettings::default(), &LlmCompactionSettings::default());
         assert_eq!(resolved.context_window, kyomi_core::llm_compaction::DEFAULT_CONTEXT_WINDOW);
         assert_eq!(resolved.context_window_source, ContextWindowSource::Default);
         assert_eq!(resolved.threshold_tokens, 150_000);

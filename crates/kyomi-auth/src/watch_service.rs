@@ -2358,6 +2358,10 @@ pub async fn create_chat_session_from_alert(
         }
 
         state_val["timestamp"] = serde_json::json!(Utc::now().to_rfc3339());
+        // The loader no longer restores a persisted input count.
+        if let Some(map) = state_val.as_object_mut() {
+            map.remove("last_input_tokens");
+        }
 
         let config = serde_json::json!({ "agent_state": state_val });
         if let Err(e) = chat_service::update_session(db, &session_id, None, None, Some(&config))
@@ -2379,7 +2383,6 @@ pub async fn create_chat_session_from_alert(
             "global_iteration": 1,
             "compacted_summary": null,
             "messages_since_compaction_index": 0,
-            "last_input_tokens": 0,
             "config": {
                 "max_iterations": 25,
             }

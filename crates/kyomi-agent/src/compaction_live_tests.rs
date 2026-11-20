@@ -9,22 +9,74 @@
 //!     compaction_live_tests -- --ignored --nocapture --test-threads=1
 //! ```
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use crate::execution::{AgentExecutionConfig, AgentExecutionEnv, execute_agent_chat};
+use crate::provider::{LLMProvider, LLMProviderConfig, ProviderKind, RequestOptions, create_provider};
+use crate::types::Message;
 use kyomi_auth::{chat_service, websocket::WebSocketManager};
 use kyomi_core::enums::WorkspaceRole;
 use kyomi_core::{kv_store_memory::InMemoryKVStore, platform::PlatformRegistry};
 
 const MODEL: &str = "claude-haiku-5-5";
-/// Below the seeded history's estimate and above the compacted context, so the
-/// run compacts once with more than `MESSAGES_TO_KEEP` turns to summarise.
+/// Below the seeded history's estimate and above the compacted context plus
+/// the fixed request prefix, so the run compacts once and then stays below it.
 const THRESHOLD: u32 = 15_000;
 
 fn key() -> String {
     std::env::var("ANTHROPIC_API_KEY").expect("ANTHROPIC_API_KEY (live tests only)")
+}
+
+/// One real Anthropic web-search response's content blocks (server_tool_use +
+/// web_search_tool_result with the provider's encrypted_content), so the stored
+/// block replayed into the main and summary requests is byte-for-byte what the
+/// provider returned.
+async fn live_web_blocks() -> Vec<Value> {
+    let client = create_provider(LLMProviderConfig {
+        provider: ProviderKind::Anthropic,
+        api_key: key(),
+        model: Some(MODEL.into()),
+        base_url: None,
+        context_window: 0,
+    })
+    .expect("anthropic client");
+    let options = RequestOptions::new(1_024).with_server_tools(vec![json!({
+        "type": "web_search_20250305",
+        "name": "web_search",
+        "max_uses": 1
+    })]);
+    let mut messages = vec![
+        Message::system("You are a search assistant. Use the web search tool once and quote one result."),
+        Message::user("Search the web for a current fact about the Eiffel Tower and quote one sentence."),
+    ];
+    let mut blocks: Vec<Value> = Vec::new();
+    let mut last = client
+        .complete(&messages, &[], &options, &HashMap::new())
+        .await
+        .expect("live web search");
+    blocks.extend(last.raw_response["content"].as_array().cloned().unwrap_or_default());
+    for _ in 0..2 {
+        if blocks.iter().any(|block| block["type"] == "web_search_tool_result") {
+            break;
+        }
+        messages.push(
+            Message::assistant(&last.content)
+                .with_provider_content(last.raw_response["content"].as_array().cloned()),
+        );
+        last = client
+            .complete(&messages, &[], &options, &HashMap::new())
+            .await
+            .expect("live web search continuation");
+        blocks.extend(last.raw_response["content"].as_array().cloned().unwrap_or_default());
+    }
+    assert!(
+        blocks.iter().any(|block| block["type"] == "web_search_tool_result"),
+        "the live search returned a complete result: {blocks:?}"
+    );
+    blocks
 }
 
 fn config(session_id: &str, message: &str) -> AgentExecutionConfig {
@@ -34,14 +86,16 @@ fn config(session_id: &str, message: &str) -> AgentExecutionConfig {
         workspace_id: "ws-1".to_string(),
         message: message.to_string(),
         workspace_roles: vec![WorkspaceRole::WorkspaceAdmin],
-        // A small fixed prefix keeps the threshold meaningful: the default
-        // system prompt alone is larger than a few thousand tokens.
+        // A small fixed prefix keeps the threshold meaningful. The full tool
+        // registry stays available so the summarised range can carry a client
+        // tool pair and a provider web block with their matching definitions.
         system_prompt: Some(
             "You are a concise analytics assistant. Follow the user's instructions exactly."
                 .to_string(),
         ),
-        // Only the harmless tool this scenario needs; the full registry's
-        // schemas would dominate the request.
+        // Only the tool the scenario needs: the summary request must carry a
+        // client tool_use/tool_result pair, but the full registry's schemas
+        // would dominate a low-threshold live run.
         tools_subset: Some(vec!["get_workspace_info".to_string()]),
         max_iterations: 12,
         max_tokens: 4_096,
@@ -50,9 +104,71 @@ fn config(session_id: &str, message: &str) -> AgentExecutionConfig {
     }
 }
 
-/// Live scenario: a seeded conversation compacts once, the summary + cut index
-/// persist encrypted, a tool call and its result stay together, and a second
-/// run restores the summary and answers from it.
+/// Seed the conversation: large revenue turns, one assistant turn carrying a
+/// stored provider web-search block, and a client tool_use/tool_result pair.
+/// The first eight messages are inside the summarised range.
+async fn seed_history(
+    db: &kyomi_core::DbPool,
+    key: &[u8; 32],
+    session_id: &str,
+    web_blocks: &[Value],
+) {
+    let tool_calls = json!([{
+        "id": "call_1",
+        "name": "get_workspace_info",
+        "arguments": {},
+        "arguments_error": null
+    }]);
+    for i in 0..13u8 {
+        let role = if i % 2 == 0 { "user" } else { "assistant" };
+        let message_role = if i == 4 { "tool" } else { role };
+        let large = i < 9;
+        let content = if large {
+            format!(
+                "We are investigating the Q4 revenue shortfall (step {i}): {}",
+                "x".repeat(12_000)
+            )
+        } else {
+            format!("noted step {i}")
+        };
+        let tool_calls = (i == 3).then(|| tool_calls.clone());
+        let tool_call_id = (i == 4).then_some("call_1");
+        let tool_name = (i == 4).then_some("get_workspace_info");
+        let content = if i == 4 {
+            r#"{"workspace_name": "Workspace"}"#.to_string()
+        } else {
+            content
+        };
+        let provider_content = (i == 1).then(|| Value::Array(web_blocks.to_vec()));
+        let message = chat_service::NewMessage {
+            role: message_role,
+            content: &content,
+            metadata: None,
+            message_id: None,
+            current_time_user_tz: None,
+            message_source: (message_role == "user").then_some("web"),
+            sent_by_user_id: (message_role == "user").then_some("user-a"),
+            tool_call_id,
+            tool_name,
+            tool_calls: tool_calls.as_ref(),
+            status: chat_service::MessageStatus::Complete,
+        };
+        chat_service::insert_message(
+            db,
+            key,
+            session_id,
+            &message,
+            provider_content.as_ref(),
+        )
+        .await
+        .expect("seed history");
+    }
+}
+
+/// Live scenario: the seeded conversation compacts once; the summary request
+/// carries the stored client tool pair and web block with their definitions;
+/// the summary + cut index persist encrypted; a second run restores and uses
+/// the summary.
 #[tokio::test]
 #[ignore = "live: spends real Anthropic tokens"]
 async fn compaction_compacts_persists_and_restores_on_a_real_conversation() {
@@ -63,40 +179,8 @@ async fn compaction_compacts_persists_and_restores_on_a_real_conversation() {
     chat_service::create_session_with_id(&db, "user-a", "ws-1", &session_id, None, "chat", None)
         .await
         .expect("create session");
-    // Seed history: eight large turns about the same topic, then four short
-    // ones. The cut summarises the first seven, leaving one large turn plus the
-    // short tail well below the threshold (the live request's fixed
-    // system/tool prefix is part of the provider's input count, so the live
-    // threshold is higher than the few-thousand-token unit tests).
-    for i in 0..12u8 {
-        let role = if i % 2 == 0 { "user" } else { "assistant" };
-        let content = if i < 8 {
-            format!(
-                "We are investigating the Q4 revenue shortfall (step {i}): {}",
-                "x".repeat(8_000)
-            )
-        } else {
-            format!("noted step {i}")
-        };
-        chat_service::add_message(
-            &db,
-            &encryption_key,
-            &session_id,
-            role,
-            &content,
-            None,
-            None,
-            None,
-            Some("web"),
-            Some("user-a"),
-            None,
-            None,
-            None,
-            chat_service::MessageStatus::Complete,
-        )
-        .await
-        .expect("seed history");
-    }
+    let web_blocks = live_web_blocks().await;
+    seed_history(&db, &encryption_key, &session_id, &web_blocks).await;
 
     let kv = InMemoryKVStore::new_pool();
     let embedding = kyomi_embed::LazyEmbedding::new();
@@ -108,6 +192,9 @@ async fn compaction_compacts_persists_and_restores_on_a_real_conversation() {
     app.llm_model = Some(MODEL.to_string());
     app.llm_title_model = Some(MODEL.to_string());
     app.llm_compaction.threshold_tokens = Some(THRESHOLD);
+    // The Anthropic backend attaches the provider web-search tool to the run,
+    // so the stored web block can be replayed into the summary request.
+    app.web_tools.search.provider = Some("anthropic".to_string());
     let app_config = Arc::new(app);
     let platforms = Arc::new(PlatformRegistry::new());
 
@@ -136,7 +223,9 @@ async fn compaction_compacts_persists_and_restores_on_a_real_conversation() {
         .await
         .expect("the first live turn compacts and completes");
     if first.status != "completed" {
-        for (level, message) in capture.events() { eprintln!("CAPTURE {level} {message}"); }
+        for (level, message) in capture.events() {
+            eprintln!("CAPTURE {level} {message}");
+        }
     }
     assert_eq!(first.status, "completed", "{:?}", first.error);
     assert!(

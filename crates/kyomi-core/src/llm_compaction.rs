@@ -122,40 +122,16 @@ pub fn parse_threshold(raw: &str) -> Result<u32, InvalidSetting> {
         .ok_or_else(|| InvalidSetting(format!("expected a positive token count, got {v:?}")))
 }
 
-/// The window a run decides against. A provider-reported window wins; zero
-/// means the provider does not know the model, so the documented default is
-/// used and reported as such.
-pub fn resolve_context_window(provider_reported: u32) -> (u32, ContextWindowSource) {
-    if provider_reported > 0 {
-        (provider_reported, ContextWindowSource::Provider)
-    } else {
-        (DEFAULT_CONTEXT_WINDOW, ContextWindowSource::Default)
-    }
-}
-
 /// Resolve the threshold for a run: workspace absolute, then instance
 /// absolute, then workspace fraction, then instance fraction, then the
 /// default fraction.
-pub fn resolve(
-    provider_reported_window: u32,
-    workspace: &LlmCompactionSettings,
-    instance: &LlmCompactionSettings,
-) -> ResolvedCompaction {
-    let (context_window, context_window_source) = resolve_context_window(provider_reported_window);
-    resolve_with_source(
-        context_window,
-        context_window_source,
-        workspace,
-        instance,
-    )
-}
-
-/// [`resolve`] with the window source reported by the provider itself.
 ///
-/// Anthropic reports its table's 200K fallback for an unrecognised model, so a
-/// plain non-zero value cannot distinguish a real 200K model from the default;
-/// the provider's own window-source method supplies the correct label for the
-/// run log.
+/// `provider_reported_window` is the provider's raw window and
+/// `context_window_source` its own label; a zero window is replaced by the
+/// documented default here. Anthropic reports its table's 200K fallback for an
+/// unrecognised model, so a plain non-zero value cannot distinguish a real 200K
+/// model from the default; the provider's own window-source method supplies the
+/// correct label for the run log.
 pub fn resolve_with_source(
     provider_reported_window: u32,
     context_window_source: ContextWindowSource,
@@ -309,6 +285,20 @@ mod tests {
             fraction,
             threshold_tokens,
         }
+    }
+
+    /// Test helper: the provider's label for a raw window (zero = default).
+    fn resolve(
+        window: u32,
+        workspace: &LlmCompactionSettings,
+        instance: &LlmCompactionSettings,
+    ) -> ResolvedCompaction {
+        let source = if window == 0 {
+            ContextWindowSource::Default
+        } else {
+            ContextWindowSource::Provider
+        };
+        resolve_with_source(window, source, workspace, instance)
     }
 
     #[test]
