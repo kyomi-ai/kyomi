@@ -790,14 +790,12 @@ pub async fn execute_agent_chat_with(
         // The background factory keeps the summary model's own window (the
         // chat window override describes the chat model), so the agent can fail
         // with a clear error when the fast model cannot accept the region.
-        let summary_provider = create_background_provider_from_workspace(
+        let summary_client = create_background_provider_from_workspace(
             &ws_config,
             app_config,
             summary_model.as_deref(),
-        )?;
-        let summary_client =
-            crate::usage_ledger::MeteredClient::new(summary_provider)
-                .with_ledger(usage_ledger.clone());
+        )?
+        .with_ledger(usage_ledger.clone());
         agent.set_compaction(crate::compaction::CompactionRuntime {
             threshold_tokens: resolved_compaction.threshold_tokens,
             context_window: resolved_compaction.context_window,

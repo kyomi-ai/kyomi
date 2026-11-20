@@ -4607,8 +4607,14 @@ Second chart:\n{CHARTML_STRIPPED_NOTE}\nDone."
 
         let summaries = summary_calls.lock().expect("summary call log");
         assert_eq!(summaries.len(), 1, "exactly one summary call");
-        assert!(summaries[0].messages[0].content.contains("first question"));
-        assert!(summaries[0].messages[0].content.contains("COMPREHENSIVE SUMMARY"));
+        assert_eq!(
+            summaries[0].messages.first().expect("older turns").content,
+            "first question"
+        );
+        assert_eq!(
+            summaries[0].messages.last().expect("instruction").content,
+            crate::compaction::COMPACTION_INSTRUCTION
+        );
 
         let state = agent.state();
         assert_eq!(
@@ -5131,7 +5137,12 @@ Second chart:\n{CHARTML_STRIPPED_NOTE}\nDone."
                 max_total_tokens: Some(100_000),
                 ..Default::default()
             },
-            vec![Reply::ToolCallWithUsage(billable_usage(10)), Reply::ToolCallWithUsage(billable_usage(10)), Reply::ToolCallWithUsage(billable_usage(1_000)), Reply::ToolCallWithUsage(billable_usage(1_000))],
+            vec![
+                Reply::ToolCallWithUsage(billable_usage(10)),
+                Reply::ToolCallWithUsage(billable_usage(10)),
+                Reply::ToolCallWithUsage(billable_usage(1_000)),
+                Reply::ToolCallWithUsage(billable_usage(10)),
+            ],
             Reply::Text("Summary from partial data.".to_string()),
         )
         .await;

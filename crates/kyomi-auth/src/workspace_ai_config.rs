@@ -291,11 +291,25 @@ pub async fn load(
         kyomi_core::watch_llm::read_workspace_watch_llm(&row.settings);
     let (compaction, compaction_warnings) =
         kyomi_core::llm_compaction::read_workspace(&row.settings);
+    // `load` runs on every LLM call: say each invalid value once per process
+    // instead of once per call, while still surfacing it at warn level (the
+    // Settings -> AI page also lists it). (KYO-975 audit.)
+    static SEEN_INVALID_COMPACTION: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashSet<String>>,
+    > = std::sync::OnceLock::new();
     for warning in &compaction_warnings {
-        tracing::warn!(
-            workspace_id = %workspace_id,
-            "ignoring invalid stored compaction value: {warning}"
-        );
+        let key = format!("{workspace_id}:{warning}");
+        let first = SEEN_INVALID_COMPACTION
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(key);
+        if first {
+            tracing::warn!(
+                workspace_id = %workspace_id,
+                "ignoring invalid stored compaction value: {warning}"
+            );
+        }
     }
     if let Some(ct) = row.watch_ai_api_key_encrypted.as_deref() {
         // A key that cannot be decrypted is dropped with a warning rather than

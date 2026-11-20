@@ -2503,7 +2503,8 @@ mod tests {
             context_window: 200_000,
             client: Box::new(summarizer),
             options: crate::provider::RequestOptions::new(512),
-        });        let user = UserMessagePersistence::default();
+        });
+        let user = UserMessagePersistence::default();
         let assistant = AssistantMessagePersistence::adapter_inserts_with_new_id();
         first.chat(ChatParams {
             message: "one more question", cancel_token: CancellationToken::new(), current_time_user_tz: None,

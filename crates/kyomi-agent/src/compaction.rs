@@ -4,8 +4,9 @@
 //!
 //! When a conversation reaches the run's resolved input-token threshold, older
 //! messages are summarized into a compact summary. This module provides the
-//! utility functions for deciding when to compact, splitting messages, building
-//! the summarization prompt, and reconstructing context.
+//! decision and the tool-pair-safe split; the agent sends those messages to the
+//! summary model and reconstructs the context from the stored summary
+//! ([`CustomAgent::maybe_compact`](crate::agent::CustomAgent)).
 //!
 //! # Architecture
 //!
@@ -616,6 +617,28 @@ mod contract_tests {
         assert_eq!(to_keep[0].content, "chain1");
         assert_eq!(to_keep[1].content, "chain2");
         assert_eq!(to_keep[2].content, "chain3");
+    }
+
+    #[test]
+    fn should_compact_includes_tool_call_argument_sizes() {
+        // Create a message with large tool call arguments.
+        let large_args = serde_json::json!({"sql": "x".repeat(100_000)});
+        let mut msg = Message::assistant("running query");
+        msg.tool_calls = Some(vec![ToolCall {
+            id: "tc_1".into(),
+            name: "query_datasource".into(),
+            arguments: large_args,
+            arguments_error: None,
+        }]);
+
+        // With 100K chars in args alone, at 4 chars/token = 25K tokens
+        // This is well below threshold, but ensures args ARE counted.
+        let result = should_compact(None, &[msg.clone()], 0, THRESHOLD);
+        assert!(!result);
+
+        // Add enough system prompt to push over the edge.
+        let result = should_compact(None, &[msg], 500_001, THRESHOLD);
+        assert!(result);
     }
 
     #[test]

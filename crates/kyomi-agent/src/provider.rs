@@ -456,11 +456,11 @@ pub fn create_background_provider_from_workspace(
     ws_config: &kyomi_auth::workspace_ai_config::WorkspaceAiConfig,
     fallback_config: &kyomi_core::Config,
     requested_model: Option<&str>,
-) -> kyomi_core::Result<Box<dyn LLMProvider>> {
+) -> kyomi_core::Result<crate::usage_ledger::MeteredClient> {
     let mut config =
         resolve_workspace_provider_config_for(ws_config, fallback_config, requested_model)?;
     config.context_window = 0;
-    create_provider(config)
+    create_provider(config).map(crate::usage_ledger::MeteredClient::new)
 }
 
 /// The provider configuration [`create_provider_from_workspace`] builds the
