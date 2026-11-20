@@ -2379,7 +2379,6 @@ pub async fn create_chat_session_from_alert(
             "global_iteration": 1,
             "compacted_summary": null,
             "messages_since_compaction_index": 0,
-            "last_input_tokens": 0,
             "config": {
                 "max_iterations": 25,
             }

@@ -359,6 +359,12 @@ impl LLMProvider for ScriptedProvider {
     fn model(&self) -> &str {
         "scripted-model"
     }
+
+    /// Large enough that a scripted summary client is chosen as the fast
+    /// summariser in the compaction tests (KYO-975).
+    fn context_window(&self) -> u32 {
+        1_000_000
+    }
 }
 
 // ---------------------------------------------------------------------------

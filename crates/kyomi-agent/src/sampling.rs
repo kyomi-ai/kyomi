@@ -88,6 +88,8 @@ mod tests {
             sampling_warnings: Vec::new(),
             watch_llm: Default::default(),
             watch_llm_warnings: Vec::new(),
+            compaction: Default::default(),
+            compaction_warnings: Vec::new(),
         }
     }
 

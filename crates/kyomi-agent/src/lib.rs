@@ -60,6 +60,8 @@ mod anthropic_billing_tests;
 mod metering_guard_tests;
 #[cfg(test)]
 mod anthropic_live_tests;
+#[cfg(test)]
+mod compaction_live_tests;
 pub mod thinking;
 pub mod tools;
 pub mod types;

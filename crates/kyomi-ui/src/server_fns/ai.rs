@@ -304,6 +304,111 @@ pub async fn update_llm_tuning(values: LlmTuningValues) -> Result<(), ServerFnEr
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// Conversation compaction (KYO-975) — self-hosted
+// ---------------------------------------------------------------------------
+
+/// The two compaction fields as the user typed them. Empty means "not set at
+/// this layer" and falls through to the instance value or the default.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct CompactionValues {
+    pub fraction: String,
+    pub threshold: String,
+}
+
+/// Workspace and instance compaction settings, plus invalid stored values that
+/// are being ignored so an admin can fix them.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct CompactionSettingsView {
+    pub workspace: CompactionValues,
+    pub instance: CompactionValues,
+    #[serde(default)]
+    pub warnings: Vec<String>,
+}
+
+#[cfg(feature = "ssr")]
+fn compaction_values(
+    s: &kyomi_core::llm_compaction::LlmCompactionSettings,
+) -> CompactionValues {
+    use kyomi_core::llm_compaction::{fraction_text, threshold_text};
+    CompactionValues {
+        fraction: fraction_text(s.fraction),
+        threshold: threshold_text(s.threshold_tokens),
+    }
+}
+
+/// Read the workspace and instance conversation-compaction settings.
+/// Self-hosted admins only.
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
+pub async fn get_compaction_settings() -> Result<CompactionSettingsView, ServerFnError> {
+    let ac = AuthenticatedContext::extract().await?;
+    if !ac.ctx.config.self_hosted {
+        return Err(ServerFnError::new(
+            "Conversation compaction is only configurable on self-hosted deployments.",
+        ));
+    }
+    ac.require(Permission::ManageAiConfig, "Workspace admin access required")?;
+
+    let ws_config = kyomi_auth::workspace_ai_config::load(ac.db(), &ac.ws_id)
+        .await
+        .into_sfn()?;
+    Ok(CompactionSettingsView {
+        workspace: compaction_values(&ws_config.compaction),
+        instance: compaction_values(&ac.ctx.config.llm_compaction),
+        warnings: ws_config.compaction_warnings.clone(),
+    })
+}
+
+/// Validate and store the workspace conversation-compaction settings.
+/// Self-hosted admins only.
+///
+/// An empty field clears its key so the instance value or the default applies.
+/// Every non-empty value is validated with the same parsers the env and the
+/// stored-settings reader use, and the whole request is rejected if either is
+/// invalid (nothing is partially saved).
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
+pub async fn update_compaction_settings(values: CompactionValues) -> Result<(), ServerFnError> {
+    use kyomi_core::llm_compaction::{
+        stored_fraction, stored_threshold, WORKSPACE_FRACTION_KEY, WORKSPACE_THRESHOLD_KEY,
+    };
+
+    let ac = AuthenticatedContext::extract().await?;
+    if !ac.ctx.config.self_hosted {
+        return Err(ServerFnError::new(
+            "Conversation compaction is only configurable on self-hosted deployments.",
+        ));
+    }
+    ac.require(Permission::ManageAiConfig, "Workspace admin access required")?;
+
+    let fraction = values.fraction.trim();
+    let fraction = if fraction.is_empty() {
+        None
+    } else {
+        Some(stored_fraction(fraction).map_err(|e| ServerFnError::new(format!("fraction: {e}")))?)
+    };
+    let threshold = values.threshold.trim();
+    let threshold = if threshold.is_empty() {
+        None
+    } else {
+        Some(stored_threshold(threshold).map_err(|e| ServerFnError::new(format!("threshold: {e}")))?)
+    };
+
+    super::workspace::edit_workspace_settings(&ac, |current| {
+        let mut settings = current.clone();
+        settings = Some(match &fraction {
+            Some(v) => super::workspace::merge_custom_settings(&settings, WORKSPACE_FRACTION_KEY, v.clone()),
+            None => super::workspace::clear_custom_settings_key(&settings, WORKSPACE_FRACTION_KEY),
+        });
+        settings = Some(match &threshold {
+            Some(v) => super::workspace::merge_custom_settings(&settings, WORKSPACE_THRESHOLD_KEY, v.clone()),
+            None => super::workspace::clear_custom_settings_key(&settings, WORKSPACE_THRESHOLD_KEY),
+        });
+        settings.unwrap_or_else(|| serde_json::json!({}))
+    })
+    .await?;
+    Ok(())
+}
+
 #[cfg(feature = "ssr")]
 fn watch_llm_values(s: &kyomi_core::watch_llm::WatchLlmSettings) -> WatchLlmValues {
     WatchLlmValues {
@@ -1835,6 +1940,8 @@ mod tests {
             sampling_warnings: Vec::new(),
             watch_llm: Default::default(),
             watch_llm_warnings: Vec::new(),
+            compaction: Default::default(),
+            compaction_warnings: Vec::new(),
         }
     }
 

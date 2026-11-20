@@ -27,8 +27,9 @@ use crate::components::{
     Label, Skeleton, StatusBadge, StatusBadgeVariant, INPUT_CLASS,
 };
 use crate::server_fns::ai::{
-    get_llm_tuning, get_resolved_ai_provider, get_watch_llm, list_openrouter_models,
-    update_llm_tuning, update_watch_llm, LlmTuningValues, LlmTuningView, ResolvedAiProviderView,
+    get_compaction_settings, get_llm_tuning, get_resolved_ai_provider, get_watch_llm,
+    list_openrouter_models, update_compaction_settings, update_llm_tuning, update_watch_llm,
+    CompactionSettingsView, CompactionValues, LlmTuningValues, LlmTuningView, ResolvedAiProviderView,
     WatchLlmValues, WatchLlmView,
 };
 use crate::server_fns::context::UserContext;
@@ -93,6 +94,7 @@ fn SelfHostedView() -> impl IntoView {
         <div class="space-y-6">
             <ResolvedProviderPanel/>
             <LlmTuningCard/>
+            <CompactionCard/>
             <WatchLlmCard/>
             <Card>
                 <CardContent>
@@ -363,6 +365,90 @@ fn LlmTuningCard() -> impl IntoView {
                 })}
             </Transition>
         </SettingsCard>
+    }
+}
+
+#[component]
+fn CompactionCard() -> impl IntoView {
+    let settings = Resource::new(|| (), |_| get_compaction_settings());
+    view! {
+        <SettingsCard title="Conversation Compaction" description="When a conversation reaches this share of the model's context window, older turns are replaced by a summary so the chat can continue without hitting the model's limit. The threshold follows the model's window (1M on Claude 5.x, 200K on older models); leave a field empty to use the instance value or the default.">
+            <Transition fallback=move || view! { <Skeleton class="h-40 w-full"/> }>
+                {move || Suspend::new(async move {
+                    match settings.await {
+                        Ok(data) => view! { <CompactionForm data/> }.into_any(),
+                        Err(e) => view! {
+                            <Alert variant=AlertVariant::Error>
+                                <AlertTitle>"Couldn't load compaction settings"</AlertTitle>
+                                <AlertDescription>{e.to_string()}</AlertDescription>
+                            </Alert>
+                        }.into_any(),
+                    }
+                })}
+            </Transition>
+        </SettingsCard>
+    }
+}
+
+#[component]
+fn CompactionForm(data: CompactionSettingsView) -> impl IntoView {
+    let CompactionSettingsView { workspace, instance, warnings } = data;
+
+    let fraction = RwSignal::new(workspace.fraction.clone());
+    let threshold = RwSignal::new(workspace.threshold.clone());
+
+    let inherit = |instance_value: &str, fallback: &str| {
+        if instance_value.is_empty() {
+            fallback.to_string()
+        } else {
+            format!("{instance_value} (instance)")
+        }
+    };
+    let ph_fraction = inherit(&instance.fraction, "0.75 (default)");
+    let ph_threshold = inherit(&instance.threshold, "derived from the window");
+
+    let save = Action::new(|values: &CompactionValues| {
+        let values = values.clone();
+        async move { update_compaction_settings(values).await }
+    });
+    let on_save = move |_| {
+        save.dispatch(CompactionValues {
+            fraction: fraction.get_untracked(),
+            threshold: threshold.get_untracked(),
+        });
+    };
+    let save_error = move || save.value().get().and_then(|r| r.err()).map(|e| e.to_string());
+
+    view! {
+        {(!warnings.is_empty()).then(|| view! {
+            <Alert variant=AlertVariant::Warning>
+                <AlertTitle>"Some saved values are invalid and are being ignored"</AlertTitle>
+                <AlertDescription>
+                    <ul class="list-disc pl-5">
+                        {warnings.iter().map(|w| view! { <li class="font-mono text-xs">{w.clone()}</li> }).collect_view()}
+                    </ul>
+                    <p class="mt-2">"Fix or clear the fields below and save."</p>
+                </AlertDescription>
+            </Alert>
+        })}
+        <div class="grid gap-4 sm:grid-cols-2">
+            <TuningField label="Fraction of the context window"
+                hint="A number greater than 0 and at most 1. 0.75 compacts at 750,000 tokens on a 1M model and 150,000 on a 200K model."
+                value=fraction placeholder=ph_fraction list_id=""/>
+            <TuningField label="Absolute token threshold"
+                hint="A positive token count. When set, it wins over the fraction at every layer."
+                value=threshold placeholder=ph_threshold list_id=""/>
+        </div>
+        {move || save_error().map(|msg| view! {
+            <Alert variant=AlertVariant::Error>
+                <AlertTitle>"Not saved"</AlertTitle>
+                <AlertDescription>{msg}</AlertDescription>
+            </Alert>
+        })}
+        <div class="flex items-center gap-3">
+            <Button on:click=on_save>"Save"</Button>
+            <ActionStatus action=save/>
+        </div>
     }
 }
 

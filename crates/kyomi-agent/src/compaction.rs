@@ -2,30 +2,59 @@
 
 //! Context compaction for the agent system.
 //!
-//! When conversations approach the token limit (~200K context window),
-//! old messages are summarized into a compact summary. This module provides
-//! the utility functions for deciding when to compact, splitting messages,
-//! building the summarization prompt, and reconstructing context.
+//! When a conversation reaches the run's resolved input-token threshold, older
+//! messages are summarized into a compact summary. This module provides the
+//! decision and the tool-pair-safe split; the agent sends those messages to the
+//! summary model and reconstructs the context from the stored summary
+//! ([`CustomAgent::maybe_compact`](crate::agent::CustomAgent)).
 //!
 //! # Architecture
 //!
 //! The compaction flow:
 //!
-//! 1. After each LLM call, check [`should_compact`] using the actual
-//!    input token count (or a character-based estimate as fallback).
+//! 1. [`CustomAgent::maybe_compact`](crate::agent::CustomAgent) checks
+//!    [`should_compact`] at the start of each agent-loop iteration (and before
+//!    the forced wrap-up call). It uses the actual input token count from the
+//!    previous LLM call **and** a character-based estimate of the context that
+//!    would be sent; either reaching the run's resolved threshold (the model's
+//!    context window times the configured fraction, or an absolute override)
+//!    triggers compaction (KYO-975).
 //! 2. If compaction is needed, [`split_messages_for_compaction`] divides
-//!    messages into "to summarize" and "to keep" groups.
-//! 3. [`build_compaction_prompt`] creates a summarization prompt from the
-//!    messages that need compacting.
-//! 4. The caller sends this prompt to a fast model (e.g., Haiku).
-//! 5. [`build_context_with_compaction`] reconstructs the LLM message list
-//!    using the summary + recent messages.
-//!
-//! The agent's [`build_llm_context`](crate::agent::CustomAgent) method
-//! already handles the compacted state during the agent loop -- this module
-//! provides the preparation utilities.
+//!    messages into "to summarize" and "to keep" groups at a tool-pair-safe
+//!    boundary.
+//! 3. The older turns are sent to the summary model **exactly as stored** —
+//!    the same structured messages (provider web blocks included) the main
+//!    model receives — followed by [`COMPACTION_INSTRUCTION`]. Nothing is
+//!    filtered, truncated or converted to text.
+//! 4. The agent sends those messages to the run's fast model (the workspace
+//!    title model, else `LLM_TITLE_MODEL`, else the setup's own model). There
+//!    is no fallback: if its own known window cannot accept the region, the
+//!    run fails with a clear error; a provider that reports no window gets the
+//!    request and a rejection fails the run.
+//! 5. The agent stores the summary and the cut index on
+//!    [`AgentState`](crate::agent::AgentState); the adapter persists them with
+//!    the session, and
+//!    [`build_llm_context`](crate::agent::CustomAgent) reconstructs the LLM
+//!    message list from the summary + recent messages on later calls.
 
+use crate::provider::{LLMProvider, RequestOptions};
 use crate::types::{Message, MessageRole};
+
+/// What the agent needs to compact: the threshold the run resolved (KYO-975)
+/// and the fast model that writes the summary.
+pub struct CompactionRuntime {
+    /// Input-token count at or above which older turns are summarised.
+    pub threshold_tokens: u32,
+    /// The resolved chat context window the threshold was derived from (for
+    /// logs and the clear failure when the context cannot be reduced).
+    pub context_window: u32,
+    /// Fast model used only for the summary (the workspace title model, else
+    /// `LLM_TITLE_MODEL`, else the setup's own model). If it cannot accept the
+    /// region the run fails; there is no fallback model.
+    pub client: Box<dyn LLMProvider>,
+    /// Request options for the summary call (title/background sampling).
+    pub options: RequestOptions,
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -52,9 +81,6 @@ pub(crate) fn floor_char_boundary(s: &str, max_bytes: usize) -> usize {
 // Constants
 // ---------------------------------------------------------------------------
 
-/// Token threshold for triggering compaction (~75% of 200K context window).
-pub const COMPACTION_TOKEN_THRESHOLD: u32 = 150_000;
-
 /// Rough character-to-token ratio for fallback estimation.
 pub const CHARS_PER_TOKEN: u32 = 4;
 
@@ -67,25 +93,29 @@ pub const MESSAGES_TO_KEEP: usize = 6;
 
 /// Check whether the conversation context should be compacted.
 ///
-/// Prefers the actual input token count from the last LLM call if available.
-/// Falls back to a character-based estimate (total chars / [`CHARS_PER_TOKEN`])
-/// that includes the system prompt length.
+/// Returns `true` if **either** the actual input token count from the last LLM
+/// call or the character-based estimate (total chars / [`CHARS_PER_TOKEN`],
+/// including the system prompt length) is at or above `threshold_tokens`.
 ///
-/// Returns `true` if the estimated or actual token count is at or above
-/// [`COMPACTION_TOKEN_THRESHOLD`].
+/// Both are considered because the actual count describes the *previous*
+/// request: the new user message (or appended tool results) can push the next
+/// request over the window even when the last one was below it.
+///
+/// `threshold_tokens` is the value a run resolved from the model's context
+/// window and the configured fraction/absolute override (KYO-975); there is no
+/// built-in default here.
 pub fn should_compact(
     last_input_tokens: Option<u32>,
     messages: &[Message],
     system_prompt_len: usize,
+    threshold_tokens: u32,
 ) -> bool {
-    // Prefer actual token count from the LLM response.
-    if let Some(actual) = last_input_tokens
-        && actual > 0
-    {
-        return actual >= COMPACTION_TOKEN_THRESHOLD;
-    }
+    last_input_tokens.is_some_and(|actual| actual > 0 && actual >= threshold_tokens)
+        || estimate_tokens(messages, system_prompt_len) >= threshold_tokens
+}
 
-    // Fallback: estimate from message content lengths.
+/// Character-based token estimate for `messages` plus `system_prompt_len`.
+pub fn estimate_tokens(messages: &[Message], system_prompt_len: usize) -> u32 {
     let mut total_chars: usize = system_prompt_len;
 
     for msg in messages {
@@ -107,16 +137,25 @@ pub fn should_compact(
         }
     }
 
-    let estimated_tokens = total_chars as u32 / CHARS_PER_TOKEN;
-    estimated_tokens >= COMPACTION_TOKEN_THRESHOLD
+    (total_chars / CHARS_PER_TOKEN as usize) as u32
 }
 
 /// Split messages into (to_summarize, to_keep) for compaction.
 ///
 /// - If `messages.len() <= MESSAGES_TO_KEEP`, all messages are kept and
 ///   the "to summarize" vec is empty.
-/// - Otherwise, the last [`MESSAGES_TO_KEEP`] messages are kept and the
-///   rest are returned for summarization.
+/// - Otherwise, at least the last [`MESSAGES_TO_KEEP`] messages are kept.
+/// - The cut never separates a tool call from its result:
+///   * if the first kept message would be a tool result, the cut moves back so
+///     the assistant call and every result stay together in the **kept** part;
+///   * if the first kept message is an assistant message directly preceded by
+///     another assistant message, the cut moves back over the whole run. A
+///     `pause_turn` chain and a provider-executed server tool's result are
+///     stored as consecutive assistant messages, and splitting them would keep
+///     a result whose call was summarised away;
+///   * if a kept assistant message carries a provider server-tool result, the
+///     cut moves back to the message that announced its `server_tool_use`, even
+///     when client tool results sit between them (the deferred-call shape).
 ///
 /// **Note:** The input should NOT include the system prompt message --
 /// the caller should strip it before calling this function and re-add it
@@ -126,119 +165,89 @@ pub fn split_messages_for_compaction(messages: &[Message]) -> (Vec<Message>, Vec
         return (Vec::new(), messages.to_vec());
     }
 
-    let cutoff = messages.len() - MESSAGES_TO_KEEP;
+    let mut cutoff = messages.len() - MESSAGES_TO_KEEP;
+    while cutoff > 0
+        && (messages[cutoff].role == MessageRole::Tool
+            || (messages[cutoff].role == MessageRole::Assistant
+                && messages[cutoff - 1].role == MessageRole::Assistant))
+    {
+        cutoff -= 1;
+    }
+    // A provider server tool's result can arrive in a later assistant message
+    // (a `pause_turn` continuation or a deferred call behind client tool
+    // results), without repeating the `server_tool_use`. If a kept result's use
+    // would be summarised, move the cut back before the use's message.
+    loop {
+        let mut move_to = cutoff;
+        for message in &messages[cutoff..] {
+            for id in server_result_use_ids(message) {
+                if let Some(index) = messages
+                    .iter()
+                    .position(|candidate| server_use_ids(candidate).any(|use_id| use_id == id))
+                    && index < move_to
+                {
+                    move_to = index;
+                }
+            }
+        }
+        if move_to == cutoff {
+            break;
+        }
+        cutoff = move_to;
+    }
+    // The cut reached the start of the history (for example a history that
+    // begins with a tool result, or with a server-tool use whose result is in
+    // the kept tail): there is no safe cut, so keep everything rather than
+    // build a request the provider will reject.
+    if cutoff == 0 {
+        return (Vec::new(), messages.to_vec());
+    }
+
     let to_summarize = messages[..cutoff].to_vec();
     let to_keep = messages[cutoff..].to_vec();
 
     (to_summarize, to_keep)
 }
 
-/// Build a summarization prompt from messages that need compacting.
-///
-/// The resulting string is intended to be sent to a fast model (Haiku)
-/// as the user message content. It asks the model to preserve key
-/// questions, data discovered, queries executed, insights found, and
-/// context needed for continuation.
-pub fn build_compaction_prompt(messages_to_summarize: &[Message]) -> String {
-    let mut conversation_lines = Vec::new();
-
-    for msg in messages_to_summarize {
-        let role_label = match msg.role {
-            MessageRole::User => "USER".to_string(),
-            MessageRole::Assistant => "ASSISTANT".to_string(),
-            MessageRole::Tool => {
-                if let Some(ref name) = msg.name {
-                    format!("TOOL RESULT ({name})")
-                } else {
-                    "TOOL RESULT".to_string()
-                }
-            }
-            MessageRole::System => "SYSTEM".to_string(),
-        };
-
-        let mut content = msg.content.clone();
-
-        // Truncate very long tool results for the summary prompt.
-        // Use floor_char_boundary to avoid panicking on multi-byte UTF-8.
-        if msg.role == MessageRole::Tool && content.len() > 2000 {
-            let boundary = floor_char_boundary(&content, 2000);
-            content.truncate(boundary);
-            content.push_str("\n... [truncated for summary]");
-        }
-
-        conversation_lines.push(format!("**{role_label}**:\n{content}\n"));
-
-        // Include tool call names if present.
-        if let Some(ref tool_calls) = msg.tool_calls {
-            for tc in tool_calls {
-                conversation_lines.push(format!("  -> Called tool: {}", tc.name));
-            }
-        }
-    }
-
-    let conversation_text = conversation_lines.join("\n");
-
-    format!(
-        "You are summarizing a conversation between a user and an AI data analyst assistant.\n\
-         \n\
-         Create a comprehensive summary that captures:\n\
-         1. **Key Questions Asked**: What did the user want to know?\n\
-         2. **Data Discovered**: Tables, schemas, columns that were explored\n\
-         3. **Queries Executed**: Important SQL queries and their results (include actual numbers/findings)\n\
-         4. **Insights Found**: Key findings, patterns, or conclusions\n\
-         5. **Context for Continuation**: Any important context needed to continue the conversation\n\
-         \n\
-         Be thorough - this summary will replace the original messages in the LLM's context.\n\
-         Preserve specific details like table names, column names, query results, and numbers.\n\
-         \n\
-         ---\n\
-         CONVERSATION TO SUMMARIZE:\n\
-         \n\
-         {conversation_text}\n\
-         \n\
-         ---\n\
-         COMPREHENSIVE SUMMARY:"
-    )
+/// The `server_tool_use` ids in a message's stored provider blocks.
+fn server_use_ids(message: &Message) -> impl Iterator<Item = &str> {
+    message
+        .provider_content
+        .as_deref()
+        .into_iter()
+        .flatten()
+        .filter(|block| block.get("type").and_then(serde_json::Value::as_str) == Some("server_tool_use"))
+        .filter_map(|block| block.get("id").and_then(serde_json::Value::as_str))
 }
 
-/// Build the LLM message list when a compacted summary is available.
-///
-/// Produces the following sequence:
-///
-/// 1. System message (`system_prompt`)
-/// 2. User message with the prior conversation summary
-/// 3. Assistant acknowledgment message
-/// 4. All `recent_messages` (the [`MESSAGES_TO_KEEP`] messages)
-///
-/// This is the message list that should be sent to the LLM instead of
-/// the full conversation history.
-pub fn build_context_with_compaction(
-    system_prompt: &str,
-    compacted_summary: &str,
-    recent_messages: &[Message],
-) -> Vec<Message> {
-    let mut context = Vec::with_capacity(3 + recent_messages.len());
-
-    // 1. System prompt.
-    context.push(Message::system(system_prompt));
-
-    // 2. Compacted summary as user message.
-    context.push(Message::user(format!(
-        "## Prior Conversation Context\n\n{compacted_summary}"
-    )));
-
-    // 3. Assistant acknowledgment.
-    context.push(Message::assistant(
-        "I understand the context from our prior conversation. \
-         I'll continue from where we left off, keeping in mind the data sources, \
-         queries, and insights we've already explored. How can I help you next?",
-    ));
-
-    // 4. Recent messages.
-    context.extend_from_slice(recent_messages);
-
-    context
+/// The `tool_use_id` of each provider server-tool result block in a message.
+fn server_result_use_ids(message: &Message) -> impl Iterator<Item = &str> {
+    message
+        .provider_content
+        .as_deref()
+        .into_iter()
+        .flatten()
+        .filter(|block| {
+            block
+                .get("type")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|kind| kind != "tool_result" && kind.ends_with("_tool_result"))
+        })
+        .filter_map(|block| block.get("tool_use_id").and_then(serde_json::Value::as_str))
 }
+
+/// The final user message of a compaction request. The older turns are sent
+/// exactly as stored (structured messages, provider blocks included); this is
+/// the only added text.
+pub const COMPACTION_INSTRUCTION: &str = "Summarise the conversation above for an AI data analyst assistant. Preserve the key questions, data discovered, queries and their results, findings, and any context needed to continue. Reply with the summary only.";
+
+/// Fixed text around the stored summary in the rebuilt context. Kept here so
+/// `build_llm_context` and the kept-tail fit check cannot drift apart.
+pub const COMPACTION_SUMMARY_PREFIX: &str = "## Prior Conversation Context\n";
+pub const COMPACTION_SUMMARY_SUFFIX: &str =
+    "\n\n---\nThe above summarizes our earlier conversation. Continue from here.";
+pub const COMPACTION_ACK: &str =
+    "I understand the context from our previous conversation. I'll continue from where we left off.";
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -250,33 +259,36 @@ mod tests {
 
     // -- should_compact tests ------------------------------------------------
 
+    /// The threshold these tests pass in; resolution itself is tested below.
+    const THRESHOLD: u32 = 150_000;
+
     #[test]
     fn the_character_estimate_counts_stored_provider_blocks() {
         // Text alone is far below the threshold; the stored search results are not.
-        let blocks = vec![serde_json::json!({"type": "text", "text": "x".repeat(CHARS_PER_TOKEN as usize * COMPACTION_TOKEN_THRESHOLD as usize)})];
+        let blocks = vec![serde_json::json!({"type": "text", "text": "x".repeat(CHARS_PER_TOKEN as usize * THRESHOLD as usize)})];
         let plain = vec![Message::user("q"), Message::assistant("a")];
         let with_blocks = vec![Message::user("q"), Message::assistant("a").with_provider_content(Some(blocks))];
-        assert!(!should_compact(None, &plain, 0));
-        assert!(should_compact(None, &with_blocks, 0));
+        assert!(!should_compact(None, &plain, 0, THRESHOLD));
+        assert!(should_compact(None, &with_blocks, 0, THRESHOLD));
     }
 
     #[test]
     fn should_compact_returns_false_below_threshold_with_actual_tokens() {
         // 100K tokens is well below the 150K threshold.
-        let result = should_compact(Some(100_000), &[], 0);
+        let result = should_compact(Some(100_000), &[], 0, THRESHOLD);
         assert!(!result);
     }
 
     #[test]
     fn should_compact_returns_true_at_threshold_with_actual_tokens() {
         // Exactly at threshold should trigger compaction.
-        let result = should_compact(Some(COMPACTION_TOKEN_THRESHOLD), &[], 0);
+        let result = should_compact(Some(THRESHOLD), &[], 0, THRESHOLD);
         assert!(result);
     }
 
     #[test]
     fn should_compact_returns_true_above_threshold_with_actual_tokens() {
-        let result = should_compact(Some(COMPACTION_TOKEN_THRESHOLD + 10_000), &[], 0);
+        let result = should_compact(Some(THRESHOLD + 10_000), &[], 0, THRESHOLD);
         assert!(result);
     }
 
@@ -285,7 +297,7 @@ mod tests {
         // With None for actual tokens, use character estimation.
         // 1000 chars / 4 = 250 tokens -- well below threshold.
         let messages = vec![Message::user("x".repeat(1000))];
-        let result = should_compact(None, &messages, 0);
+        let result = should_compact(None, &messages, 0, THRESHOLD);
         assert!(!result);
     }
 
@@ -295,7 +307,7 @@ mod tests {
         // Create a message with enough content.
         let big_content = "x".repeat(600_001);
         let messages = vec![Message::user(big_content)];
-        let result = should_compact(None, &messages, 0);
+        let result = should_compact(None, &messages, 0, THRESHOLD);
         assert!(result);
     }
 
@@ -305,7 +317,7 @@ mod tests {
         // 600_000 / 4 = 150_000 tokens = threshold.
         let messages = vec![Message::user("abcd")];
         let system_prompt_len = 599_996;
-        let result = should_compact(None, &messages, system_prompt_len);
+        let result = should_compact(None, &messages, system_prompt_len, THRESHOLD);
         assert!(result);
     }
 
@@ -313,8 +325,57 @@ mod tests {
     fn should_compact_zero_actual_tokens_uses_fallback() {
         // Some(0) should fall through to the estimation path.
         let messages = vec![Message::user("short message")];
-        let result = should_compact(Some(0), &messages, 0);
+        let result = should_compact(Some(0), &messages, 0, THRESHOLD);
         assert!(!result);
+    }
+
+    // -- Resolved thresholds (KYO-975) --------------------------------------
+
+    #[test]
+    fn a_one_million_token_model_compacts_at_the_derived_threshold_not_150k() {
+        use kyomi_core::llm_compaction::{ContextWindowSource, LlmCompactionSettings, resolve_with_source};
+
+        let resolved = resolve_with_source(1_000_000, ContextWindowSource::Provider, &LlmCompactionSettings::default(), &LlmCompactionSettings::default());
+        assert_eq!(resolved.threshold_tokens, 750_000);
+        assert!(!should_compact(Some(150_000), &[], 0, resolved.threshold_tokens));
+        assert!(!should_compact(Some(749_999), &[], 0, resolved.threshold_tokens));
+        assert!(should_compact(Some(750_000), &[], 0, resolved.threshold_tokens));
+        assert!(should_compact(Some(750_001), &[], 0, resolved.threshold_tokens));
+    }
+
+    #[test]
+    fn a_two_hundred_thousand_token_model_compacts_at_its_own_threshold() {
+        use kyomi_core::llm_compaction::{ContextWindowSource, LlmCompactionSettings, resolve_with_source};
+
+        let resolved = resolve_with_source(200_000, ContextWindowSource::Provider, &LlmCompactionSettings::default(), &LlmCompactionSettings::default());
+        assert_eq!(resolved.threshold_tokens, 150_000);
+        assert!(!should_compact(Some(149_999), &[], 0, resolved.threshold_tokens));
+        assert!(should_compact(Some(150_000), &[], 0, resolved.threshold_tokens));
+        assert!(should_compact(Some(150_001), &[], 0, resolved.threshold_tokens));
+    }
+
+    #[test]
+    fn an_unknown_model_uses_the_documented_default_window() {
+        use kyomi_core::llm_compaction::{ContextWindowSource, LlmCompactionSettings, resolve_with_source};
+
+        let resolved = resolve_with_source(0, ContextWindowSource::Default, &LlmCompactionSettings::default(), &LlmCompactionSettings::default());
+        assert_eq!(resolved.context_window, kyomi_core::llm_compaction::DEFAULT_CONTEXT_WINDOW);
+        assert_eq!(resolved.context_window_source, ContextWindowSource::Default);
+        assert_eq!(resolved.threshold_tokens, 150_000);
+        assert!(!should_compact(Some(149_999), &[], 0, resolved.threshold_tokens));
+        assert!(should_compact(Some(150_000), &[], 0, resolved.threshold_tokens));
+        assert!(should_compact(Some(150_001), &[], 0, resolved.threshold_tokens));
+    }
+
+    #[test]
+    fn a_below_threshold_actual_still_compacts_when_the_new_turn_pushes_the_estimate_over() {
+        // The restored/previous call was below the threshold, but the next turn
+        // added ~175K tokens: the estimate must win (KYO-975 review).
+        let huge = vec![Message::user("x".repeat(700_000))];
+        assert!(should_compact(Some(140_000), &huge, 0, 150_000));
+
+        let small = vec![Message::user("short")];
+        assert!(!should_compact(Some(140_000), &small, 0, 150_000));
     }
 
     // -- split_messages_for_compaction tests ----------------------------------
@@ -369,107 +430,12 @@ mod tests {
         assert!(to_keep.is_empty());
     }
 
-    // -- build_context_with_compaction tests ----------------------------------
-
-    #[test]
-    fn build_context_with_compaction_produces_correct_structure() {
-        let recent = vec![
-            Message::user("Recent question"),
-            Message::assistant("Recent answer"),
-        ];
-
-        let context = build_context_with_compaction(
-            "You are a data analyst.",
-            "User explored revenue tables.",
-            &recent,
-        );
-
-        // 1 system + 1 summary + 1 ack + 2 recent = 5
-        assert_eq!(context.len(), 5);
-
-        // System prompt.
-        assert_eq!(context[0].role, MessageRole::System);
-        assert_eq!(context[0].content, "You are a data analyst.");
-
-        // Summary user message.
-        assert_eq!(context[1].role, MessageRole::User);
-        assert!(context[1].content.contains("Prior Conversation Context"));
-        assert!(context[1]
-            .content
-            .contains("User explored revenue tables."));
-
-        // Assistant acknowledgment.
-        assert_eq!(context[2].role, MessageRole::Assistant);
-        assert!(context[2]
-            .content
-            .contains("I understand the context from our prior conversation"));
-
-        // Recent messages.
-        assert_eq!(context[3].content, "Recent question");
-        assert_eq!(context[4].content, "Recent answer");
-    }
-
-    #[test]
-    fn build_context_with_compaction_empty_recent_messages() {
-        let context = build_context_with_compaction(
-            "System prompt.",
-            "Summary of prior conversation.",
-            &[],
-        );
-
-        // 1 system + 1 summary + 1 ack = 3 (no recent messages)
-        assert_eq!(context.len(), 3);
-        assert_eq!(context[0].role, MessageRole::System);
-        assert_eq!(context[1].role, MessageRole::User);
-        assert_eq!(context[2].role, MessageRole::Assistant);
-    }
-
-    // -- build_compaction_prompt tests ----------------------------------------
-
-    #[test]
-    fn build_compaction_prompt_includes_message_content() {
-        let messages = vec![
-            Message::user("What is our revenue?"),
-            Message::assistant("Let me check the database."),
-            Message::tool_result("tc_1", "query_datasource", "Revenue: $1.2M"),
-        ];
-
-        let prompt = build_compaction_prompt(&messages);
-
-        assert!(prompt.contains("What is our revenue?"));
-        assert!(prompt.contains("Let me check the database."));
-        assert!(prompt.contains("Revenue: $1.2M"));
-        assert!(prompt.contains("TOOL RESULT (query_datasource)"));
-        assert!(prompt.contains("Key Questions Asked"));
-        assert!(prompt.contains("Data Discovered"));
-        assert!(prompt.contains("COMPREHENSIVE SUMMARY:"));
-    }
-
-    #[test]
-    fn build_compaction_prompt_truncates_long_tool_results() {
-        let long_result = "x".repeat(3000);
-        let messages = vec![
-            Message::tool_result("tc_1", "query_datasource", &long_result),
-        ];
-
-        let prompt = build_compaction_prompt(&messages);
-
-        // The truncated content should be present.
-        assert!(prompt.contains("[truncated for summary]"));
-        // The full 3000-char content should NOT be present.
-        assert!(!prompt.contains(&long_result));
-    }
-
     // -- Constants tests -----------------------------------------------------
 
     #[test]
     fn constants_are_reasonable_values() {
-        assert_eq!(COMPACTION_TOKEN_THRESHOLD, 150_000);
         assert_eq!(CHARS_PER_TOKEN, 4);
         assert_eq!(MESSAGES_TO_KEEP, 6);
-
-        // Threshold should be less than 200K context window.
-        const { assert!(COMPACTION_TOKEN_THRESHOLD < 200_000) };
         // MESSAGES_TO_KEEP should be even (pairs of user+assistant).
         assert_eq!(MESSAGES_TO_KEEP % 2, 0);
     }
@@ -483,6 +449,8 @@ mod tests {
 mod contract_tests {
     use super::*;
     use crate::types::ToolCall;
+
+    const THRESHOLD: u32 = 150_000;
 
     // -- Large message handling -----------------------------------------------
 
@@ -520,151 +488,149 @@ mod contract_tests {
         assert_eq!(to_summarize[0].content, "Message 0");
     }
 
-    // -- Message type preservation in compaction prompt ------------------------
+    // -- Tool-pair-safe cut points (KYO-975) ----------------------------------
 
-    #[test]
-    fn compaction_prompt_includes_tool_call_names() {
-        let mut assistant_msg = Message::assistant("Let me query the database.");
-        assistant_msg.tool_calls = Some(vec![ToolCall {
-            id: "tc_1".into(),
-            name: "query_datasource".into(),
+    fn tool_call(id: &str, name: &str) -> ToolCall {
+        ToolCall {
+            id: id.into(),
+            name: name.into(),
             arguments: serde_json::json!({"sql": "SELECT 1"}),
             arguments_error: None,
-        }]);
-
-        let messages = vec![
-            Message::user("What is our revenue?"),
-            assistant_msg,
-            Message::tool_result("tc_1", "query_datasource", "Revenue: $1.2M"),
-        ];
-
-        let prompt = build_compaction_prompt(&messages);
-
-        assert!(prompt.contains("USER"));
-        assert!(prompt.contains("ASSISTANT"));
-        assert!(prompt.contains("TOOL RESULT (query_datasource)"));
-        assert!(prompt.contains("Called tool: query_datasource"));
-        assert!(prompt.contains("What is our revenue?"));
-        assert!(prompt.contains("Revenue: $1.2M"));
+        }
     }
 
-    #[test]
-    fn compaction_prompt_includes_multiple_tool_calls() {
-        let mut msg = Message::assistant("Checking data.");
-        msg.tool_calls = Some(vec![
-            ToolCall {
-                id: "tc_1".into(),
-                name: "search_catalog".into(),
-                arguments: serde_json::json!({"query": "revenue"}),
-                arguments_error: None,
-            },
-            ToolCall {
-                id: "tc_2".into(),
-                name: "query_datasource".into(),
-                arguments: serde_json::json!({"sql": "SELECT 1"}),
-                arguments_error: None,
-            },
-        ]);
-
-        let messages = vec![msg];
-        let prompt = build_compaction_prompt(&messages);
-
-        assert!(prompt.contains("Called tool: search_catalog"));
-        assert!(prompt.contains("Called tool: query_datasource"));
-    }
-
-    #[test]
-    fn compaction_prompt_labels_system_messages() {
-        let messages = vec![Message::system("You are a helpful assistant.")];
-        let prompt = build_compaction_prompt(&messages);
-        assert!(prompt.contains("**SYSTEM**:"));
-    }
-
-    #[test]
-    fn compaction_prompt_tool_result_without_name() {
-        let mut msg = Message::tool_result("tc_1", "my_tool", "result");
-        msg.name = None; // Remove the name
-        let messages = vec![msg];
-        let prompt = build_compaction_prompt(&messages);
-        assert!(prompt.contains("TOOL RESULT"));
-    }
-
-    // -- System prompt not duplicated in build_context -------------------------
-
-    #[test]
-    fn build_context_has_exactly_one_system_message() {
-        let recent = vec![
-            Message::user("Question"),
-            Message::assistant("Answer"),
-        ];
-
-        let context = build_context_with_compaction(
-            "System prompt here.",
-            "Summary of conversation.",
-            &recent,
-        );
-
-        let system_count = context
-            .iter()
-            .filter(|m| m.role == MessageRole::System)
-            .count();
-        assert_eq!(
-            system_count, 1,
-            "Should have exactly one system message, got {system_count}"
-        );
-    }
-
-    #[test]
-    fn build_context_system_prompt_is_first_message() {
-        let context = build_context_with_compaction(
-            "My system prompt.",
-            "Summary.",
-            &[Message::user("Hi")],
-        );
-
-        assert_eq!(context[0].role, MessageRole::System);
-        assert_eq!(context[0].content, "My system prompt.");
-    }
-
-    // -- Empty summary handling -----------------------------------------------
-
-    #[test]
-    fn build_context_with_empty_summary() {
-        let context = build_context_with_compaction(
-            "System.",
+    fn assistant_with_calls(ids: &[&str]) -> Message {
+        Message::assistant_with_tool_calls(
             "",
-            &[Message::user("Hello")],
-        );
-
-        // Should still produce the structure even with empty summary
-        assert_eq!(context.len(), 4); // system + summary + ack + 1 recent
-        assert_eq!(context[1].role, MessageRole::User);
-        assert!(context[1].content.contains("Prior Conversation Context"));
+            ids.iter().map(|id| tool_call(id, "query_datasource")).collect(),
+        )
     }
-
-    // -- Compaction prompt for large tool results -----------------------------
 
     #[test]
-    fn compaction_prompt_truncates_multiple_large_tool_results() {
-        let long_result1 = "a".repeat(5000);
-        let long_result2 = "b".repeat(5000);
+    fn the_cut_does_not_start_the_kept_tail_with_a_tool_result() {
+        // A naive `len - 6` cut lands exactly on tc_2's result. The cut must
+        // move back before tc_2's assistant call so call and result stay
+        // together in the kept tail.
         let messages = vec![
-            Message::tool_result("tc_1", "tool_a", &long_result1),
-            Message::tool_result("tc_2", "tool_b", &long_result2),
+            Message::user("first"),
+            assistant_with_calls(&["tc_1"]),
+            Message::tool_result("tc_1", "query_datasource", "one"),
+            assistant_with_calls(&["tc_2"]),
+            Message::tool_result("tc_2", "query_datasource", "two"),
+            Message::user("q2"),
+            Message::assistant("a2"),
+            Message::user("q3"),
+            Message::assistant("a3"),
+            Message::user("q4"),
         ];
 
-        let prompt = build_compaction_prompt(&messages);
+        let (to_summarize, to_keep) = split_messages_for_compaction(&messages);
 
-        // Both should be truncated
-        let truncation_count = prompt.matches("[truncated for summary]").count();
-        assert_eq!(truncation_count, 2);
+        assert_eq!(to_summarize.len(), 3, "tc_1's whole batch is summarised");
+        assert_eq!(to_keep[0].role, MessageRole::Assistant);
+        assert_eq!(to_keep[0].tool_calls.as_ref().unwrap()[0].id, "tc_2");
+        assert_eq!(to_keep[1].role, MessageRole::Tool);
+        assert_eq!(to_keep[1].tool_call_id.as_deref(), Some("tc_2"));
     }
 
-    // -- should_compact with tool call arguments ------------------------------
+    #[test]
+    fn the_cut_moves_past_every_result_of_a_multi_call_batch() {
+        let messages = vec![
+            Message::user("first"),
+            assistant_with_calls(&["tc_1", "tc_2"]),
+            Message::tool_result("tc_1", "query_datasource", "one"),
+            Message::tool_result("tc_2", "query_datasource", "two"),
+            Message::user("q2"),
+            Message::assistant("a2"),
+            Message::user("q3"),
+            Message::assistant("a3"),
+            Message::user("q4"),
+        ];
+
+        let (to_summarize, to_keep) = split_messages_for_compaction(&messages);
+
+        assert_eq!(to_summarize.len(), 1, "only the first user message is summarised");
+        assert_eq!(to_keep[0].role, MessageRole::Assistant);
+        assert_eq!(to_keep[0].tool_calls.as_ref().unwrap().len(), 2);
+        assert_eq!(to_keep[1].tool_call_id.as_deref(), Some("tc_1"));
+        assert_eq!(to_keep[2].tool_call_id.as_deref(), Some("tc_2"));
+    }
+
+    #[test]
+    fn the_cut_keeps_a_deferred_server_tool_use_with_its_result() {
+        // A server call is announced on assistant A, client tool results follow,
+        // and the server result arrives on assistant B (KYO-979's deferred
+        // shape). The naive cut at index 6 keeps B's result and summarises A.
+        let messages = vec![
+            Message::user("u0"),
+            Message::user("u1"),
+            Message::user("u2"),
+            Message::user("u3"),
+            Message::assistant("").with_provider_content(Some(vec![
+                serde_json::json!({"type": "server_tool_use", "id": "srv1", "name": "web_search", "input": {"query": "x"}}),
+            ])),
+            Message::tool_result("tc_1", "query_datasource", "client result"),
+            Message::assistant("").with_provider_content(Some(vec![
+                serde_json::json!({"type": "web_search_tool_result", "tool_use_id": "srv1", "content": []}),
+            ])),
+            Message::user("u4"),
+            Message::assistant("a4"),
+            Message::user("u5"),
+            Message::assistant("a5"),
+            Message::user("u6"),
+        ];
+
+        let (to_summarize, to_keep) = split_messages_for_compaction(&messages);
+
+        assert_eq!(to_summarize.len(), 4, "the server use's message joins the kept tail");
+        assert_eq!(to_keep[0].role, MessageRole::Assistant);
+        assert!(server_use_ids(&to_keep[0]).any(|id| id == "srv1"));
+        assert!(to_keep.iter().any(|m| server_result_use_ids(m).any(|id| id == "srv1")));
+    }
+
+    #[test]
+    fn a_plain_history_still_keeps_exactly_the_last_six_messages() {
+        let messages: Vec<Message> = (0..10)
+            .map(|i| Message::user(format!("Message {i}")))
+            .collect();
+
+        let (to_summarize, to_keep) = split_messages_for_compaction(&messages);
+
+        assert_eq!(to_summarize.len(), 4);
+        assert_eq!(to_keep.len(), MESSAGES_TO_KEEP);
+    }
+
+    #[test]
+    fn the_cut_keeps_a_run_of_consecutive_assistant_messages_together() {
+        // A pause_turn chain (or a provider server-tool use + its next-message
+        // result) is stored as consecutive assistant messages. A naive cut at
+        // index 6 would keep chain2/chain3 and summarise chain1 (with the use).
+        let messages = vec![
+            Message::user("u0"),
+            Message::user("u1"),
+            Message::user("u2"),
+            Message::user("u3"),
+            Message::user("u4"),
+            Message::assistant("chain1"),
+            Message::assistant("chain2"),
+            Message::assistant("chain3"),
+            Message::user("u5"),
+            Message::assistant("a5"),
+            Message::user("u6"),
+            Message::assistant("a6"),
+        ];
+
+        let (to_summarize, to_keep) = split_messages_for_compaction(&messages);
+
+        assert_eq!(to_summarize.len(), 5, "the whole chain joins the kept tail");
+        assert_eq!(to_keep[0].content, "chain1");
+        assert_eq!(to_keep[1].content, "chain2");
+        assert_eq!(to_keep[2].content, "chain3");
+    }
 
     #[test]
     fn should_compact_includes_tool_call_argument_sizes() {
-        // Create a message with large tool call arguments
+        // Create a message with large tool call arguments.
         let large_args = serde_json::json!({"sql": "x".repeat(100_000)});
         let mut msg = Message::assistant("running query");
         msg.tool_calls = Some(vec![ToolCall {
@@ -675,56 +641,39 @@ mod contract_tests {
         }]);
 
         // With 100K chars in args alone, at 4 chars/token = 25K tokens
-        // This is well below threshold, but ensures args ARE counted
-        let result = should_compact(None, &[msg.clone()], 0);
-        // 100K chars + some overhead < 600K chars needed for 150K tokens
+        // This is well below threshold, but ensures args ARE counted.
+        let result = should_compact(None, &[msg.clone()], 0, THRESHOLD);
         assert!(!result);
 
-        // Now add enough system prompt to push over the edge
-        // Need total of 600K chars = 150K tokens
-        // Already have ~100K in args, need 500K more
-        let result = should_compact(None, &[msg], 500_001);
+        // Add enough system prompt to push over the edge.
+        let result = should_compact(None, &[msg], 500_001, THRESHOLD);
         assert!(result);
     }
 
-    // -- Context message ordering ---------------------------------------------
-
     #[test]
-    fn build_context_preserves_recent_message_order() {
-        let recent = vec![
-            Message::user("First question"),
-            Message::assistant("First answer"),
-            Message::user("Second question"),
-            Message::assistant("Second answer"),
-        ];
+    fn a_history_with_no_non_tool_message_to_keep_is_not_compacted() {
+        let messages: Vec<Message> = (0..10)
+            .map(|i| Message::tool_result(format!("tc_{i}"), "query_datasource", "r"))
+            .collect();
 
-        let context = build_context_with_compaction(
-            "System.",
-            "Summary.",
-            &recent,
-        );
+        let (to_summarize, to_keep) = split_messages_for_compaction(&messages);
 
-        // Recent messages start at index 3 (after system + summary + ack)
-        assert_eq!(context[3].content, "First question");
-        assert_eq!(context[4].content, "First answer");
-        assert_eq!(context[5].content, "Second question");
-        assert_eq!(context[6].content, "Second answer");
+        assert!(to_summarize.is_empty(), "no safe cut: every message is a tool result");
+        assert_eq!(to_keep.len(), messages.len());
     }
 
-    // -- Role labels in compaction prompt -------------------------------------
-
     #[test]
-    fn compaction_prompt_uses_correct_role_labels() {
-        let messages = vec![
-            Message::user("User message"),
-            Message::assistant("Assistant message"),
-            Message::system("System message"),
-        ];
+    fn an_old_unpaired_tool_result_moves_into_the_summarised_part() {
+        // The first message is a tool result with no call (broken history), but
+        // the kept tail still starts at a non-tool message, so the cut is safe.
+        let mut messages = vec![Message::tool_result("tc_1", "query_datasource", "one")];
+        messages.extend((0..9).map(|i| Message::user(format!("Message {i}"))));
 
-        let prompt = build_compaction_prompt(&messages);
-        assert!(prompt.contains("**USER**:"));
-        assert!(prompt.contains("**ASSISTANT**:"));
-        assert!(prompt.contains("**SYSTEM**:"));
+        let (to_summarize, to_keep) = split_messages_for_compaction(&messages);
+
+        assert_eq!(to_summarize.len(), 4);
+        assert_eq!(to_keep[0].role, MessageRole::User);
+        assert!(to_keep.iter().all(|m| m.role != MessageRole::Tool));
     }
 
     // -- UTF-8 safe truncation ------------------------------------------------
@@ -759,22 +708,5 @@ mod contract_tests {
         assert_eq!(super::floor_char_boundary(s, 5), 2);
         // Truncating at byte 6 is the end
         assert_eq!(super::floor_char_boundary(s, 6), 6);
-    }
-
-    #[test]
-    fn compaction_prompt_truncates_multibyte_tool_result_safely() {
-        // Create a tool result with multi-byte characters near the 2000-byte boundary.
-        // Each '🎉' is 4 bytes. 500 emojis = 2000 bytes exactly.
-        // Add one more character to exceed the limit.
-        let content: String = "🎉".repeat(500) + "extra";
-        assert!(content.len() > 2000);
-
-        let messages = vec![Message::tool_result("tc_1", "tool_a", &content)];
-        let prompt = build_compaction_prompt(&messages);
-
-        // Should not panic, and should contain the truncation marker
-        assert!(prompt.contains("[truncated for summary]"));
-        // The full content should NOT be present
-        assert!(!prompt.contains("extra"));
     }
 }
