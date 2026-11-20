@@ -601,7 +601,6 @@ impl AgentThinkingTracker {
             self.total_cost += c;
         }
     }
-
     pub(crate) async fn try_update_token_usage(&mut self, input_tokens: u32, output_tokens: u32, cost: Option<f64>) -> Result<(), String> {
         self.total_input_tokens += input_tokens;
         self.total_output_tokens += output_tokens;

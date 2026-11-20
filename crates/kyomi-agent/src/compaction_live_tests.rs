@@ -309,11 +309,70 @@ async fn compaction_compacts_persists_and_restores_on_a_real_conversation() {
         assert_eq!(reported["output_tokens"].as_i64(), Some(i64::from(row_out)));
     }
 
-    // Tool-pair safety in the kept tail. `execute_agent_chat` puts the system
-    // prompt first, so the DB index is the state index minus one.
+    // What the summary request carried: the stored summarised range holds the
+    // real web-search use/result (encrypted content included) and the client
+    // tool pair. The summary call above completed with that range, which
+    // requires the run's matching client tool definitions in the request.
     let messages = chat_service::get_agent_messages(&db, &encryption_key, &session_id, None)
         .await
         .expect("read history");
+    let summarised = &messages[..index.saturating_sub(1)];
+    let web_result = summarised
+        .iter()
+        .flat_map(|message| {
+            message
+                .provider_content
+                .as_ref()
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+        })
+        .find(|block| block["type"] == "web_search_tool_result")
+        .expect("the summarised range carries the real web-search result");
+    assert!(
+        web_result["content"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|result| result["encrypted_content"].is_string()),
+        "the real encrypted search content is stored: {web_result}"
+    );
+    assert!(
+        summarised.iter().any(|message| {
+            message
+                .provider_content
+                .as_ref()
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .any(|block| block["type"] == "server_tool_use" && block["name"] == "web_search")
+        }),
+        "the real server_tool_use block is in the summarised range"
+    );
+    assert!(
+        summarised.iter().any(|message| {
+            message
+                .tool_calls
+                .as_ref()
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .any(|call| call["id"] == "call_1")
+        }),
+        "the client tool_use is in the summarised range"
+    );
+    assert!(
+        summarised
+            .iter()
+            .any(|message| message.role == "tool" && message.tool_call_id.as_deref() == Some("call_1")),
+        "the client tool result is in the summarised range"
+    );
+    eprintln!(
+        "KYO-975 live: summarised range carries real web_search server_tool_use + web_search_tool_result (encrypted) + client tool pair; the summary call completed with the run's client tool definitions"
+    );
+
+    // Tool-pair safety in the kept tail. `execute_agent_chat` puts the system
+    // prompt first, so the DB index is the state index minus one.
     let kept = &messages[index.saturating_sub(1)..];
     assert!(!kept.is_empty(), "the kept tail has the recent turns");
     assert_ne!(kept[0].role, "tool", "the cut never starts the tail with a tool result");

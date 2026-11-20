@@ -1731,9 +1731,14 @@ impl CustomAgent {
         // stored web blocks replay without them (the live check proves it), and
         // offering them would bypass the per-turn/monthly web budget.
         let summary_tools = self.registry.get_tool_definitions(&self.config.tool_filter);
-        let tools_tokens = serde_json::to_string(&summary_tools)
-            .map(|serialized| serialized.len() / crate::compaction::CHARS_PER_TOKEN as usize)
-            .unwrap_or(0) as u64;
+        let tools_tokens = (serde_json::to_string(&summary_tools)
+            .map_err(|e| {
+                kyomi_core::Error::Internal(format!(
+                    "failed to size the summary tool definitions: {e}"
+                ))
+            })?
+            .len()
+            / crate::compaction::CHARS_PER_TOKEN as usize) as u64;
         let response = {
             let compaction = self
                 .compaction
