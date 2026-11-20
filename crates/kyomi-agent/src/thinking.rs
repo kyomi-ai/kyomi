@@ -586,6 +586,21 @@ impl AgentThinkingTracker {
             error!(%error, "Token usage notification failed");
         }
     }
+
+    /// Add an auxiliary call's usage to the run's totals without changing the
+    /// conversation context size (the compaction summary, KYO-975).
+    pub(crate) async fn record_background_usage(
+        &mut self,
+        input_tokens: u32,
+        output_tokens: u32,
+        cost: Option<f64>,
+    ) {
+        self.total_input_tokens += input_tokens;
+        self.total_output_tokens += output_tokens;
+        if let Some(c) = cost {
+            self.total_cost += c;
+        }
+    }
     pub(crate) async fn try_update_token_usage(&mut self, input_tokens: u32, output_tokens: u32, cost: Option<f64>) -> Result<(), String> {
         self.total_input_tokens += input_tokens;
         self.total_output_tokens += output_tokens;

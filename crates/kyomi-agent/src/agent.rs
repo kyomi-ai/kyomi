@@ -436,6 +436,9 @@ impl AgentState {
 pub(crate) enum AgentProgress {
     Thinking(String),
     Usage(u32, u32, Option<f64>),
+    /// Usage of an auxiliary call (the compaction summary) that belongs to the
+    /// run's reported totals but not its conversation context size (KYO-975).
+    BackgroundUsage(u32, u32, Option<f64>),
     ToolStart(String, serde_json::Value),
     ToolEnd(String, String, bool),
     Preparing,
@@ -1623,7 +1626,6 @@ impl CustomAgent {
             return Ok((context, 0));
         }
         let actual = (self.state.last_input_tokens > 0).then_some(self.state.last_input_tokens);
-
         // Strip the system prompt: `split_messages_for_compaction` and the
         // summary prompt take only the conversation turns.
         let system_offset = usize::from(
@@ -1640,53 +1642,87 @@ impl CustomAgent {
             return Ok((context, 0));
         }
 
+        let already_compacted = self.state.compacted_summary.is_some();
+        let estimate = crate::compaction::estimate_tokens(conversation, system_prompt_len);
+        // A summary exists and the conversation context is below the threshold,
+        // but the provider-reported input (which also counts the fixed system
+        // prompt and tool definitions) is still over it. Another summary cannot
+        // reduce that overhead; fail instead of re-summarising every iteration.
+        if already_compacted
+            && actual.is_some_and(|input| input >= threshold_tokens)
+            && estimate < threshold_tokens
+        {
+            let window = self
+                .compaction
+                .as_ref()
+                .expect("checked for the threshold above")
+                .context_window;
+            return Err(kyomi_core::Error::Internal(format!(
+                "the request is still over the compaction threshold after summarising, but the conversation \
+                 context is below it: context_window={window} threshold={threshold_tokens} \
+                 input_tokens={} estimate={estimate}; the fixed request overhead (system prompt/tools) \
+                 cannot be reduced by compaction",
+                actual.unwrap_or(0)
+            )));
+        }
+
         let (to_summarize, to_keep) = crate::compaction::split_messages_for_compaction(conversation);
         // When a summary already exists, `build_llm_context` starts with the
         // old summary and its acknowledgment; only the messages after them are
         // real state entries that the new cut index can advance over.
-        let already_compacted = self.state.compacted_summary.is_some();
         let summarised_state_messages = if already_compacted {
             to_summarize.len().saturating_sub(2)
         } else {
             to_summarize.len()
         };
-        if summarised_state_messages == 0 {
-            return Ok((context, 0));
+        if summarised_state_messages == 0 || to_summarize.is_empty() {
+            let window = self
+                .compaction
+                .as_ref()
+                .expect("checked for the threshold above")
+                .context_window;
+            return Err(kyomi_core::Error::Internal(format!(
+                "conversation is over the compaction threshold but no older turns can be summarised: \
+                 context_window={window} threshold={threshold_tokens} estimate={estimate}"
+            )));
         }
 
-        let prompt = crate::compaction::build_compaction_prompt(&to_summarize);
-        let summary_messages = [Message::user(prompt.as_str())];
+        let mut summary_messages = to_summarize;
+        summary_messages.push(Message::user(crate::compaction::COMPACTION_INSTRUCTION));
         let response = {
             let compaction = self
                 .compaction
                 .as_ref()
                 .expect("checked for the threshold above");
-            // The fast/title model writes the summary when it can accept the
-            // region. Otherwise the chat model (whose window defines the
-            // threshold) does: sending a 750K-token summary to a 200K title
-            // model would fail the run at exactly the point compaction is meant
-            // to keep it going.
-            let prompt_tokens = (prompt.len() / crate::compaction::CHARS_PER_TOKEN as usize) as u64;
+            // The run's fast/title model writes the summary. There is no
+            // fallback: if its own reported window cannot accept the region, the
+            // run fails with numbers the operator can act on. A provider that
+            // reports no window gets the request; a provider rejection fails the
+            // run loudly.
+            let prompt_tokens = u64::from(crate::compaction::estimate_tokens(&summary_messages, 0));
             let fast_window = u64::from(compaction.client.context_window());
             // 25% covers token-dense SQL/JSON (about 3 chars/token) plus the
             // summary's own output budget.
             let required = prompt_tokens + prompt_tokens / 4 + u64::from(compaction.options.max_tokens);
-            let use_fast = fast_window > 0 && required <= fast_window;
-            let summary_client: &dyn LLMProvider = if use_fast {
-                compaction.client.as_ref()
-            } else {
-                self.client.as_ref()
-            };
+            if fast_window > 0 && required > fast_window {
+                return Err(kyomi_core::Error::Internal(format!(
+                    "the summary model cannot accept the conversation summary: model={} window={fast_window} \
+                     needed_tokens~{} required threshold={threshold_tokens} context_window={}; \
+                     choose a title model with a larger window or lower the compaction threshold",
+                    compaction.client.model(),
+                    required,
+                    compaction.context_window,
+                )));
+            }
             info!(
                 session_id = self.tool_context.session_id.as_deref().unwrap_or(""),
-                summary_model = summary_client.model(),
-                fast_summary = use_fast,
+                summary_model = compaction.client.model(),
                 summary_prompt_tokens = prompt_tokens,
-                fast_window,
+                summary_window = fast_window,
                 "conversation compaction summary"
             );
             tokio::select! {
-                result = summary_client.complete(
+                result = compaction.client.complete(
                     &summary_messages,
                     &[],
                     &compaction.options,
@@ -1700,6 +1736,16 @@ impl CustomAgent {
         let call_tokens = u64::from(response.usage.input_tokens)
             + u64::from(response.usage.cache_creation_input_tokens)
             + u64::from(response.usage.output_tokens);
+        // This call is billed with the run; count it in the turn's reported
+        // totals without changing the conversation's context size.
+        let summary_input = u32::try_from(
+            u64::from(response.usage.input_tokens)
+                + u64::from(response.usage.cache_creation_input_tokens)
+                + u64::from(response.usage.cache_read_input_tokens),
+        )
+        .unwrap_or(u32::MAX);
+        self.record_background_usage(summary_input, response.usage.output_tokens, response.cost)
+            .await;
         let summary = response.content.trim();
         if summary.is_empty() {
             return Err(kyomi_core::Error::Internal(
@@ -1726,7 +1772,48 @@ impl CustomAgent {
         // next call sends; let the next check use the (small) estimate until
         // the provider reports the new size.
         self.state.last_input_tokens = 0;
-        Ok((self.build_llm_context(), call_tokens))
+
+        // A compaction that still leaves the context over the threshold would
+        // run again on every iteration (each time summarising the previous
+        // summary). Fail with the numbers instead of billing a loop.
+        let rebuilt = self.build_llm_context();
+        let rebuilt_offset = usize::from(
+            rebuilt
+                .first()
+                .is_some_and(|message| message.role == crate::types::MessageRole::System),
+        );
+        let rebuilt_system_len = rebuilt
+            .first()
+            .filter(|_| rebuilt_offset == 1)
+            .map_or(0, |message| message.content.len());
+        let rebuilt_estimate =
+            crate::compaction::estimate_tokens(&rebuilt[rebuilt_offset..], rebuilt_system_len);
+        if rebuilt_estimate >= threshold_tokens {
+            let window = self
+                .compaction
+                .as_ref()
+                .expect("checked for the threshold above")
+                .context_window;
+            return Err(kyomi_core::Error::Internal(format!(
+                "conversation is still over the compaction threshold after summarising: \
+                 context_window={window} threshold={threshold_tokens} estimate={rebuilt_estimate}; \
+                 lower the compaction threshold or shorten the recent turns"
+            )));
+        }
+        Ok((rebuilt, call_tokens))
+    }
+
+    /// Add an auxiliary model call's usage to the run's reported totals without
+    /// touching the conversation context size (the compaction summary, KYO-975).
+    async fn record_background_usage(
+        &self,
+        input_tokens: u32,
+        output_tokens: u32,
+        cost: Option<f64>,
+    ) {
+        if let Some(cb) = &self.callbacks.on_progress {
+            cb(AgentProgress::BackgroundUsage(input_tokens, output_tokens, cost)).await;
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -4476,6 +4563,7 @@ Second chart:\n{CHARTML_STRIPPED_NOTE}\nDone."
     ) -> crate::compaction::CompactionRuntime {
         crate::compaction::CompactionRuntime {
             threshold_tokens,
+            context_window: 200_000,
             client: Box::new(ScriptedProvider {
                 script: Mutex::new(script.into()),
                 after_script: Reply::Text("unused summary".into()),
@@ -4492,7 +4580,7 @@ Second chart:\n{CHARTML_STRIPPED_NOTE}\nDone."
             10,
             vec![
                 Reply::ToolCallWithUsage(billable_usage(10)),
-                Reply::ToolCallWithUsage(billable_usage(1_000)),
+                Reply::ToolCallWithUsage(billable_usage(10)),
                 Reply::ToolCallWithUsage(billable_usage(1_000)),
                 Reply::Text("final answer".into()),
             ],
@@ -4568,6 +4656,16 @@ Second chart:\n{CHARTML_STRIPPED_NOTE}\nDone."
             vec![Reply::Text("should not be used".into())],
             Arc::clone(&summary_calls),
         ));
+        let background = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&background);
+        agent.callbacks_mut().on_progress = Some(Box::new(move |progress| {
+            let sink = Arc::clone(&sink);
+            Box::pin(async move {
+                if let AgentProgress::BackgroundUsage(input, output, cost) = progress {
+                    sink.lock().expect("progress log").push((input, output, cost));
+                }
+            })
+        }));
 
         agent
             .chat("first question", CancellationToken::new(), None, None, None)
@@ -4577,6 +4675,10 @@ Second chart:\n{CHARTML_STRIPPED_NOTE}\nDone."
         assert!(summary_calls.lock().expect("summary call log").is_empty());
         assert_eq!(agent.state().compacted_summary, None);
         assert_eq!(agent.state().messages_since_compaction_index, 0);
+        assert!(
+            background.lock().expect("progress log").is_empty(),
+            "a run that does not compact reports no auxiliary usage"
+        );
     }
 
     #[tokio::test]
@@ -4685,7 +4787,7 @@ Second chart:\n{CHARTML_STRIPPED_NOTE}\nDone."
             state.compacted_summary = Some("first summary".into());
             state.messages_since_compaction_index = 11; // system + 10 old
             for i in 0..10 {
-                state.messages.push(Message::user(format!("recent {i}")));
+                state.messages.push(Message::user(format!("recent {i} {}", "y".repeat(500))));
             }
             state.last_input_tokens = 1_000;
         }
@@ -4707,7 +4809,56 @@ Second chart:\n{CHARTML_STRIPPED_NOTE}\nDone."
     }
 
     #[tokio::test]
-    async fn a_summary_that_cannot_fit_the_fast_model_uses_the_chat_model() {
+    async fn a_stored_web_block_reaches_the_summary_request_unchanged() {
+        let block = serde_json::json!({
+            "type": "web_search_tool_result",
+            "tool_use_id": "srv1",
+            "content": [{"type": "web_search_result", "url": "https://example.com/q4"}]
+        });
+        let summary_calls = Arc::new(Mutex::new(Vec::new()));
+        let (mut agent, _calls) = scripted_agent(1, vec![], Reply::Text("unused".into())).await;
+        agent.set_compaction(compaction_runtime(
+            1_000,
+            vec![Reply::Text("a summary".into())],
+            Arc::clone(&summary_calls),
+        ));
+        {
+            let state = agent.state_mut();
+            state.messages.push(Message::system("system prompt"));
+            for i in 0..14 {
+                let message = if i == 2 {
+                    Message::assistant("search findings").with_provider_content(Some(vec![block.clone()]))
+                } else {
+                    Message::user(format!("turn {i}"))
+                };
+                state.messages.push(message);
+            }
+            state.last_input_tokens = 1_000;
+        }
+
+        agent
+            .maybe_compact(&CancellationToken::new())
+            .await
+            .expect("the summary call succeeds");
+        let calls = summary_calls.lock().expect("summary call log");
+        assert_eq!(calls.len(), 1);
+        let summary = &calls[0].messages;
+        assert!(
+            summary.iter().any(|message| message
+                .provider_content
+                .as_ref()
+                .is_some_and(|blocks| blocks.contains(&block))),
+            "the stored web block reaches the summary request unchanged: {summary:?}"
+        );
+        assert_eq!(
+            summary.last().expect("instruction appended").content,
+            crate::compaction::COMPACTION_INSTRUCTION,
+            "the only added text is the summary instruction"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_summary_model_too_small_fails_the_run_loudly() {
         struct SmallWindowClient;
         #[async_trait::async_trait]
         impl LLMProvider for SmallWindowClient {
@@ -4718,7 +4869,7 @@ Second chart:\n{CHARTML_STRIPPED_NOTE}\nDone."
                 _options: &crate::provider::RequestOptions,
                 _user_names: &HashMap<String, String>,
             ) -> kyomi_core::Result<crate::types::LLMResponse> {
-                panic!("the fast summary client cannot fit the region and must not be called")
+                panic!("the fit check must reject the region before calling the model")
             }
             fn model(&self) -> &str {
                 "small-window-summariser"
@@ -4728,16 +4879,13 @@ Second chart:\n{CHARTML_STRIPPED_NOTE}\nDone."
             }
         }
 
-        // Three tool rounds cross 1000 tokens; the fourth call writes the
-        // summary through the chat client, and the fifth is the final answer.
         let (mut agent, _calls) = scripted_agent(
             10,
             vec![
+                Reply::ToolCallWithUsage(billable_usage(10)),
+                Reply::ToolCallWithUsage(billable_usage(10)),
                 Reply::ToolCallWithUsage(billable_usage(1_000)),
-                Reply::ToolCallWithUsage(billable_usage(1_000)),
-                Reply::ToolCallWithUsage(billable_usage(1_000)),
-                Reply::Text("summary via chat model".into()),
-                Reply::Text("final".into()),
+                Reply::Text("should not be reached".into()),
             ],
             Reply::Text("unexpected".into()),
         )
@@ -4745,18 +4893,166 @@ Second chart:\n{CHARTML_STRIPPED_NOTE}\nDone."
         agent.state_mut().messages.push(Message::system("system prompt"));
         agent.set_compaction(crate::compaction::CompactionRuntime {
             threshold_tokens: 1_000,
+            context_window: 200_000,
             client: Box::new(SmallWindowClient),
             options: crate::provider::RequestOptions::new(512),
         });
 
+        let error = agent
+            .chat("first question", CancellationToken::new(), None, None, None)
+            .await
+            .expect_err("a summary model that cannot fit the region fails the run");
+        let message = error.to_string();
+        assert!(message.contains("summary model cannot accept"), "{message}");
+        assert!(message.contains("window=10"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn a_context_still_over_the_threshold_after_compaction_fails_the_run() {
+        let summary_calls = Arc::new(Mutex::new(Vec::new()));
+        let (mut agent, _calls) = scripted_agent(1, vec![], Reply::Text("unused".into())).await;
+        agent.set_compaction(compaction_runtime(
+            100,
+            vec![Reply::Text("short summary".into())],
+            Arc::clone(&summary_calls),
+        ));
+        {
+            let state = agent.state_mut();
+            state.messages.push(Message::system("system prompt"));
+            for _ in 0..14 {
+                state.messages.push(Message::user("x".repeat(4_000)));
+            }
+            // The kept tail itself is ~6,000 estimate tokens, far over 100.
+            for _ in 0..6 {
+                state.messages.push(Message::user("y".repeat(4_000)));
+            }
+            state.last_input_tokens = 1_000;
+        }
+
+        let error = agent
+            .maybe_compact(&CancellationToken::new())
+            .await
+            .expect_err("a compaction that cannot get under the threshold fails");
+        let message = error.to_string();
+        assert!(message.contains("still over the compaction threshold"), "{message}");
+        assert!(message.contains("threshold=100"), "{message}");
+        assert_eq!(summary_calls.lock().expect("summary log").len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_context_over_the_threshold_with_nothing_to_summarise_fails_the_run() {
+        let summary_calls = Arc::new(Mutex::new(Vec::new()));
+        let (mut agent, _calls) = scripted_agent(1, vec![], Reply::Text("unused".into())).await;
+        agent.set_compaction(compaction_runtime(
+            100,
+            vec![Reply::Text("must not be used".into())],
+            Arc::clone(&summary_calls),
+        ));
+        {
+            let state = agent.state_mut();
+            state.messages.push(Message::system("system prompt"));
+            for _ in 0..5 {
+                state.messages.push(Message::user("x".repeat(4_000)));
+            }
+            state.last_input_tokens = 1_000;
+        }
+
+        let error = agent
+            .maybe_compact(&CancellationToken::new())
+            .await
+            .expect_err("nothing can be summarised, so the run fails instead of looping");
+        let message = error.to_string();
+        assert!(message.contains("no older turns can be summarised"), "{message}");
+        assert!(message.contains("threshold=100"), "{message}");
+        assert!(summary_calls.lock().expect("summary log").is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_request_still_over_the_threshold_on_fixed_overhead_fails_the_run() {
+        let (mut agent, _calls) = scripted_agent(1, vec![], Reply::Text("unused".into())).await;
+        agent.set_compaction(compaction_runtime(
+            1_000,
+            vec![Reply::Text("must not be used".into())],
+            Arc::new(Mutex::new(Vec::new())),
+        ));
+        {
+            let state = agent.state_mut();
+            state.messages.push(Message::system("system prompt"));
+            state.compacted_summary = Some("a short summary".into());
+            state.messages_since_compaction_index = 1;
+            for i in 0..4 {
+                state.messages.push(Message::user(format!("recent {i}")));
+            }
+            // The compacted context is far below 1,000; the provider still
+            // reports 2,000 because of the fixed system prompt/tool schemas.
+            state.last_input_tokens = 2_000;
+        }
+
+        let error = agent
+            .maybe_compact(&CancellationToken::new())
+            .await
+            .expect_err("fixed request overhead cannot be compacted away");
+        let message = error.to_string();
+        assert!(message.contains("request is still over the compaction threshold"), "{message}");
+        assert!(message.contains("input_tokens=2000"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn the_summary_usage_is_reported_as_background_usage() {
+        let summary_usage = crate::types::AgentTokenUsage {
+            input_tokens: 100,
+            output_tokens: 20,
+            cache_creation_input_tokens: 10,
+            cache_read_input_tokens: 5,
+            reasoning_tokens: 0,
+        };
+        let summary_response = crate::types::LLMResponse {
+            raw_response: serde_json::Value::Null,
+            content: "summary of the earlier turns".into(),
+            finish_reason: "end_turn".into(),
+            usage: summary_usage,
+            tool_calls: None,
+            cost: Some(0.5),
+            thinking_content: None,
+            call_detail: None,
+        };
+        let (mut agent, _calls) = scripted_agent(
+            10,
+            vec![
+                Reply::ToolCallWithUsage(billable_usage(10)),
+                Reply::ToolCallWithUsage(billable_usage(10)),
+                Reply::ToolCallWithUsage(billable_usage(1_000)),
+                Reply::Text("final".into()),
+            ],
+            Reply::Text("unexpected".into()),
+        )
+        .await;
+        agent.state_mut().messages.push(Message::system("system prompt"));
+        agent.set_compaction(compaction_runtime(
+            1_000,
+            vec![Reply::Response(Box::new(summary_response))],
+            Arc::new(Mutex::new(Vec::new())),
+        ));
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&seen);
+        agent.callbacks_mut().on_progress = Some(Box::new(move |progress| {
+            let sink = Arc::clone(&sink);
+            Box::pin(async move {
+                if let AgentProgress::BackgroundUsage(input, output, cost) = progress {
+                    sink.lock().expect("progress log").push((input, output, cost));
+                }
+            })
+        }));
+
         let answer = agent
             .chat("first question", CancellationToken::new(), None, None, None)
             .await
-            .expect("the chat model writes the summary");
+            .expect("the run completes");
         assert_eq!(answer, "final");
         assert_eq!(
-            agent.state().compacted_summary.as_deref(),
-            Some("summary via chat model")
+            *seen.lock().expect("progress log"),
+            vec![(115, 20, Some(0.5))],
+            "the summary's billable input/output/cost are reported without changing context tokens"
         );
     }
 
@@ -4766,7 +5062,7 @@ Second chart:\n{CHARTML_STRIPPED_NOTE}\nDone."
             10,
             vec![
                 Reply::ToolCallWithUsage(billable_usage(10)),
-                Reply::ToolCallWithUsage(billable_usage(1_000)),
+                Reply::ToolCallWithUsage(billable_usage(10)),
                 Reply::ToolCallWithUsage(billable_usage(1_000)),
                 Reply::Text("should not be reached".into()),
             ],
@@ -4792,7 +5088,7 @@ Second chart:\n{CHARTML_STRIPPED_NOTE}\nDone."
             10,
             vec![
                 Reply::ToolCallWithUsage(billable_usage(10)),
-                Reply::ToolCallWithUsage(billable_usage(1_000)),
+                Reply::ToolCallWithUsage(billable_usage(10)),
                 Reply::ToolCallWithUsage(billable_usage(1_000)),
                 Reply::Text("should not be reached".into()),
             ],
@@ -4835,7 +5131,7 @@ Second chart:\n{CHARTML_STRIPPED_NOTE}\nDone."
                 max_total_tokens: Some(100_000),
                 ..Default::default()
             },
-            vec![Reply::ToolCallWithUsage(billable_usage(1_000)); 4],
+            vec![Reply::ToolCallWithUsage(billable_usage(10)), Reply::ToolCallWithUsage(billable_usage(10)), Reply::ToolCallWithUsage(billable_usage(1_000)), Reply::ToolCallWithUsage(billable_usage(1_000))],
             Reply::Text("Summary from partial data.".to_string()),
         )
         .await;

@@ -317,6 +317,7 @@ impl ChatAgentAdapter {
                 match progress {
                     AgentProgress::Thinking(text) => tracker.agent_thought(&text).await,
                     AgentProgress::Usage(input, output, cost) => tracker.update_token_usage(input, output, cost).await,
+                    AgentProgress::BackgroundUsage(input, output, cost) => tracker.record_background_usage(input, output, cost).await,
                     AgentProgress::ToolStart(name, arguments) => tracker.tool_execution_started(&name, &arguments).await,
                     AgentProgress::ToolEnd(name, text, success) => tracker.tool_execution_completed(&name, &text, success).await,
                     AgentProgress::Preparing => tracker.preparing_response().await,
@@ -2498,11 +2499,11 @@ mod tests {
             Box::new(TextReplyProvider { reply: "answer after compaction" }),
         );
         first.agent.set_compaction(crate::compaction::CompactionRuntime {
-            threshold_tokens: 100,
+            threshold_tokens: 6_000,
+            context_window: 200_000,
             client: Box::new(summarizer),
             options: crate::provider::RequestOptions::new(512),
-        });
-        let user = UserMessagePersistence::default();
+        });        let user = UserMessagePersistence::default();
         let assistant = AssistantMessagePersistence::adapter_inserts_with_new_id();
         first.chat(ChatParams {
             message: "one more question", cancel_token: CancellationToken::new(), current_time_user_tz: None,

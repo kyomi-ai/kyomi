@@ -21,8 +21,10 @@
 //! 2. If compaction is needed, [`split_messages_for_compaction`] divides
 //!    messages into "to summarize" and "to keep" groups at a tool-pair-safe
 //!    boundary.
-//! 3. [`build_compaction_prompt`] creates a summarization prompt from the
-//!    messages that need compacting.
+//! 3. The older turns are sent to the summary model **exactly as stored** —
+//!    the same structured messages (provider web blocks included) the main
+//!    model receives — followed by [`COMPACTION_INSTRUCTION`]. Nothing is
+//!    filtered, truncated or converted to text.
 //! 4. The agent sends this prompt to the run's fast model (the workspace title
 //!    model, else `LLM_TITLE_MODEL`, else the setup's own model) when that
 //!    model's own context window can accept the summarised region; otherwise
@@ -41,8 +43,12 @@ use crate::types::{Message, MessageRole};
 pub struct CompactionRuntime {
     /// Input-token count at or above which older turns are summarised.
     pub threshold_tokens: u32,
+    /// The resolved chat context window the threshold was derived from (for
+    /// logs and the clear failure when the context cannot be reduced).
+    pub context_window: u32,
     /// Fast model used only for the summary (the workspace title model, else
-    /// `LLM_TITLE_MODEL`, else the setup's own model).
+    /// `LLM_TITLE_MODEL`, else the setup's own model). If it cannot accept the
+    /// region the run fails; there is no fallback model.
     pub client: Box<dyn LLMProvider>,
     /// Request options for the summary call (title/background sampling).
     pub options: RequestOptions,
@@ -228,73 +234,10 @@ fn server_result_use_ids(message: &Message) -> impl Iterator<Item = &str> {
         .filter_map(|block| block.get("tool_use_id").and_then(serde_json::Value::as_str))
 }
 
-/// Build a summarization prompt from messages that need compacting.
-///
-/// The resulting string is intended to be sent to a fast model (Haiku)
-/// as the user message content. It asks the model to preserve key
-/// questions, data discovered, queries executed, insights found, and
-/// context needed for continuation.
-pub fn build_compaction_prompt(messages_to_summarize: &[Message]) -> String {
-    let mut conversation_lines = Vec::new();
-
-    for msg in messages_to_summarize {
-        let role_label = match msg.role {
-            MessageRole::User => "USER".to_string(),
-            MessageRole::Assistant => "ASSISTANT".to_string(),
-            MessageRole::Tool => {
-                if let Some(ref name) = msg.name {
-                    format!("TOOL RESULT ({name})")
-                } else {
-                    "TOOL RESULT".to_string()
-                }
-            }
-            MessageRole::System => "SYSTEM".to_string(),
-        };
-
-        let mut content = msg.content.clone();
-
-        // Truncate very long tool results for the summary prompt.
-        // Use floor_char_boundary to avoid panicking on multi-byte UTF-8.
-        if msg.role == MessageRole::Tool && content.len() > 2000 {
-            let boundary = floor_char_boundary(&content, 2000);
-            content.truncate(boundary);
-            content.push_str("\n... [truncated for summary]");
-        }
-
-        conversation_lines.push(format!("**{role_label}**:\n{content}\n"));
-
-        // Include tool call names if present.
-        if let Some(ref tool_calls) = msg.tool_calls {
-            for tc in tool_calls {
-                conversation_lines.push(format!("  -> Called tool: {}", tc.name));
-            }
-        }
-    }
-
-    let conversation_text = conversation_lines.join("\n");
-
-    format!(
-        "You are summarizing a conversation between a user and an AI data analyst assistant.\n\
-         \n\
-         Create a comprehensive summary that captures:\n\
-         1. **Key Questions Asked**: What did the user want to know?\n\
-         2. **Data Discovered**: Tables, schemas, columns that were explored\n\
-         3. **Queries Executed**: Important SQL queries and their results (include actual numbers/findings)\n\
-         4. **Insights Found**: Key findings, patterns, or conclusions\n\
-         5. **Context for Continuation**: Any important context needed to continue the conversation\n\
-         \n\
-         Be thorough - this summary will replace the original messages in the LLM's context.\n\
-         Preserve specific details like table names, column names, query results, and numbers.\n\
-         \n\
-         ---\n\
-         CONVERSATION TO SUMMARIZE:\n\
-         \n\
-         {conversation_text}\n\
-         \n\
-         ---\n\
-         COMPREHENSIVE SUMMARY:"
-    )
-}
+/// The final user message of a compaction request. The older turns are sent
+/// exactly as stored (structured messages, provider blocks included); this is
+/// the only added text.
+pub const COMPACTION_INSTRUCTION: &str = "Summarise the conversation above for an AI data analyst assistant. Preserve the key questions, data discovered, queries and their results, findings, and any context needed to continue. Reply with the summary only.";
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -475,42 +418,6 @@ mod tests {
         let (to_summarize, to_keep) = split_messages_for_compaction(&[]);
         assert!(to_summarize.is_empty());
         assert!(to_keep.is_empty());
-    }
-
-    // -- build_compaction_prompt tests ----------------------------------------
-
-    #[test]
-    fn build_compaction_prompt_includes_message_content() {
-        let messages = vec![
-            Message::user("What is our revenue?"),
-            Message::assistant("Let me check the database."),
-            Message::tool_result("tc_1", "query_datasource", "Revenue: $1.2M"),
-        ];
-
-        let prompt = build_compaction_prompt(&messages);
-
-        assert!(prompt.contains("What is our revenue?"));
-        assert!(prompt.contains("Let me check the database."));
-        assert!(prompt.contains("Revenue: $1.2M"));
-        assert!(prompt.contains("TOOL RESULT (query_datasource)"));
-        assert!(prompt.contains("Key Questions Asked"));
-        assert!(prompt.contains("Data Discovered"));
-        assert!(prompt.contains("COMPREHENSIVE SUMMARY:"));
-    }
-
-    #[test]
-    fn build_compaction_prompt_truncates_long_tool_results() {
-        let long_result = "x".repeat(3000);
-        let messages = vec![
-            Message::tool_result("tc_1", "query_datasource", &long_result),
-        ];
-
-        let prompt = build_compaction_prompt(&messages);
-
-        // The truncated content should be present.
-        assert!(prompt.contains("[truncated for summary]"));
-        // The full 3000-char content should NOT be present.
-        assert!(!prompt.contains(&long_result));
     }
 
     // -- Constants tests -----------------------------------------------------
@@ -737,138 +644,6 @@ mod contract_tests {
         assert!(to_keep.iter().all(|m| m.role != MessageRole::Tool));
     }
 
-    // -- Message type preservation in compaction prompt ------------------------
-
-    #[test]
-    fn compaction_prompt_includes_tool_call_names() {
-        let mut assistant_msg = Message::assistant("Let me query the database.");
-        assistant_msg.tool_calls = Some(vec![ToolCall {
-            id: "tc_1".into(),
-            name: "query_datasource".into(),
-            arguments: serde_json::json!({"sql": "SELECT 1"}),
-            arguments_error: None,
-        }]);
-
-        let messages = vec![
-            Message::user("What is our revenue?"),
-            assistant_msg,
-            Message::tool_result("tc_1", "query_datasource", "Revenue: $1.2M"),
-        ];
-
-        let prompt = build_compaction_prompt(&messages);
-
-        assert!(prompt.contains("USER"));
-        assert!(prompt.contains("ASSISTANT"));
-        assert!(prompt.contains("TOOL RESULT (query_datasource)"));
-        assert!(prompt.contains("Called tool: query_datasource"));
-        assert!(prompt.contains("What is our revenue?"));
-        assert!(prompt.contains("Revenue: $1.2M"));
-    }
-
-    #[test]
-    fn compaction_prompt_includes_multiple_tool_calls() {
-        let mut msg = Message::assistant("Checking data.");
-        msg.tool_calls = Some(vec![
-            ToolCall {
-                id: "tc_1".into(),
-                name: "search_catalog".into(),
-                arguments: serde_json::json!({"query": "revenue"}),
-                arguments_error: None,
-            },
-            ToolCall {
-                id: "tc_2".into(),
-                name: "query_datasource".into(),
-                arguments: serde_json::json!({"sql": "SELECT 1"}),
-                arguments_error: None,
-            },
-        ]);
-
-        let messages = vec![msg];
-        let prompt = build_compaction_prompt(&messages);
-
-        assert!(prompt.contains("Called tool: search_catalog"));
-        assert!(prompt.contains("Called tool: query_datasource"));
-    }
-
-    #[test]
-    fn compaction_prompt_labels_system_messages() {
-        let messages = vec![Message::system("You are a helpful assistant.")];
-        let prompt = build_compaction_prompt(&messages);
-        assert!(prompt.contains("**SYSTEM**:"));
-    }
-
-    #[test]
-    fn compaction_prompt_tool_result_without_name() {
-        let mut msg = Message::tool_result("tc_1", "my_tool", "result");
-        msg.name = None; // Remove the name
-        let messages = vec![msg];
-        let prompt = build_compaction_prompt(&messages);
-        assert!(prompt.contains("TOOL RESULT"));
-    }
-
-
-    // -- Compaction prompt for large tool results -----------------------------
-
-    #[test]
-    fn compaction_prompt_truncates_multiple_large_tool_results() {
-        let long_result1 = "a".repeat(5000);
-        let long_result2 = "b".repeat(5000);
-        let messages = vec![
-            Message::tool_result("tc_1", "tool_a", &long_result1),
-            Message::tool_result("tc_2", "tool_b", &long_result2),
-        ];
-
-        let prompt = build_compaction_prompt(&messages);
-
-        // Both should be truncated
-        let truncation_count = prompt.matches("[truncated for summary]").count();
-        assert_eq!(truncation_count, 2);
-    }
-
-    // -- should_compact with tool call arguments ------------------------------
-
-    #[test]
-    fn should_compact_includes_tool_call_argument_sizes() {
-        // Create a message with large tool call arguments
-        let large_args = serde_json::json!({"sql": "x".repeat(100_000)});
-        let mut msg = Message::assistant("running query");
-        msg.tool_calls = Some(vec![ToolCall {
-            id: "tc_1".into(),
-            name: "query_datasource".into(),
-            arguments: large_args,
-            arguments_error: None,
-        }]);
-
-        // With 100K chars in args alone, at 4 chars/token = 25K tokens
-        // This is well below threshold, but ensures args ARE counted
-        let result = should_compact(None, &[msg.clone()], 0, THRESHOLD);
-        // 100K chars + some overhead < 600K chars needed for 150K tokens
-        assert!(!result);
-
-        // Now add enough system prompt to push over the edge
-        // Need total of 600K chars = 150K tokens
-        // Already have ~100K in args, need 500K more
-        let result = should_compact(None, &[msg], 500_001, THRESHOLD);
-        assert!(result);
-    }
-
-
-    // -- Role labels in compaction prompt -------------------------------------
-
-    #[test]
-    fn compaction_prompt_uses_correct_role_labels() {
-        let messages = vec![
-            Message::user("User message"),
-            Message::assistant("Assistant message"),
-            Message::system("System message"),
-        ];
-
-        let prompt = build_compaction_prompt(&messages);
-        assert!(prompt.contains("**USER**:"));
-        assert!(prompt.contains("**ASSISTANT**:"));
-        assert!(prompt.contains("**SYSTEM**:"));
-    }
-
     // -- UTF-8 safe truncation ------------------------------------------------
 
     #[test]
@@ -901,22 +676,5 @@ mod contract_tests {
         assert_eq!(super::floor_char_boundary(s, 5), 2);
         // Truncating at byte 6 is the end
         assert_eq!(super::floor_char_boundary(s, 6), 6);
-    }
-
-    #[test]
-    fn compaction_prompt_truncates_multibyte_tool_result_safely() {
-        // Create a tool result with multi-byte characters near the 2000-byte boundary.
-        // Each '🎉' is 4 bytes. 500 emojis = 2000 bytes exactly.
-        // Add one more character to exceed the limit.
-        let content: String = "🎉".repeat(500) + "extra";
-        assert!(content.len() > 2000);
-
-        let messages = vec![Message::tool_result("tc_1", "tool_a", &content)];
-        let prompt = build_compaction_prompt(&messages);
-
-        // Should not panic, and should contain the truncation marker
-        assert!(prompt.contains("[truncated for summary]"));
-        // The full content should NOT be present
-        assert!(!prompt.contains("extra"));
     }
 }

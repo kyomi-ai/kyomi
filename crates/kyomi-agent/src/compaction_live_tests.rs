@@ -19,8 +19,9 @@ use kyomi_core::enums::WorkspaceRole;
 use kyomi_core::{kv_store_memory::InMemoryKVStore, platform::PlatformRegistry};
 
 const MODEL: &str = "claude-haiku-5-5";
-/// Low enough that a short tool-using conversation crosses it (KYO-975).
-const THRESHOLD: u32 = 2_000;
+/// Above the seeded history's estimate and above the compacted context, so the
+/// run compacts once with more than `MESSAGES_TO_KEEP` turns to summarise.
+const THRESHOLD: u32 = 15_000;
 
 fn key() -> String {
     std::env::var("ANTHROPIC_API_KEY").expect("ANTHROPIC_API_KEY (live tests only)")
@@ -33,6 +34,15 @@ fn config(session_id: &str, message: &str) -> AgentExecutionConfig {
         workspace_id: "ws-1".to_string(),
         message: message.to_string(),
         workspace_roles: vec![WorkspaceRole::WorkspaceAdmin],
+        // A small fixed prefix keeps the threshold meaningful: the default
+        // system prompt alone is larger than a few thousand tokens.
+        system_prompt: Some(
+            "You are a concise analytics assistant. Follow the user's instructions exactly."
+                .to_string(),
+        ),
+        // Only the harmless tool this scenario needs; the full registry's
+        // schemas would dominate the request.
+        tools_subset: Some(vec!["get_workspace_info".to_string()]),
         max_iterations: 12,
         max_tokens: 4_096,
         component: "custom_agent".to_string(),
@@ -40,10 +50,9 @@ fn config(session_id: &str, message: &str) -> AgentExecutionConfig {
     }
 }
 
-/// Resolve the first live scenario: a tool-using conversation crosses the low
-/// threshold, compacts, persists the summary + cut index, and a second run
-/// restores them and answers. Also asserts the cut never leaves a tool result
-/// without its call.
+/// Live scenario: a seeded conversation compacts once, the summary + cut index
+/// persist encrypted, a tool call and its result stay together, and a second
+/// run restores the summary and answers from it.
 #[tokio::test]
 #[ignore = "live: spends real Anthropic tokens"]
 async fn compaction_compacts_persists_and_restores_on_a_real_conversation() {
@@ -54,6 +63,40 @@ async fn compaction_compacts_persists_and_restores_on_a_real_conversation() {
     chat_service::create_session_with_id(&db, "user-a", "ws-1", &session_id, None, "chat", None)
         .await
         .expect("create session");
+    // Seed history: eight large turns about the same topic, then four short
+    // ones. The cut summarises the first seven, leaving one large turn plus the
+    // short tail well below the threshold (the live request's fixed
+    // system/tool prefix is part of the provider's input count, so the live
+    // threshold is higher than the few-thousand-token unit tests).
+    for i in 0..12u8 {
+        let role = if i % 2 == 0 { "user" } else { "assistant" };
+        let content = if i < 8 {
+            format!(
+                "We are investigating the Q4 revenue shortfall (step {i}): {}",
+                "x".repeat(8_000)
+            )
+        } else {
+            format!("noted step {i}")
+        };
+        chat_service::add_message(
+            &db,
+            &encryption_key,
+            &session_id,
+            role,
+            &content,
+            None,
+            None,
+            None,
+            Some("web"),
+            Some("user-a"),
+            None,
+            None,
+            None,
+            chat_service::MessageStatus::Complete,
+        )
+        .await
+        .expect("seed history");
+    }
 
     let kv = InMemoryKVStore::new_pool();
     let embedding = kyomi_embed::LazyEmbedding::new();
@@ -89,14 +132,18 @@ async fn compaction_compacts_persists_and_restores_on_a_real_conversation() {
     };
 
     let capture = kyomi_test_tracing::capture_tracing();
-    let first = run(
-        "Call the get_workspace_info tool three times, one call per turn, \
-         waiting for each result. Then tell me the workspace name.",
-    )
-    .await
-    .expect("the first live turn compacts and completes");
+    let first = run("Call the get_workspace_info tool once, then answer with the workspace name.")
+        .await
+        .expect("the first live turn compacts and completes");
+    if first.status != "completed" {
+        for (level, message) in capture.events() { eprintln!("CAPTURE {level} {message}"); }
+    }
     assert_eq!(first.status, "completed", "{:?}", first.error);
-    assert!(!first.response_text.trim().is_empty());
+    assert!(
+        first.response_text.to_lowercase().contains("workspace"),
+        "{}",
+        first.response_text
+    );
 
     let resolved = capture
         .events_at(tracing::Level::INFO)
@@ -119,7 +166,7 @@ async fn compaction_compacts_persists_and_restores_on_a_real_conversation() {
         .into_iter()
         .map(|(_, message)| message)
         .find(|message| message.contains("conversation compacted"))
-        .expect("the run compacts at the low threshold");
+        .expect("the run compacts at the threshold");
     eprintln!("KYO-975 live: {compacted}");
     let summary_log = capture
         .events_at(tracing::Level::INFO)
@@ -131,7 +178,7 @@ async fn compaction_compacts_persists_and_restores_on_a_real_conversation() {
         summary_log.contains(&format!("summary_model=\"{MODEL}\"")),
         "{summary_log}"
     );
-    assert!(summary_log.contains("fast_summary=true"), "{summary_log}");
+    assert!(summary_log.contains("summary_window=1000000"), "{summary_log}");
     eprintln!("KYO-975 live: {summary_log}");
 
     // Persisted state: encrypted summary + cut index.
@@ -160,7 +207,7 @@ async fn compaction_compacts_persists_and_restores_on_a_real_conversation() {
     );
 
     // The turn's reported usage includes the summary call: it must equal the
-    // run's billed row, which shares the ledger (KYO-975).
+    // run's billed row, which shares the ledger.
     if let kyomi_core::DbPool::Sqlite(sq) = &db {
         let (row_in, row_out): (i32, i32) = sqlx::query_as(
             "SELECT input_tokens, output_tokens FROM api_usage_log ORDER BY id DESC LIMIT 1",
@@ -198,10 +245,14 @@ async fn compaction_compacts_persists_and_restores_on_a_real_conversation() {
 
     // A second run (a fresh `execute_agent_chat`, like after a restart) loads
     // the summary + index and answers from the compacted context.
-    let second = run("What did I ask you to do in my previous message?").await;
+    let second = run("What earlier topic does the summary of our conversation mention?").await;
     let second = second.expect("the second live turn completes after restoring the summary");
     assert_eq!(second.status, "completed", "{:?}", second.error);
-    assert!(!second.response_text.trim().is_empty());
+    assert!(
+        second.response_text.to_lowercase().contains("revenue"),
+        "{}",
+        second.response_text
+    );
 
     // Running cost tally (provider cost from the per-call metadata).
     if let kyomi_core::DbPool::Sqlite(sq) = &db {

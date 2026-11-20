@@ -292,7 +292,7 @@ pub async fn load(
     let (compaction, compaction_warnings) =
         kyomi_core::llm_compaction::read_workspace(&row.settings);
     for warning in &compaction_warnings {
-        tracing::debug!(
+        tracing::warn!(
             workspace_id = %workspace_id,
             "ignoring invalid stored compaction value: {warning}"
         );
@@ -774,13 +774,13 @@ mod tests {
             api_key: None,
             base_url: None,
             title_model: None,
-            context_window: 0,
-            sampling: Default::default(),
-            sampling_warnings: Vec::new(),
-            watch_llm: Default::default(),
-            watch_llm_warnings: Vec::new(),
-            compaction: Default::default(),
-            compaction_warnings: Vec::new(),
+        context_window: 0,
+        sampling: Default::default(),
+        sampling_warnings: Vec::new(),
+        watch_llm: Default::default(),
+        watch_llm_warnings: Vec::new(),
+        compaction: Default::default(),
+        compaction_warnings: Vec::new(),
         };
         assert!(!cfg.is_byok());
     }
@@ -798,13 +798,13 @@ mod tests {
                 api_key: Some("sk-...".into()),
                 base_url: None,
                 title_model: None,
-                context_window: 0,
-                sampling: Default::default(),
-                sampling_warnings: Vec::new(),
-                watch_llm: Default::default(),
-                watch_llm_warnings: Vec::new(),
-                compaction: Default::default(),
-                compaction_warnings: Vec::new(),
+            context_window: 0,
+            sampling: Default::default(),
+        sampling_warnings: Vec::new(),
+        watch_llm: Default::default(),
+        watch_llm_warnings: Vec::new(),
+            compaction: Default::default(),
+            compaction_warnings: Vec::new(),
             };
             assert!(cfg.is_byok(), "expected BYOK for {p:?}");
         }
