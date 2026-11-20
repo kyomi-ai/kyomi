@@ -1573,15 +1573,13 @@ impl CustomAgent {
 
         // Add compacted summary as a user message.
         context.push(Message::user(format!(
-            "## Prior Conversation Context\n{summary}\n\n---\n\
-             The above summarizes our earlier conversation. Continue from here."
+            "{}{summary}{}",
+            crate::compaction::COMPACTION_SUMMARY_PREFIX,
+            crate::compaction::COMPACTION_SUMMARY_SUFFIX
         )));
 
         // Add acknowledgment as an assistant message.
-        context.push(Message::assistant(
-            "I understand the context from our previous conversation. \
-             I'll continue from where we left off.",
-        ));
+        context.push(Message::assistant(crate::compaction::COMPACTION_ACK));
 
         // Add recent messages (post-compaction).
         let recent_start = self.state.messages_since_compaction_index;
@@ -1666,6 +1664,29 @@ impl CustomAgent {
             return Err(kyomi_core::Error::Internal(format!(
                 "conversation is over the compaction threshold but no older turns can be summarised: \
                  context_window={window} threshold={threshold_tokens} estimate={estimate}"
+            )));
+        }
+
+        // Even an empty summary could not bring the kept turns under the
+        // threshold: fail before paying for a summary call that cannot help
+        // (and that a later turn would repeat).
+        let kept_tail_estimate = crate::compaction::estimate_tokens(
+            &to_keep,
+            system_prompt_len
+                + crate::compaction::COMPACTION_SUMMARY_PREFIX.len()
+                + crate::compaction::COMPACTION_SUMMARY_SUFFIX.len()
+                + crate::compaction::COMPACTION_ACK.len(),
+        );
+        if kept_tail_estimate >= threshold_tokens {
+            let window = self
+                .compaction
+                .as_ref()
+                .expect("checked for the threshold above")
+                .context_window;
+            return Err(kyomi_core::Error::Internal(format!(
+                "the kept turns alone are over the compaction threshold, so a summary cannot reduce them: \
+                 context_window={window} threshold={threshold_tokens} estimate={kept_tail_estimate}; \
+                 lower the compaction threshold or shorten the recent turns"
             )));
         }
 
@@ -4896,7 +4917,7 @@ Second chart:\n{CHARTML_STRIPPED_NOTE}\nDone."
     }
 
     #[tokio::test]
-    async fn a_context_still_over_the_threshold_after_compaction_fails_the_run() {
+    async fn a_kept_tail_over_the_threshold_fails_before_a_summary() {
         let summary_calls = Arc::new(Mutex::new(Vec::new()));
         let (mut agent, _calls) = scripted_agent(1, vec![], Reply::Text("unused".into())).await;
         agent.set_compaction(compaction_runtime(
@@ -4920,9 +4941,48 @@ Second chart:\n{CHARTML_STRIPPED_NOTE}\nDone."
         let error = agent
             .maybe_compact(&CancellationToken::new())
             .await
-            .expect_err("a compaction that cannot get under the threshold fails");
+            .expect_err("a kept tail that is already over the threshold fails");
         let message = error.to_string();
-        assert!(message.contains("still over the compaction threshold"), "{message}");
+        assert!(message.contains("kept turns alone"), "{message}");
+        assert!(message.contains("threshold=100"), "{message}");
+        assert!(
+            summary_calls.lock().expect("summary log").is_empty(),
+            "no summary call is paid for when the kept tail cannot fit"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_summary_that_still_leaves_the_context_over_the_threshold_fails_after_the_call() {
+        let summary_calls = Arc::new(Mutex::new(Vec::new()));
+        let (mut agent, _calls) = scripted_agent(1, vec![], Reply::Text("unused".into())).await;
+        agent.set_compaction(compaction_runtime(
+            100,
+            vec![Reply::Text("s".repeat(1_000))],
+            Arc::clone(&summary_calls),
+        ));
+        {
+            let state = agent.state_mut();
+            state.messages.push(Message::system("system prompt"));
+            for _ in 0..8 {
+                state.messages.push(Message::user("x".repeat(400)));
+            }
+            // The kept tail is small enough for the pre-call check; a summary
+            // larger than the threshold still pushes the rebuilt context over.
+            for _ in 0..6 {
+                state.messages.push(Message::user("y".repeat(20)));
+            }
+            state.last_input_tokens = 1_000;
+        }
+
+        let error = agent
+            .maybe_compact(&CancellationToken::new())
+            .await
+            .expect_err("a summary that cannot get under the threshold fails");
+        let message = error.to_string();
+        assert!(
+            message.contains("still over the compaction threshold after summarising"),
+            "{message}"
+        );
         assert!(message.contains("threshold=100"), "{message}");
         assert_eq!(summary_calls.lock().expect("summary log").len(), 1);
     }

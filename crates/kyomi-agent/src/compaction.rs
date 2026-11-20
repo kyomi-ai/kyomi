@@ -241,6 +241,14 @@ fn server_result_use_ids(message: &Message) -> impl Iterator<Item = &str> {
 /// the only added text.
 pub const COMPACTION_INSTRUCTION: &str = "Summarise the conversation above for an AI data analyst assistant. Preserve the key questions, data discovered, queries and their results, findings, and any context needed to continue. Reply with the summary only.";
 
+/// Fixed text around the stored summary in the rebuilt context. Kept here so
+/// `build_llm_context` and the kept-tail fit check cannot drift apart.
+pub const COMPACTION_SUMMARY_PREFIX: &str = "## Prior Conversation Context\n";
+pub const COMPACTION_SUMMARY_SUFFIX: &str =
+    "\n\n---\nThe above summarizes our earlier conversation. Continue from here.";
+pub const COMPACTION_ACK: &str =
+    "I understand the context from our previous conversation. I'll continue from where we left off.";
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------

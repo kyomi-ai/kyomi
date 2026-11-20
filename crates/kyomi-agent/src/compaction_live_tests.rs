@@ -19,7 +19,7 @@ use kyomi_core::enums::WorkspaceRole;
 use kyomi_core::{kv_store_memory::InMemoryKVStore, platform::PlatformRegistry};
 
 const MODEL: &str = "claude-haiku-5-5";
-/// Above the seeded history's estimate and above the compacted context, so the
+/// Below the seeded history's estimate and above the compacted context, so the
 /// run compacts once with more than `MESSAGES_TO_KEEP` turns to summarise.
 const THRESHOLD: u32 = 15_000;
 
