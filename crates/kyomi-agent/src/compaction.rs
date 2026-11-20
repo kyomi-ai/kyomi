@@ -187,9 +187,10 @@ pub fn split_messages_for_compaction(messages: &[Message]) -> (Vec<Message>, Vec
         }
         cutoff = move_to;
     }
-    // The history begins with a tool result and has no call to pair it with:
-    // there is no safe cut, so keep everything rather than build a request the
-    // provider will reject.
+    // The cut reached the start of the history (for example a history that
+    // begins with a tool result, or with a server-tool use whose result is in
+    // the kept tail): there is no safe cut, so keep everything rather than
+    // build a request the provider will reject.
     if cutoff == 0 {
         return (Vec::new(), messages.to_vec());
     }
