@@ -213,6 +213,24 @@ fn budget_notice_text(used: u32, max_iterations: u32, final_notice: bool) -> Str
     )
 }
 
+/// Provider input minus the character estimate of the same request: the fixed
+/// system-prompt/tool-schema/request overhead the character estimate cannot see
+/// (KYO-975). The compaction checks add it so they compare on the trigger's
+/// basis.
+fn observed_request_overhead(actual: u32, messages: &[Message]) -> u32 {
+    let offset = usize::from(
+        messages
+            .first()
+            .is_some_and(|message| message.role == crate::types::MessageRole::System),
+    );
+    let system_len = messages
+        .first()
+        .filter(|_| offset == 1)
+        .map_or(0, |message| message.content.len());
+    let estimate = crate::compaction::estimate_tokens(&messages[offset..], system_len);
+    actual.saturating_sub(estimate)
+}
+
 // ---------------------------------------------------------------------------
 // Non-iteration stop conditions (KYO-345)
 // ---------------------------------------------------------------------------
@@ -819,21 +837,8 @@ impl CustomAgent {
             // the fixed system-prompt/tool-schema/request overhead. The
             // compaction checks add it so they compare on the trigger's basis
             // (KYO-975).
-            {
-                let offset = usize::from(
-                    llm_messages
-                        .first()
-                        .is_some_and(|message| message.role == crate::types::MessageRole::System),
-                );
-                let system_len = llm_messages
-                    .first()
-                    .filter(|_| offset == 1)
-                    .map_or(0, |message| message.content.len());
-                let estimate =
-                    crate::compaction::estimate_tokens(&llm_messages[offset..], system_len);
-                self.state.last_request_overhead =
-                    self.state.last_input_tokens.saturating_sub(estimate);
-            }
+            self.state.last_request_overhead =
+                observed_request_overhead(self.state.last_input_tokens, &llm_messages);
 
             // Billable-cost accumulator for `max_total_tokens`. Deliberately
             // excludes `cache_read_input_tokens` — see the field doc on
@@ -1720,23 +1725,12 @@ impl CustomAgent {
 
         let mut summary_messages = to_summarize;
         summary_messages.push(Message::user(crate::compaction::COMPACTION_INSTRUCTION));
-        // The stored turns contain client tool_use/tool_result and provider
-        // server-tool blocks; the API requires the matching tool definitions in
-        // a request that carries them. The summariser is told to reply with the
-        // summary only, so the definitions are not an invitation to call them.
+        // The stored turns may contain client tool_use/tool_result blocks; the
+        // API requires the matching client tool definitions in a request that
+        // carries them. Provider server tools are deliberately not offered: the
+        // stored web blocks replay without them (the live check proves it), and
+        // offering them would bypass the per-turn/monthly web budget.
         let summary_tools = self.registry.get_tool_definitions(&self.config.tool_filter);
-        let mut summary_options = self
-            .compaction
-            .as_ref()
-            .expect("checked for the threshold above")
-            .options
-            .clone();
-        summary_options.server_tools = self
-            .config
-            .server_tools
-            .iter()
-            .map(|tool| tool.entry.clone())
-            .collect();
         let tools_tokens = serde_json::to_string(&summary_tools)
             .map(|serialized| serialized.len() / crate::compaction::CHARS_PER_TOKEN as usize)
             .unwrap_or(0) as u64;
@@ -1776,7 +1770,7 @@ impl CustomAgent {
                 result = compaction.client.complete(
                     &summary_messages,
                     &summary_tools,
-                    &summary_options,
+                    &compaction.options,
                     &self.user_names,
                 ) => result?,
                 _ = cancel_token.cancelled() => {
@@ -1787,6 +1781,16 @@ impl CustomAgent {
         let call_tokens = u64::from(response.usage.input_tokens)
             + u64::from(response.usage.cache_creation_input_tokens)
             + u64::from(response.usage.output_tokens);
+        // The request carries the run's tool definitions for validation; a model
+        // that calls one instead of summarising must not have a preamble stored
+        // as the summary.
+        if response.tool_calls.is_some() || response.finish_reason == "tool_use" {
+            return Err(kyomi_core::Error::Internal(
+                "conversation compaction summary request returned a tool call; \
+                 the summariser must reply with text only"
+                    .into(),
+            ));
+        }
         // This call is billed with the run; count it in the turn's reported
         // totals without changing the conversation's context size.
         let summary_input = u32::try_from(
@@ -3034,7 +3038,7 @@ Chart 2:\n```chartml\ntype: chart\nversion: 1\ndata:\n  datasource: test\n  quer
 
     use serde_json::json;
 
-    use crate::types::{AgentTokenUsage, MessageRole};
+    use crate::types::{AgentTokenUsage, MessageRole, ToolCall};
 
     // ScriptedProvider, Reply, NoopTool, RecordedCall — extracted to
     // `crate::test_support` (KYO-493 phase 3) so `adapter.rs`'s tests can
@@ -4925,6 +4929,69 @@ Second chart:\n{CHARTML_STRIPPED_NOTE}\nDone."
             summary.last().expect("instruction appended").content,
             crate::compaction::COMPACTION_INSTRUCTION,
             "the only added text is the summary instruction"
+        );
+        assert!(
+            calls[0]
+                .tools
+                .iter()
+                .any(|tool| tool.name == crate::test_support::NOOP_TOOL_NAME),
+            "the run's client tool definitions go with the summary request: {:?}",
+            calls[0].tools
+        );
+        assert!(
+            calls[0].server_tools.is_empty(),
+            "provider server tools are never offered to the summariser"
+        );
+    }
+
+    #[test]
+    fn observed_request_overhead_is_input_minus_estimate() {
+        let messages = vec![Message::system("sys"), Message::user("x".repeat(400))];
+        let estimate = crate::compaction::estimate_tokens(&messages[1..], 3);
+        assert_eq!(
+            observed_request_overhead(1_000, &messages),
+            1_000u32.saturating_sub(estimate)
+        );
+        assert_eq!(observed_request_overhead(0, &messages), 0);
+    }
+
+    #[tokio::test]
+    async fn a_summary_that_calls_a_tool_fails_the_run_loudly() {
+        let (mut agent, _calls) = scripted_agent(
+            10,
+            vec![Reply::Text("should not be reached".into())],
+            Reply::Text("unexpected".into()),
+        )
+        .await;
+        seed_over_threshold_history(&mut agent);
+        let response = crate::types::LLMResponse {
+            raw_response: serde_json::Value::Null,
+            content: "let me look that up".into(),
+            finish_reason: "tool_use".into(),
+            usage: crate::types::AgentTokenUsage::default(),
+            tool_calls: Some(vec![ToolCall {
+                id: "call_1".into(),
+                name: crate::test_support::NOOP_TOOL_NAME.into(),
+                arguments: serde_json::json!({}),
+                arguments_error: None,
+            }]),
+            cost: None,
+            thinking_content: None,
+            call_detail: None,
+        };
+        agent.set_compaction(compaction_runtime(
+            1_000,
+            vec![Reply::Response(Box::new(response))],
+            Arc::new(Mutex::new(Vec::new())),
+        ));
+
+        let error = agent
+            .chat("first question", CancellationToken::new(), None, None, None)
+            .await
+            .expect_err("a tool-calling summary fails the run");
+        assert!(
+            error.to_string().contains("returned a tool call"),
+            "{error}"
         );
     }
 

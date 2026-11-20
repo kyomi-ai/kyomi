@@ -15,7 +15,7 @@ use std::sync::Arc;
 use serde_json::{Value, json};
 
 use crate::execution::{AgentExecutionConfig, AgentExecutionEnv, execute_agent_chat};
-use crate::provider::{LLMProvider, LLMProviderConfig, ProviderKind, RequestOptions, create_provider};
+use crate::provider::{LLMProviderConfig, ProviderKind, RequestOptions, create_provider};
 use crate::types::Message;
 use kyomi_auth::{chat_service, websocket::WebSocketManager};
 use kyomi_core::enums::WorkspaceRole;
