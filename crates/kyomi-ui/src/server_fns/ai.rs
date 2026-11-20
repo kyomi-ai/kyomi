@@ -1328,7 +1328,7 @@ fn parse_gemini_models(body: &str) -> Result<Vec<AiModelInfo>, serde_json::Error
 ///
 /// Resolves credentials in priority order:
 /// 1. Workspace BYOK config — used when the workspace has its own OpenRouter
-///    base URL (`base_url` containing `"openrouter.ai"`) and stored API key.
+///    base URL (host `openrouter.ai` or a subdomain) and stored API key.
 /// 2. Server-level env config — used for Kyomi-credits mode workspaces where
 ///    the LLM key is supplied via the `LLM_API_KEY` / `LLM_BASE_URL` env
 ///    variables.
@@ -1360,30 +1360,48 @@ pub async fn list_openrouter_models(
     // 2. Server-level env config — used for Kyomi-mode workspaces where the LLM
     //    key lives in `LLM_API_KEY` / `LLM_BASE_URL` env vars.
     //
-    // Neither path proceeds unless the resolved base URL points at openrouter.ai,
-    // ensuring we don't call the OpenRouter model list against non-OpenRouter keys.
-
-    // Check workspace BYOK config first.
-    let workspace_base_url = cfg.base_url.as_deref().unwrap_or("");
-    if workspace_base_url.contains("openrouter.ai") {
-        let api_key = match cfg.api_key {
-            Some(k) if !k.trim().is_empty() => k,
-            _ => return Ok(Vec::new()),
-        };
-        return fetch_openrouter_models_cached(&api_key, force_refresh).await;
+    // Neither path proceeds unless the resolved base URL's host is
+    // openrouter.ai (or a subdomain of it), ensuring we never call the
+    // OpenRouter model list with a gateway key whose URL merely mentions
+    // openrouter.ai in a path or query.
+    match openrouter_models_api_key(
+        cfg.base_url.as_deref(),
+        cfg.api_key.as_deref(),
+        ac.ctx.config.llm_base_url.as_deref(),
+        ac.ctx.config.llm_api_key.as_deref(),
+    ) {
+        Some(api_key) => fetch_openrouter_models_cached(api_key, force_refresh).await,
+        None => Ok(Vec::new()),
     }
+}
 
-    // Fall back to server-level env config for Kyomi-mode workspaces.
-    let server_base_url = ac.ctx.config.llm_base_url.as_deref().unwrap_or("");
-    if server_base_url.contains("openrouter.ai") {
-        let api_key = match ac.ctx.config.llm_api_key.as_deref() {
-            Some(k) if !k.trim().is_empty() => k.to_string(),
-            _ => return Ok(Vec::new()),
-        };
-        return fetch_openrouter_models_cached(&api_key, force_refresh).await;
+/// The API key to list OpenRouter models with, if either configured base URL
+/// is OpenRouter at all.
+///
+/// A base URL is OpenRouter only when its host is `openrouter.ai` or a
+/// subdomain of it, via [`kyomi_core::web_tools::is_openrouter_base_url`] — a
+/// gateway whose URL merely contains `openrouter.ai` in a path or query is
+/// not, so its key is never sent to OpenRouter's model-list endpoint.
+///
+/// The workspace's stored config wins over the server-level `LLM_*` env
+/// config; a workspace base URL that is OpenRouter but has no usable key
+/// selects nothing (the caller returns an empty list) rather than falling
+/// through to the server key.
+#[cfg(feature = "ssr")]
+fn openrouter_models_api_key<'a>(
+    workspace_base_url: Option<&str>,
+    workspace_key: Option<&'a str>,
+    server_base_url: Option<&str>,
+    server_key: Option<&'a str>,
+) -> Option<&'a str> {
+    let usable = |key: Option<&'a str>| key.filter(|k| !k.trim().is_empty());
+    if kyomi_core::web_tools::is_openrouter_base_url(workspace_base_url) {
+        return usable(workspace_key);
     }
-
-    Ok(Vec::new())
+    if kyomi_core::web_tools::is_openrouter_base_url(server_base_url) {
+        return usable(server_key);
+    }
+    None
 }
 
 /// Compute a short fingerprint for an API key used as the per-workspace cache
@@ -1828,6 +1846,84 @@ mod tests {
             parsed.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
             vec!["gemini-2.5-pro", "gemini-2.0-flash", "gemini-1.5-pro"],
         );
+    }
+
+    // ---- openrouter_models_api_key --------------------------------------
+
+    #[test]
+    fn openrouter_key_accepts_a_real_openrouter_host() {
+        for base in [
+            "https://openrouter.ai/api/v1",
+            "https://eu.openrouter.ai/api/v1",
+            "https://OpenRouter.ai:443/api/v1",
+        ] {
+            assert_eq!(
+                openrouter_models_api_key(Some(base), Some("ws-key"), None, None),
+                Some("ws-key"),
+                "{base}",
+            );
+        }
+    }
+
+    /// A gateway whose URL merely mentions `openrouter.ai` in a path or query
+    /// is not OpenRouter: selecting no key is what keeps the gateway's key off
+    /// OpenRouter's model-list endpoint.
+    #[test]
+    fn openrouter_key_is_never_selected_for_a_gateway_that_merely_mentions_the_name() {
+        for base in [
+            "https://gateway.example/openrouter.ai/v1",
+            "https://gateway.example/v1?target=openrouter.ai",
+            "https://openrouter.ai.evil.example/v1",
+            "https://notopenrouter.ai/v1",
+        ] {
+            assert_eq!(
+                openrouter_models_api_key(Some(base), Some("ws-key"), None, None),
+                None,
+                "workspace key for {base}",
+            );
+            assert_eq!(
+                openrouter_models_api_key(None, None, Some(base), Some("env-key")),
+                None,
+                "server key for {base}",
+            );
+        }
+    }
+
+    #[test]
+    fn openrouter_key_uses_the_server_config_only_when_the_workspace_is_not_openrouter() {
+        assert_eq!(
+            openrouter_models_api_key(
+                Some("https://proxy.example/v1"),
+                Some("ws-key"),
+                Some("https://openrouter.ai/api/v1"),
+                Some("env-key"),
+            ),
+            Some("env-key"),
+        );
+        // A workspace gateway URL does not claim OpenRouter, so the server's
+        // real OpenRouter config is still usable.
+        assert_eq!(
+            openrouter_models_api_key(
+                Some("https://gateway.example/openrouter.ai/v1"),
+                Some("ws-key"),
+                Some("https://openrouter.ai/api/v1"),
+                Some("env-key"),
+            ),
+            Some("env-key"),
+        );
+        // A workspace OpenRouter base URL with a missing or blank key selects
+        // nothing instead of borrowing the server key.
+        for key in [None, Some("   ")] {
+            assert_eq!(
+                openrouter_models_api_key(
+                    Some("https://openrouter.ai/api/v1"),
+                    key,
+                    Some("https://openrouter.ai/api/v1"),
+                    Some("env-key"),
+                ),
+                None,
+            );
+        }
     }
 
     // ---- parse_openrouter_models ----------------------------------------

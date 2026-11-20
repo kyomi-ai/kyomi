@@ -105,27 +105,15 @@ fn is_anthropic_api(base_url: Option<&str>) -> bool {
 }
 
 /// Whether `base_url` points at OpenRouter: its host is `openrouter.ai` or a
-/// subdomain. (Under test only, a `/openrouter.ai/` path segment on a loopback
-/// server also counts, so the real adapter selection runs against a fake.)
+/// subdomain, per the shared [`kyomi_core::web_tools::is_openrouter_base_url`].
+/// (Under test only, a `/openrouter.ai/` path segment on a loopback server also
+/// counts, so the real adapter selection runs against a fake.)
 pub(crate) fn is_openrouter(base_url: &str) -> bool {
-    let host = base_url
-        .split_once("://")
-        .map_or(base_url, |(_, rest)| rest)
-        .split(['/', '?', '#'])
-        .next()
-        .unwrap_or_default()
-        .rsplit('@')
-        .next()
-        .unwrap_or_default()
-        .split(':')
-        .next()
-        .unwrap_or_default()
-        .to_ascii_lowercase();
     #[cfg(test)]
     if base_url.contains("/openrouter.ai/") {
         return true;
     }
-    host == "openrouter.ai" || host.ends_with(".openrouter.ai")
+    kyomi_core::web_tools::is_openrouter_base_url(Some(base_url))
 }
 
 fn http_error(vendor: &str, status: reqwest::StatusCode, body: &str) -> kyomi_core::Error {
