@@ -1781,6 +1781,18 @@ impl CustomAgent {
         let call_tokens = u64::from(response.usage.input_tokens)
             + u64::from(response.usage.cache_creation_input_tokens)
             + u64::from(response.usage.output_tokens);
+        // This call is billed with the run; count it in the turn's reported
+        // totals without changing the conversation's context size. Record it
+        // before any response-shape rejection so the reported totals always
+        // match the billed row.
+        let summary_input = u32::try_from(
+            u64::from(response.usage.input_tokens)
+                + u64::from(response.usage.cache_creation_input_tokens)
+                + u64::from(response.usage.cache_read_input_tokens),
+        )
+        .unwrap_or(u32::MAX);
+        self.record_background_usage(summary_input, response.usage.output_tokens, response.cost)
+            .await;
         // The request carries the run's tool definitions for validation; a model
         // that calls one instead of summarising must not have a preamble stored
         // as the summary.
@@ -1791,16 +1803,6 @@ impl CustomAgent {
                     .into(),
             ));
         }
-        // This call is billed with the run; count it in the turn's reported
-        // totals without changing the conversation's context size.
-        let summary_input = u32::try_from(
-            u64::from(response.usage.input_tokens)
-                + u64::from(response.usage.cache_creation_input_tokens)
-                + u64::from(response.usage.cache_read_input_tokens),
-        )
-        .unwrap_or(u32::MAX);
-        self.record_background_usage(summary_input, response.usage.output_tokens, response.cost)
-            .await;
         let summary = response.content.trim();
         if summary.is_empty() {
             return Err(kyomi_core::Error::Internal(
@@ -4968,7 +4970,13 @@ Second chart:\n{CHARTML_STRIPPED_NOTE}\nDone."
             raw_response: serde_json::Value::Null,
             content: "let me look that up".into(),
             finish_reason: "tool_use".into(),
-            usage: crate::types::AgentTokenUsage::default(),
+            usage: crate::types::AgentTokenUsage {
+                input_tokens: 100,
+                output_tokens: 20,
+                cache_creation_input_tokens: 0,
+                cache_read_input_tokens: 0,
+                reasoning_tokens: 0,
+            },
             tool_calls: Some(vec![ToolCall {
                 id: "call_1".into(),
                 name: crate::test_support::NOOP_TOOL_NAME.into(),
@@ -4984,6 +4992,16 @@ Second chart:\n{CHARTML_STRIPPED_NOTE}\nDone."
             vec![Reply::Response(Box::new(response))],
             Arc::new(Mutex::new(Vec::new())),
         ));
+        let background = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&background);
+        agent.callbacks_mut().on_progress = Some(Box::new(move |progress| {
+            let sink = Arc::clone(&sink);
+            Box::pin(async move {
+                if let AgentProgress::BackgroundUsage(input, output, cost) = progress {
+                    sink.lock().expect("progress log").push((input, output, cost));
+                }
+            })
+        }));
 
         let error = agent
             .chat("first question", CancellationToken::new(), None, None, None)
@@ -4992,6 +5010,11 @@ Second chart:\n{CHARTML_STRIPPED_NOTE}\nDone."
         assert!(
             error.to_string().contains("returned a tool call"),
             "{error}"
+        );
+        assert_eq!(
+            *background.lock().expect("progress log"),
+            vec![(100, 20, None)],
+            "the failed summary's usage is still reported, matching what the ledger bills"
         );
     }
 
