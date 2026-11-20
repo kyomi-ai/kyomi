@@ -634,6 +634,10 @@ impl CustomAgent {
         self.pause_chain_start = None;
         self.web_sources.clear();
         self.pending_server_calls.clear();
+        // A restored input count belongs to the previous turn (and possibly a
+        // different model after a model switch), so it cannot drive this run's
+        // threshold decisions; the context estimate covers the first check.
+        self.state.last_input_tokens = 0;
         let result = self.run_chat(user_message, cancel_token, current_time_user_tz, message_source, user_id).await;
         // A failed run keeps none of an open `pause_turn` chain (blocks that end in a
         // call without its result are rejected by the provider on every later turn);
@@ -1644,28 +1648,6 @@ impl CustomAgent {
 
         let already_compacted = self.state.compacted_summary.is_some();
         let estimate = crate::compaction::estimate_tokens(conversation, system_prompt_len);
-        // A summary exists and the conversation context is below the threshold,
-        // but the provider-reported input (which also counts the fixed system
-        // prompt and tool definitions) is still over it. Another summary cannot
-        // reduce that overhead; fail instead of re-summarising every iteration.
-        if already_compacted
-            && actual.is_some_and(|input| input >= threshold_tokens)
-            && estimate < threshold_tokens
-        {
-            let window = self
-                .compaction
-                .as_ref()
-                .expect("checked for the threshold above")
-                .context_window;
-            return Err(kyomi_core::Error::Internal(format!(
-                "the request is still over the compaction threshold after summarising, but the conversation \
-                 context is below it: context_window={window} threshold={threshold_tokens} \
-                 input_tokens={} estimate={estimate}; the fixed request overhead (system prompt/tools) \
-                 cannot be reduced by compaction",
-                actual.unwrap_or(0)
-            )));
-        }
-
         let (to_summarize, to_keep) = crate::compaction::split_messages_for_compaction(conversation);
         // When a summary already exists, `build_llm_context` starts with the
         // old summary and its acknowledgment; only the messages after them are
@@ -4971,36 +4953,6 @@ Second chart:\n{CHARTML_STRIPPED_NOTE}\nDone."
         assert!(message.contains("no older turns can be summarised"), "{message}");
         assert!(message.contains("threshold=100"), "{message}");
         assert!(summary_calls.lock().expect("summary log").is_empty());
-    }
-
-    #[tokio::test]
-    async fn a_request_still_over_the_threshold_on_fixed_overhead_fails_the_run() {
-        let (mut agent, _calls) = scripted_agent(1, vec![], Reply::Text("unused".into())).await;
-        agent.set_compaction(compaction_runtime(
-            1_000,
-            vec![Reply::Text("must not be used".into())],
-            Arc::new(Mutex::new(Vec::new())),
-        ));
-        {
-            let state = agent.state_mut();
-            state.messages.push(Message::system("system prompt"));
-            state.compacted_summary = Some("a short summary".into());
-            state.messages_since_compaction_index = 1;
-            for i in 0..4 {
-                state.messages.push(Message::user(format!("recent {i}")));
-            }
-            // The compacted context is far below 1,000; the provider still
-            // reports 2,000 because of the fixed system prompt/tool schemas.
-            state.last_input_tokens = 2_000;
-        }
-
-        let error = agent
-            .maybe_compact(&CancellationToken::new())
-            .await
-            .expect_err("fixed request overhead cannot be compacted away");
-        let message = error.to_string();
-        assert!(message.contains("request is still over the compaction threshold"), "{message}");
-        assert!(message.contains("input_tokens=2000"), "{message}");
     }
 
     #[tokio::test]

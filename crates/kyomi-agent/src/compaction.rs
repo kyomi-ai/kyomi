@@ -26,10 +26,11 @@
 //!    the same structured messages (provider web blocks included) the main
 //!    model receives — followed by [`COMPACTION_INSTRUCTION`]. Nothing is
 //!    filtered, truncated or converted to text.
-//! 4. The agent sends this prompt to the run's fast model (the workspace title
-//!    model, else `LLM_TITLE_MODEL`, else the setup's own model) when that
-//!    model's own context window can accept the summarised region; otherwise
-//!    the chat model writes the one summary call.
+//! 4. The agent sends those messages to the run's fast model (the workspace
+//!    title model, else `LLM_TITLE_MODEL`, else the setup's own model). There
+//!    is no fallback: if its own known window cannot accept the region, the
+//!    run fails with a clear error; a provider that reports no window gets the
+//!    request and a rejection fails the run.
 //! 5. The agent stores the summary and the cut index on
 //!    [`AgentState`](crate::agent::AgentState); the adapter persists them with
 //!    the session, and
