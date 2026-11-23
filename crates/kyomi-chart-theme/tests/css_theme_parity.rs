@@ -166,11 +166,17 @@ fn chartml_vars(body: &str) -> BTreeMap<String, String> {
         .collect()
 }
 
-/// The two `--chartml-*` blocks plus the two `--color-background` values,
-/// parsed once per test from the real `main.css` on disk.
+/// The two `--chartml-*` blocks, the two `--color-background` values and each
+/// mode's design-token declarations, parsed once per test from the real
+/// `main.css` on disk.
 struct ParsedCss {
     light_chartml: BTreeMap<String, String>,
     dark_chartml: BTreeMap<String, String>,
+    /// Every declaration in each mode's design-token block (`@theme` for
+    /// light, `.dark` for dark). Used to resolve `var(--token)` references in
+    /// `--chartml-*` values — see [`ValueKind::ColorVar`].
+    light_design: BTreeMap<String, String>,
+    dark_design: BTreeMap<String, String>,
     light_background: String,
     dark_background: String,
 }
@@ -197,8 +203,8 @@ fn parse_main_css() -> ParsedCss {
     let light_chartml = chartml_vars(&light_block.1);
     assert_eq!(
         light_chartml.len(),
-        35,
-        "KYO-229 parity guard: expected 35 `--chartml-*` properties in main.css's \
+        36,
+        "KYO-229 parity guard: expected 36 `--chartml-*` properties in main.css's \
          light `:root` block, found {}. If this is an intentional addition/removal, \
          update MAPPED_FIELDS / CSS_ONLY_VARS in this test (and this count) to match \
          — do not just bump the number.",
@@ -212,8 +218,8 @@ fn parse_main_css() -> ParsedCss {
     let dark_chartml = chartml_vars(&dark_block.1);
     assert_eq!(
         dark_chartml.len(),
-        18,
-        "KYO-229 parity guard: expected 18 `--chartml-*` properties in main.css's \
+        19,
+        "KYO-229 parity guard: expected 19 `--chartml-*` properties in main.css's \
          `.dark` block, found {}. Update MAPPED_FIELDS in this test to match if this \
          is intentional.",
         dark_chartml.len()
@@ -241,6 +247,8 @@ fn parse_main_css() -> ParsedCss {
     ParsedCss {
         light_chartml,
         dark_chartml,
+        light_design: theme_decls,
+        dark_design: dark_decls,
         light_background,
         dark_background,
     }
@@ -263,7 +271,7 @@ fn parse_main_css() -> ParsedCss {
 /// indented further. Filtering to lines with *exactly* 4 leading spaces (the
 /// stripped remainder must not itself start with whitespace) isolates
 /// `Theme`'s own fields from anything nested inside them. Verified against
-/// chartml-core 5.1.12's actual `{:#?}` output before writing this.
+/// chartml-core 5.2.0's actual `{:#?}` output before writing this.
 ///
 /// **What this catches:** a field added to, removed from, or renamed on
 /// `Theme` upstream changes the set this returns, which fails
@@ -337,6 +345,15 @@ enum ValueKind {
     /// `Uniform`) is a Rust-side structural choice with no CSS
     /// representation, so only the numeric value is compared here.
     BarCornerRadius,
+    /// CSS `var(--token)` pointing at one of the design system's colour
+    /// tokens (e.g. `--color-card`), vs. a Rust hex colour `String` field.
+    /// Resolved through the token declarations for the same mode before
+    /// comparison, so the reference keeps main.css's design tokens as the
+    /// single source of truth for the colour while still requiring
+    /// `kyomi_theme()` to agree with what the variable actually resolves to.
+    /// Fails loudly if the value is not a single `var(--token)` reference or
+    /// the token is not declared for that mode.
+    ColorVar,
 }
 
 /// `(css var name without the `--chartml-` prefix, kyomi_theme() field name, comparison kind)`.
@@ -363,6 +380,7 @@ const MAPPED_FIELDS: &[(&str, &str, ValueKind)] = &[
     ("table-header-border", "table_header_border", ValueKind::Color),
     ("table-row-bg", "table_row_bg", ValueKind::Literal),
     ("table-row-bg-alt", "table_row_bg_alt", ValueKind::Literal),
+    ("table-surface", "table_surface", ValueKind::ColorVar),
     ("table-border", "table_border", ValueKind::Color),
     ("table-border-radius", "table_border_radius", ValueKind::Literal),
     ("table-text", "table_text", ValueKind::Color),
@@ -395,9 +413,9 @@ const MAPPED_FIELDS: &[(&str, &str, ValueKind)] = &[
 const CSS_ONLY_VARS: &[(&str, &str)] = &[
     (
         "annotation",
-        "chartml-core 5.1.12's `Theme` has `annotation_line_weight` (a stroke \
+        "chartml-core 5.2.0's `Theme` has `annotation_line_weight` (a stroke \
          width) but no annotation *color* field — verified in \
-         ~/.cargo/registry/.../chartml-core-5.1.12/src/theme.rs. \
+         ~/.cargo/registry/.../chartml-core-5.2.0/src/theme.rs. \
          `generate_annotations()` in chartml-chart-cartesian 5.0.9 falls back \
          to `theme.text_secondary` for annotation line/label color, not a \
          dedicated field. Additionally verified by grepping every resolved \
@@ -413,10 +431,12 @@ const CSS_ONLY_VARS: &[(&str, &str)] = &[
 
 /// `kyomi_theme()` / `Theme` fields with no `--chartml-*` CSS counterpart.
 /// Each entry needs a verified reason. All ten were checked against
-/// chartml-core 5.1.12, chartml-leptos 5.1.9's shipped `chartml.css`, and
+/// chartml-core 5.2.0, chartml-leptos 5.1.10's shipped `chartml.css`, and
 /// chartml-chart-{cartesian,scatter,pie,table,metric}'s Rust sources (the
 /// versions actually resolved by this workspace's `Cargo.lock`) for any
-/// `var(--chartml-<name>, ...)` reference — none exists for any of these.
+/// `var(--chartml-<name>, ...)` reference — none exists for any of these
+/// except `table_font_size`, whose inline reference is documented on its own
+/// entry below.
 const RUST_ONLY_FIELDS: &[(&str, &str)] = &[
     (
         "tick",
@@ -463,16 +483,25 @@ const RUST_ONLY_FIELDS: &[(&str, &str)] = &[
     ),
     (
         "table_cell_padding",
-        "chartml-chart-table 5.0.5's inline `style` generation emits \
+        "chartml-chart-table 5.1.0's inline `style` generation emits \
          `var(--chartml-table-*, ...)` for header/row/border/text colors and \
          header font-weight/letter-spacing/text-transform/border, but never \
          for cell padding — verified by grepping \
-         chartml-chart-table-5.0.5/src/lib.rs for `--chartml-table-cell-padding`.",
+         chartml-chart-table-5.1.0/src/lib.rs for `--chartml-table-cell-padding`.",
     ),
     (
         "table_font_size",
-        "Same file, same check — no `--chartml-table-font-size` reference \
-         exists in chartml-chart-table 5.0.5.",
+        "chartml-chart-table 5.1.0 (CHA-20) now DOES read \
+         `var(--chartml-table-font-size, <theme.table_font_size>)`: it sets it \
+         inline on the sticky header, every body row and the body wrapper, so \
+         the `em` column minimums and the cell text share one font size. Kyomi \
+         deliberately does not declare that variable in main.css — the inline \
+         fallback already carries `kyomi_theme()`'s 12px, and chartml-leptos's \
+         shipped `chartml.css` does not declare it either (only chartml's npm \
+         stylesheet does, at 13px, and Kyomi does not ship that stylesheet). \
+         So in Kyomi the field is set purely from Rust and this allow-list \
+         entry stays: declare the variable in main.css only together with this \
+         mapping moving to MAPPED_FIELDS.",
     ),
 ];
 
@@ -528,6 +557,10 @@ fn corner_radius_magnitude(r: &BarCornerRadius) -> f32 {
 /// Converts a raw CSS value for `css_name` into a canonical string for
 /// comparison, per its `ValueKind`.
 ///
+/// `design` carries the declarations of the value's own mode (`@theme` for
+/// light, `.dark` for dark) so a `ColorVar` reference can be resolved to the
+/// colour it actually renders as.
+///
 /// `PxF32`/`BarCornerRadius` format via `{:?}` (`f32`'s `Debug` impl), not a
 /// fixed-precision `{:.4}`. `{:.4}` rounds — a drift smaller than 0.00005
 /// (e.g. `1.2` vs. `1.20004`) would produce identical strings and the
@@ -541,7 +574,7 @@ fn corner_radius_magnitude(r: &BarCornerRadius) -> f32 {
 /// in `light_mode_values_match_kyomi_theme_false` etc. simple). It also
 /// reads *better* than `{:.4}` for whole numbers (`22.0` instead of
 /// `22.0000`).
-fn css_value_repr(kind: ValueKind, raw: &str) -> String {
+fn css_value_repr(kind: ValueKind, raw: &str, design: &BTreeMap<String, String>) -> String {
     match kind {
         ValueKind::Color => normalize_color(raw),
         ValueKind::FontStack => normalize_font_stack(raw),
@@ -549,7 +582,50 @@ fn css_value_repr(kind: ValueKind, raw: &str) -> String {
         ValueKind::Weight => parse_weight(raw).to_string(),
         ValueKind::Literal => raw.trim().to_string(),
         ValueKind::TextTransform => text_transform_debug(&parse_text_transform(raw)),
+        ValueKind::ColorVar => normalize_color(&resolve_color_var(raw, design)),
     }
+}
+
+/// Resolves a single `var(--token)` CSS value against the design-token
+/// declarations for its mode, and returns the token's colour literal.
+///
+/// Panics on anything that would make the parity check hollow: a value that
+/// is not exactly one `var(--token)` reference (so a literal that silently
+/// decouples from the design token is not accepted), a token that is not
+/// declared for this mode, or a token whose value is itself another `var()`
+/// (kept single-level so resolution can never cycle or hide a second
+/// indirection).
+fn resolve_color_var(raw: &str, design: &BTreeMap<String, String>) -> String {
+    let trimmed = raw.trim();
+    let token = trimmed
+        .strip_prefix("var(")
+        .and_then(|rest| rest.strip_suffix(')'))
+        .unwrap_or_else(|| {
+            panic!(
+                "value {trimmed:?} is mapped with ValueKind::ColorVar, which expects a \
+                 single `var(--token)` reference so the colour comes from a design \
+                 token rather than a duplicated literal"
+            )
+        })
+        .trim();
+    assert!(
+        token.starts_with("--") && !token.contains("var("),
+        "value {trimmed:?} must be a single `var(--token)` reference with no nested \
+         var() or fallback"
+    );
+    let value = design.get(token).unwrap_or_else(|| {
+        panic!(
+            "{token} is referenced from main.css but is not declared in that mode's \
+             design-token block — the parity check cannot resolve it to a colour"
+        )
+    });
+    let value = value.trim();
+    assert!(
+        !value.contains("var("),
+        "{token} resolves to {value:?}, itself another var() reference; extend \
+         resolve_color_var if a second indirection is genuinely intended"
+    );
+    value.to_string()
 }
 
 /// Converts the named `Theme` field's value into the same canonical string
@@ -580,6 +656,7 @@ fn theme_field_repr(theme: &Theme, rust_field: &str) -> String {
         "table_header_border" => normalize_color(&theme.table_header_border),
         "table_row_bg" => theme.table_row_bg.trim().to_string(),
         "table_row_bg_alt" => theme.table_row_bg_alt.trim().to_string(),
+        "table_surface" => normalize_color(&theme.table_surface),
         "table_border" => normalize_color(&theme.table_border),
         "table_border_radius" => theme.table_border_radius.trim().to_string(),
         "table_text" => normalize_color(&theme.table_text),
@@ -620,7 +697,7 @@ fn light_mode_values_match_kyomi_theme_false() {
             .light_chartml
             .get(css_name)
             .unwrap_or_else(|| panic!("--chartml-{css_name} missing from main.css's light `:root` block"));
-        let expected = css_value_repr(kind, raw);
+        let expected = css_value_repr(kind, raw, &css.light_design);
         let actual = theme_field_repr(&theme, rust_field);
         assert_eq!(
             actual, expected,
@@ -638,7 +715,7 @@ fn dark_mode_overridden_values_match_kyomi_theme_true() {
         let Some(raw) = css.dark_chartml.get(css_name) else {
             continue; // not overridden in .dark — covered by the mode-independence test below
         };
-        let expected = css_value_repr(kind, raw);
+        let expected = css_value_repr(kind, raw, &css.dark_design);
         let actual = theme_field_repr(&theme, rust_field);
         assert_eq!(
             actual, expected,
@@ -704,7 +781,7 @@ fn every_chartml_css_variable_is_mapped_or_allow_listed() {
     }
 
     // The `.dark` block only overrides the subset of properties that are
-    // mode-dependent (17-18 of the 35 today) — everything else is
+    // mode-dependent (19 of the 36 today) — everything else is
     // legitimately absent there and inherited from `:root`. So this is a
     // one-directional membership check, not full exhaustiveness like the
     // light block above: every property that *is* present in `.dark` must
@@ -785,4 +862,49 @@ fn background_colors_match_design_system_color_background() {
     // (KYO-229's stated minimum bar).
     assert_eq!(normalize_color(&css.light_background), "#FAFAF8");
     assert_eq!(normalize_color(&css.dark_background), "#12100F");
+}
+
+/// KYO-985 (CHA-20): the table's sticky header, frozen first column and
+/// right-edge fade are opaque only because they layer over
+/// `--chartml-table-surface`. Tables sit on the chart card, not the page, so
+/// that surface is `--color-card` — a page-coloured strip behind the header,
+/// frozen column or fade is exactly the defect this guards against.
+///
+/// The mapped-field loops already compare `kyomi_theme().table_surface`
+/// against whatever `var(--color-card)` resolves to (via `ValueKind::ColorVar`);
+/// this test pins the two halves the loops cannot see: that main.css keeps the
+/// reference rather than a duplicated literal, and that the resolved values
+/// are the card colours, distinct from the page background.
+#[test]
+fn table_surface_matches_design_system_card_colour() {
+    let css = parse_main_css();
+    let light = kyomi_theme(false);
+    let dark = kyomi_theme(true);
+
+    assert_eq!(
+        css.light_chartml.get("table-surface").map(String::as_str),
+        Some("var(--color-card)"),
+        "--chartml-table-surface (light) must reference --color-card, the card \
+         surface the table actually sits on"
+    );
+    assert_eq!(
+        css.dark_chartml.get("table-surface").map(String::as_str),
+        Some("var(--color-card)"),
+        "--chartml-table-surface (dark) must reference --color-card"
+    );
+
+    assert_eq!(normalize_color(&light.table_surface), "#FFFFFF");
+    assert_eq!(normalize_color(&dark.table_surface), "#24201E");
+    assert_ne!(
+        normalize_color(&light.table_surface),
+        normalize_color(&light.bg),
+        "the card surface and the page background are different colours in the \
+         light theme; the table surface must be the card"
+    );
+    assert_ne!(
+        normalize_color(&dark.table_surface),
+        normalize_color(&dark.bg),
+        "the card surface and the page background are different colours in the \
+         dark theme; the table surface must be the card"
+    );
 }
