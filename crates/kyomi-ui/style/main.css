@@ -329,6 +329,16 @@ html {
   border-bottom: none !important;
 }
 
+/* Chartml table surface outside a chart card.
+ * Dashboard tables sit on `.chart-card` (`--color-card`), which the
+ * `--chartml-table-surface` theme variable mirrors. The chart builder's
+ * preview sits on the modal's page-coloured panel instead, so point the
+ * surface there — otherwise the sticky header, frozen first column and
+ * right-edge fade paint a card-coloured band on that panel. */
+.chart-builder-preview {
+  --chartml-table-surface: var(--color-background);
+}
+
 /* Chart title — prevent long titles from overflowing their container at
  * narrow card widths. Rendered by chartml-leptos inside the chart area. */
 .chart-card .chart-title {
