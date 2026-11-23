@@ -156,14 +156,17 @@ kyomi-datasource-drivers = { version = "1.6.2", package = "kyomi-datasource" }
 # the bottom of this file (between BEGIN_LOCAL_DEV_PATCHES /
 # END_LOCAL_DEV_PATCHES). The Dockerfile strips that block before
 # `cargo build`, so production always resolves against the registry.
-chartml-core = { version = "5", features = ["wasm-indexeddb"] }
+# 5.2 minimum: Theme::table_surface / --chartml-table-surface (CHA-20).
+chartml-core = { version = "5.2", features = ["wasm-indexeddb"] }
 # 5.1 minimum: render_to_png_with_background (email dark-mode charts).
 chartml-render = "5.1"
 chartml-chart-cartesian = "5"
 chartml-chart-pie = "5"
 chartml-chart-scatter = "5"
 chartml-chart-metric = "5.0.3"
-chartml-chart-table = "5.0.5"
+# 5.1 minimum: readable tables in narrow containers — sideways scroll, frozen
+# first column, right-aligned numbers (CHA-20).
+chartml-chart-table = "5.1"
 chartml-datafusion = "5"
 chartml-leptos = "5.1"
 

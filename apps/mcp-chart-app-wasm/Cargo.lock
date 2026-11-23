@@ -411,9 +411,9 @@ dependencies = [
 
 [[package]]
 name = "chartml-core"
-version = "5.1.6"
+version = "5.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "35c9943faea35fb9eda032099ee46006fa5e00789d9507b29d5e0c6b022b9c1d"
+checksum = "0b28a76235b26f203788f2d79cf0a0e9ac0231468c73002cba3903bfa2f5d5fa"
 dependencies = [
  "arrow",
  "async-trait",
@@ -439,9 +439,9 @@ dependencies = [
 
 [[package]]
 name = "chartml-leptos"
-version = "5.1.5"
+version = "5.1.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8018cbd3ec9ddb828663215f9a110441f9c78b2dbc032993bede3056e0118a3d"
+checksum = "b50e7f242ee1c49ccae410a7731534a5647832ea8346b2ff04907255dba93a40"
 dependencies = [
  "chartml-core",
  "humantime",

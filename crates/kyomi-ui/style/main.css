@@ -329,6 +329,16 @@ html {
   border-bottom: none !important;
 }
 
+/* Chartml table surface outside a chart card.
+ * Dashboard tables sit on `.chart-card` (`--color-card`), which the
+ * `--chartml-table-surface` theme variable mirrors. The chart builder's
+ * preview sits on the modal's page-coloured panel instead, so point the
+ * surface there — otherwise the sticky header, frozen first column and
+ * right-edge fade paint a card-coloured band on that panel. */
+.chart-builder-preview {
+  --chartml-table-surface: var(--color-background);
+}
+
 /* Chart title — prevent long titles from overflowing their container at
  * narrow card widths. Rendered by chartml-leptos inside the chart area. */
 .chart-card .chart-title {
@@ -500,6 +510,10 @@ html {
   --chartml-table-header-border: #1C1917;
   --chartml-table-row-bg: transparent;
   --chartml-table-row-bg-alt: transparent;
+  /* The opaque surface under the sticky header, frozen first column and
+   * right-edge fade. Tables sit on the chart card, not the page, so this
+   * must be the card colour (#FFFFFF) — kyomi_theme() sets the same value. */
+  --chartml-table-surface: var(--color-card);
   --chartml-table-border: #EDE9E0;
   --chartml-table-border-radius: 0;
   --chartml-table-text: #1C1917;
@@ -943,6 +957,9 @@ html {
   --chartml-table-header-border: #A8A29E;
   --chartml-table-row-bg: transparent;
   --chartml-table-row-bg-alt: transparent;
+  /* Opaque table surface — the card colour (#24201E), see the light block's
+   * matching declaration. */
+  --chartml-table-surface: var(--color-card);
   --chartml-table-border: #2E2925;
   --chartml-table-border-radius: 0;
   --chartml-table-text: #F5F3EF;

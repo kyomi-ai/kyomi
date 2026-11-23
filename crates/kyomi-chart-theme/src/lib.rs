@@ -97,6 +97,11 @@ pub fn kyomi_palette(name: &str, is_dark: bool) -> Vec<String> {
 /// side is accounted for — via an explicit, commented allow-list for the
 /// handful that legitimately exist on only one side. Run
 /// `cargo test -p kyomi-chart-theme` after editing either file.
+///
+/// One field mirrors a design token rather than a literal:
+/// `table_surface` is the chart card's colour, so `main.css` keeps
+/// `--chartml-table-surface: var(--color-card)` (the parity guard resolves
+/// the token and fails if it is replaced by a duplicated hex).
 pub fn kyomi_theme(is_dark: bool) -> Theme {
     // Page-matched chrome: chartml never emits a background rect, so the
     // chart inherits the surface it's placed on. `theme.bg` is the color
@@ -123,6 +128,17 @@ pub fn kyomi_theme(is_dark: bool) -> Theme {
             "#1C1917", // zero line — emphasized baseline on light
             "#FAFAF8", // dot halo — matches page bg
         )
+    };
+
+    // The chart-card surface — the actual background behind a dashboard
+    // chart, which is `--color-card` in main.css, not `--color-background`.
+    // The table's sticky header, frozen first column and right-edge fade lay
+    // their colours over this, so it must be the card, or they show a strip
+    // of page colour.
+    let card_bg = if is_dark {
+        "#24201E" // --color-card (dark)
+    } else {
+        "#FFFFFF" // --color-card (light)
     };
 
     // `Theme` is `#[non_exhaustive]` upstream, so consumers can't build it
@@ -198,6 +214,7 @@ pub fn kyomi_theme(is_dark: bool) -> Theme {
     t.table_header_border = axis.into();
     t.table_row_bg = "transparent".into();
     t.table_row_bg_alt = "transparent".into();
+    t.table_surface = card_bg.into();
     t.table_border = grid.into();
     t.table_text = text_primary.into();
     t.table_cell_padding = "10px 16px".into();
