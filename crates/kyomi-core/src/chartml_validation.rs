@@ -5,7 +5,7 @@ use serde_json::Value;
 use std::{future::Future, sync::OnceLock};
 
 // README_SCHEMA.md declares this Kyomi master authoritative, including SQL and
-// plugin extensions beyond the locked chartml-core 5.1.12 renderer schema.
+// plugin extensions beyond the locked chartml-core 5.2.0 renderer schema.
 // Serve this exact asset to clients and use its minified equivalent in prompts.
 pub const SCHEMA: &str = include_str!("../../../data/chartml-spec/chartml_schema.json");
 static VALIDATOR: OnceLock<Result<jsonschema::Validator, String>> = OnceLock::new();
@@ -288,7 +288,7 @@ fn replace_curly_defaults(
     }
     text
 }
-// Mirrors locked chartml-core 5.1.12 params::resolve_param_references:
+// Mirrors locked chartml-core 5.2.0 params::resolve_param_references:
 // exact double-quoted refs, inline defaults last-wins, longer keys first,
 // String/JSON YAML replacement without coercing numbers into query strings.
 fn resolve_quoted_inline_defaults(yaml: &str, value: &Value) -> String {
