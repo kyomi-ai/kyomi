@@ -483,15 +483,15 @@ const RUST_ONLY_FIELDS: &[(&str, &str)] = &[
     ),
     (
         "table_cell_padding",
-        "chartml-chart-table 5.1.0's inline `style` generation emits \
+        "chartml-chart-table 5.1.1's inline `style` generation emits \
          `var(--chartml-table-*, ...)` for header/row/border/text colors and \
          header font-weight/letter-spacing/text-transform/border, but never \
          for cell padding — verified by grepping \
-         chartml-chart-table-5.1.0/src/lib.rs for `--chartml-table-cell-padding`.",
+         chartml-chart-table-5.1.1/src/lib.rs for `--chartml-table-cell-padding`.",
     ),
     (
         "table_font_size",
-        "chartml-chart-table 5.1.0 (CHA-20) now DOES read \
+        "chartml-chart-table 5.1.1 (CHA-20) now DOES read \
          `var(--chartml-table-font-size, <theme.table_font_size>)`: it sets it \
          inline on the sticky header, every body row and the body wrapper, so \
          the `em` column minimums and the cell text share one font size. Kyomi \
@@ -864,11 +864,11 @@ fn background_colors_match_design_system_color_background() {
     assert_eq!(normalize_color(&css.dark_background), "#12100F");
 }
 
-/// KYO-985 (CHA-20): the table's sticky header, frozen first column and
-/// right-edge fade are opaque only because they layer over
-/// `--chartml-table-surface`. Tables sit on the chart card, not the page, so
-/// that surface is `--color-card` — a page-coloured strip behind the header,
-/// frozen column or fade is exactly the defect this guards against.
+/// KYO-985 (CHA-20): the table's sticky header and right-edge fade are
+/// opaque only because they layer over `--chartml-table-surface`. Tables sit
+/// on the chart card, not the page, so that surface is `--color-card` — a
+/// page-coloured strip behind the header or fade is exactly the defect this
+/// guards against.
 ///
 /// The mapped-field loops already compare `kyomi_theme().table_surface`
 /// against whatever `var(--color-card)` resolves to (via `ValueKind::ColorVar`);
