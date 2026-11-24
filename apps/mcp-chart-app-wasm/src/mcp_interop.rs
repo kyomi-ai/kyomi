@@ -64,9 +64,13 @@ struct ToolResultPayload {
 }
 
 /// Deserialized host context change payload.
+///
+/// The host sends a partial `HostContext` (MCP Apps protocol), so either half
+/// can be present on its own.
 #[derive(Deserialize)]
 struct HostContextPayload {
     theme: Option<String>,
+    styles: Option<mcp_transport::HostStyles>,
 }
 
 fn with_state<F: FnOnce(AppState)>(f: F) {
@@ -135,6 +139,14 @@ pub async fn initialize(state: AppState) -> Result<(), String> {
             with_state(|state| {
                 state.theme.set(new_theme);
             });
+        }
+
+        // Hosts re-send style variables when they change (e.g. a host that
+        // publishes concrete per-theme colours rather than `light-dark()`
+        // values). The table surface is taken from them, so they must track
+        // the host or the table keeps the previous theme's background.
+        if let Some(styles) = payload.styles {
+            mcp_transport::apply_host_styles(&styles);
         }
     });
 

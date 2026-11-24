@@ -427,6 +427,11 @@ pub fn apply_theme(theme: &str) {
     }
 }
 
+/// Element id for the host-provided font CSS block, so re-applying styles
+/// replaces it instead of stacking a new `<style>` for every host context
+/// change.
+const HOST_FONTS_STYLE_ID: &str = "kyomi-host-fonts";
+
 /// Apply host style CSS variables to the document root.
 pub fn apply_host_styles(styles: &HostStyles) {
     if let Some(root) = web_sys::window()
@@ -447,12 +452,20 @@ pub fn apply_host_styles(styles: &HostStyles) {
         if let Some(ref fonts) = css.fonts {
             if !fonts.is_empty() {
                 if let Some(document) = web_sys::window().and_then(|w| w.document()) {
-                    if let Ok(style_el) = document.create_element("style") {
-                        style_el.set_text_content(Some(fonts));
-                        if let Some(head) = document.head() {
-                            let _ = head.append_child(&style_el);
-                        }
-                    }
+                    let style_el = match document.get_element_by_id(HOST_FONTS_STYLE_ID) {
+                        Some(existing) => existing,
+                        None => match document.create_element("style") {
+                            Ok(el) => {
+                                el.set_id(HOST_FONTS_STYLE_ID);
+                                if let Some(head) = document.head() {
+                                    let _ = head.append_child(&el);
+                                }
+                                el
+                            }
+                            Err(_) => return,
+                        },
+                    };
+                    style_el.set_text_content(Some(fonts));
                 }
             }
         }

@@ -984,56 +984,84 @@ mod tests {
         assert!(contents[0]["text"].as_str().unwrap().contains("<html"));
     }
 
-    /// Every type the chart app's switcher offers must have a renderer
+    /// Every type the chart app can be asked to draw must have a renderer
     /// registered in its ChartML setup.
     ///
-    /// `SWITCHABLE_TYPES` drives the type selector, and both a spec sent by the
-    /// chart tool and one reached through the selector are rendered through the
-    /// registry built by `setup_chartml`. A type listed in one but not the other
-    /// is offered to the user and then fails with chartml-core's
+    /// Two lists decide what the app can be asked to draw: the shared type
+    /// selector's `CHART_TYPES` (what the user can pick) and the app's own
+    /// `SWITCHABLE_TYPES` (whether the selector is shown for the current type).
+    /// Both a spec sent by the chart tool and one reached through the selector
+    /// render through the registry built by `setup_chartml`, so a type offered
+    /// by either list but not registered fails with chartml-core's
     /// `UnknownChartType` — how "table" (KYO-987) shipped broken in the MCP app
     /// while working in Kyomi's own dashboards.
     ///
     /// The chart app is a separate Cargo workspace whose UI only builds for
     /// wasm32, so the invariant is checked here, beside the embedded UI resource
-    /// the app is served from. Comments and whitespace are stripped first so
-    /// formatting alone cannot satisfy or break the check.
+    /// the app is served from. It reads both real sources; comments and
+    /// whitespace are stripped first so formatting alone cannot satisfy or
+    /// break the check.
     #[test]
-    fn chart_app_registers_a_renderer_for_every_switchable_type() {
-        let source = std::fs::read_to_string(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../apps/mcp-chart-app-wasm/src/app.rs"
-        ))
-        .expect("read the MCP chart app source");
+    fn chart_app_registers_a_renderer_for_every_offered_type() {
+        let app = read_source("apps/mcp-chart-app-wasm/src/app.rs");
+        let selector = read_source(
+            "crates/kyomi-ui-components/src/components/dashboard/chart_header_bar.rs",
+        );
 
-        let code: String = source
+        let chart_types = array_entries(&selector, "constCHART_TYPES")
+            .split("(\"")
+            .skip(1)
+            .filter_map(|entry| entry.split('"').next())
+            .collect::<Vec<_>>();
+        assert!(!chart_types.is_empty(), "CHART_TYPES parsed empty");
+
+        let switchable = array_entries(&app, "constSWITCHABLE_TYPES")
+            .split('"')
+            .skip(1)
+            .step_by(2)
+            .collect::<Vec<_>>();
+        assert!(!switchable.is_empty(), "SWITCHABLE_TYPES parsed empty");
+
+        let mut offered = chart_types;
+        for chart_type in switchable {
+            if !offered.contains(&chart_type) {
+                offered.push(chart_type);
+            }
+        }
+
+        for chart_type in offered {
+            assert!(
+                app.contains(&format!("register_renderer(\"{chart_type}\",")),
+                "the chart app can be asked for {chart_type:?} but setup_chartml \
+                 registers no renderer for it, so that type fails with \
+                 chartml-core's UnknownChartType instead of rendering"
+            );
+        }
+    }
+
+    /// Read a repo file, dropping line comments and all whitespace so the
+    /// assertions below key on the code rather than its formatting.
+    fn read_source(repo_relative: &str) -> String {
+        let path = format!("{}/../../{repo_relative}", env!("CARGO_MANIFEST_DIR"));
+        let source = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"));
+        source
             .lines()
             .map(|line| line.split_once("//").map_or(line, |(code, _)| code))
             .collect::<String>()
             .chars()
             .filter(|c| !c.is_whitespace())
-            .collect();
+            .collect()
+    }
 
-        let types_at = code
-            .find("constSWITCHABLE_TYPES")
-            .expect("SWITCHABLE_TYPES declaration");
-        let equals = types_at
-            + code[types_at..]
-                .find('=')
-                .expect("SWITCHABLE_TYPES initialiser");
-        let open = equals + code[equals..].find('[').expect("SWITCHABLE_TYPES array");
-        let close = open + code[open..].find(']').expect("SWITCHABLE_TYPES array end");
-        let switchable: Vec<&str> = code[open + 1..close].split('"').skip(1).step_by(2).collect();
-        assert!(!switchable.is_empty(), "SWITCHABLE_TYPES parsed empty");
-
-        for chart_type in switchable {
-            assert!(
-                code.contains(&format!("register_renderer(\"{chart_type}\",")),
-                "the chart app offers {chart_type:?} in SWITCHABLE_TYPES but \
-                 setup_chartml registers no renderer for it, so that type fails \
-                 with chartml-core's UnknownChartType instead of rendering"
-            );
-        }
+    /// The literal of the `&[...]` array initialised by `const <name>`.
+    fn array_entries<'a>(code: &'a str, declaration: &str) -> &'a str {
+        let at = code
+            .find(declaration)
+            .unwrap_or_else(|| panic!("{declaration} declaration"));
+        let equals = at + code[at..].find('=').unwrap_or_else(|| panic!("{declaration} ="));
+        let open = equals + code[equals..].find('[').unwrap_or_else(|| panic!("{declaration} ["));
+        let close = open + code[open..].find(']').unwrap_or_else(|| panic!("{declaration} ]"));
+        &code[open + 1..close]
     }
 
     // -----------------------------------------------------------------------
