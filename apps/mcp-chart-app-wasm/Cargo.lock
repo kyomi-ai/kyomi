@@ -422,9 +422,9 @@ dependencies = [
 
 [[package]]
 name = "chartml-chart-table"
-version = "5.1.0"
+version = "5.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ba3aa0b476da1728baedce77283f581477fd4740ce4372329948fc4c1a4186f3"
+checksum = "21b63240c4e52fa395a196e4aa5d3698bd2191035e27f6ed0de19ea6c78da10d"
 dependencies = [
  "chartml-core",
 ]

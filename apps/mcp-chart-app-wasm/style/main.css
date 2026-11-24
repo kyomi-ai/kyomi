@@ -24,9 +24,9 @@
      publish that surface as `--color-background-primary` in `ui/initialize`'s
      `hostContext.styles.variables` (MCP Apps theming), which
      `apply_host_styles` copies onto `:root`; fall back to the app's own
-     background when a host sends none. The table's sticky header, frozen first
-     column and right-edge fade are opaque over the surface they sit on
-     (CHA-20), so they must use that same colour or they show a band. */
+     background when a host sends none. The table's sticky header and
+     right-edge fade are opaque over the surface they sit on (CHA-20), so
+     they must use that same colour or they show a band. */
   --chartml-bg: #ffffff;
   --chartml-table-surface: var(--color-background-primary, var(--chartml-bg));
 }

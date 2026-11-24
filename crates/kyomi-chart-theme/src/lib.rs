@@ -132,9 +132,8 @@ pub fn kyomi_theme(is_dark: bool) -> Theme {
 
     // The chart-card surface — the actual background behind a dashboard
     // chart, which is `--color-card` in main.css, not `--color-background`.
-    // The table's sticky header, frozen first column and right-edge fade lay
-    // their colours over this, so it must be the card, or they show a strip
-    // of page colour.
+    // The table's sticky header and right-edge fade lay their colours over
+    // this, so it must be the card, or they show a strip of page colour.
     let card_bg = if is_dark {
         "#24201E" // --color-card (dark)
     } else {
