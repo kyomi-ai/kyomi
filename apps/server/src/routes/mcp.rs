@@ -984,6 +984,58 @@ mod tests {
         assert!(contents[0]["text"].as_str().unwrap().contains("<html"));
     }
 
+    /// Every type the chart app's switcher offers must have a renderer
+    /// registered in its ChartML setup.
+    ///
+    /// `SWITCHABLE_TYPES` drives the type selector, and both a spec sent by the
+    /// chart tool and one reached through the selector are rendered through the
+    /// registry built by `setup_chartml`. A type listed in one but not the other
+    /// is offered to the user and then fails with chartml-core's
+    /// `UnknownChartType` — how "table" (KYO-987) shipped broken in the MCP app
+    /// while working in Kyomi's own dashboards.
+    ///
+    /// The chart app is a separate Cargo workspace whose UI only builds for
+    /// wasm32, so the invariant is checked here, beside the embedded UI resource
+    /// the app is served from. Comments and whitespace are stripped first so
+    /// formatting alone cannot satisfy or break the check.
+    #[test]
+    fn chart_app_registers_a_renderer_for_every_switchable_type() {
+        let source = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../apps/mcp-chart-app-wasm/src/app.rs"
+        ))
+        .expect("read the MCP chart app source");
+
+        let code: String = source
+            .lines()
+            .map(|line| line.split_once("//").map_or(line, |(code, _)| code))
+            .collect::<String>()
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
+
+        let types_at = code
+            .find("constSWITCHABLE_TYPES")
+            .expect("SWITCHABLE_TYPES declaration");
+        let equals = types_at
+            + code[types_at..]
+                .find('=')
+                .expect("SWITCHABLE_TYPES initialiser");
+        let open = equals + code[equals..].find('[').expect("SWITCHABLE_TYPES array");
+        let close = open + code[open..].find(']').expect("SWITCHABLE_TYPES array end");
+        let switchable: Vec<&str> = code[open + 1..close].split('"').skip(1).step_by(2).collect();
+        assert!(!switchable.is_empty(), "SWITCHABLE_TYPES parsed empty");
+
+        for chart_type in switchable {
+            assert!(
+                code.contains(&format!("register_renderer(\"{chart_type}\",")),
+                "the chart app offers {chart_type:?} in SWITCHABLE_TYPES but \
+                 setup_chartml registers no renderer for it, so that type fails \
+                 with chartml-core's UnknownChartType instead of rendering"
+            );
+        }
+    }
+
     // -----------------------------------------------------------------------
     // Protocol constants
     // -----------------------------------------------------------------------
