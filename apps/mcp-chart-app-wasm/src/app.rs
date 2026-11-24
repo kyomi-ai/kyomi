@@ -10,6 +10,7 @@ use chartml_chart_cartesian::CartesianRenderer;
 use chartml_chart_pie::PieRenderer;
 use chartml_chart_scatter::ScatterRenderer;
 use chartml_chart_metric::MetricRenderer;
+use chartml_chart_table::TableRenderer;
 use chartml_leptos::ChartMLChart;
 
 use leptos::prelude::Callback;
@@ -76,6 +77,7 @@ fn setup_chartml(is_dark: bool, palette: Option<&[String]>) -> Rc<ChartML> {
     c.register_renderer("doughnut", PieRenderer::new());
     c.register_renderer("scatter", ScatterRenderer::new());
     c.register_renderer("metric", MetricRenderer::new());
+    c.register_renderer("table", TableRenderer::new());
     let colors = palette
         .map(|p| p.to_vec())
         .unwrap_or_else(|| kyomi_chart_theme::kyomi_palette("kyomi", is_dark));

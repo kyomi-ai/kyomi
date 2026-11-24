@@ -19,6 +19,16 @@
   --chartml-legend-font: 'DM Sans', system-ui, sans-serif;
   --chartml-legend-font-size: 11px;
   --chartml-legend-font-weight: 500;
+
+  /* The app is transparent so the MCP host's surface shows through it. Hosts
+     publish that surface as `--color-background-primary` in `ui/initialize`'s
+     `hostContext.styles.variables` (MCP Apps theming), which
+     `apply_host_styles` copies onto `:root`; fall back to the app's own
+     background when a host sends none. The table's sticky header, frozen first
+     column and right-edge fade are opaque over the surface they sit on
+     (CHA-20), so they must use that same colour or they show a band. */
+  --chartml-bg: #ffffff;
+  --chartml-table-surface: var(--color-background-primary, var(--chartml-bg));
 }
 
 @theme {
@@ -115,6 +125,12 @@ body {
   --chartml-bg: #262626;
   --chartml-surface: #262626;
   --chartml-surface-overlay: rgba(38, 38, 38, 0.8);
+  /* `color-scheme: dark` on :root makes the browser paint its own canvas
+     behind the transparent page instead of letting the host's surface
+     through, so the host's `--color-background-primary` is not what shows
+     behind the chart in dark mode. `Canvas` is exactly the colour the
+     browser paints there. */
+  --chartml-table-surface: Canvas;
   --chartml-border: #383838;
   --chartml-border-input: #4a4a4a;
   --chartml-grid: #383838;
