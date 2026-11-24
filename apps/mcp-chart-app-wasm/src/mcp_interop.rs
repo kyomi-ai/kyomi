@@ -64,9 +64,14 @@ struct ToolResultPayload {
 }
 
 /// Deserialized host context change payload.
+///
+/// The host sends a partial `HostContext` (MCP Apps protocol), so either half
+/// can be present on its own. `styles` is kept as raw JSON so a styles payload
+/// this build cannot parse does not cost the theme update beside it.
 #[derive(Deserialize)]
 struct HostContextPayload {
     theme: Option<String>,
+    styles: Option<serde_json::Value>,
 }
 
 fn with_state<F: FnOnce(AppState)>(f: F) {
@@ -127,7 +132,10 @@ pub async fn initialize(state: AppState) -> Result<(), String> {
     transport.set_on_host_context_changed(move |params| {
         let payload: HostContextPayload = match serde_json::from_value(params) {
             Ok(p) => p,
-            Err(_) => return,
+            Err(e) => {
+                web_sys::console::warn_1(&format!("[kyomi-mcp] host context ignored: {e}").into());
+                return;
+            }
         };
 
         if let Some(new_theme) = payload.theme {
@@ -135,6 +143,18 @@ pub async fn initialize(state: AppState) -> Result<(), String> {
             with_state(|state| {
                 state.theme.set(new_theme);
             });
+        }
+
+        // A host that publishes plain per-theme values has to re-send them when
+        // the theme changes; `light-dark()` values re-resolve on their own. The
+        // table surface is taken from them, so apply what the host sends.
+        if let Some(styles) = payload.styles {
+            match serde_json::from_value::<mcp_transport::HostStyles>(styles) {
+                Ok(styles) => mcp_transport::apply_host_styles(&styles),
+                Err(e) => {
+                    web_sys::console::warn_1(&format!("[kyomi-mcp] host styles ignored: {e}").into());
+                }
+            }
         }
     });
 
