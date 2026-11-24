@@ -8,7 +8,8 @@
 #      (KYO-662) blocks real-world identifiers in tracked files and the
 #      PR's own commit messages
 #   2. trivy-scan (~30s) — Trivy filesystem vulnerability scanner (HIGH/CRITICAL)
-#   3. cargo-audit (fast, ~15s) — RUSTSEC advisories against Cargo.lock
+#   3. cargo-audit (fast, ~15s) — RUSTSEC advisories against the root and
+#      MCP chart app Cargo.lock files
 #   4. schema-parity (fast — only compiles kyomi-core, not the workspace) —
 #      diffs the Postgres and SQLite migration chains' resulting schemas;
 #      needs its own postgres service (KYO-206)
@@ -229,6 +230,14 @@ jobs:
   # before this job existed. cargo-audit reads Cargo.lock directly,
   # so it needs no toolchain and no compilation (~15s).
   #
+  # Both lockfiles are audited: the workspace root's, and the MCP chart app's
+  # (KYO-988). apps/mcp-chart-app-wasm is its own workspace with its own
+  # Cargo.lock — the root audit cannot see it, and ten advisories had already
+  # accumulated there. The chart-app step runs from that directory so
+  # `.cargo/audit.toml` above is not picked up: cargo-audit reads only the
+  # config in its current directory, and that app's advisories are all
+  # fixable, so it must fail on them with no shared ignore list.
+  #
   # Known-unfixable advisories are ignored via .cargo/audit.toml, where each
   # one carries a justification and the upstream condition for removing it.
   # Do NOT add an ignore there to make this job green — take the fix.
@@ -259,6 +268,12 @@ jobs:
       - uses: taiki-e/install-action@cargo-audit
 
       - name: cargo audit
+        run: cargo audit
+
+      # Separate workspace, separate lockfile — see the job comment above.
+      # working-directory also keeps the root ignore list out of scope.
+      - name: cargo audit (MCP chart app)
+        working-directory: apps/mcp-chart-app-wasm
         run: cargo audit
 
   # ---------------------------------------------------------------------------
