@@ -85,10 +85,12 @@ pub struct HostCss {
 /// silently is what left charts on default colours and fonts with no
 /// explanation. The app still renders, on that default context.
 ///
-/// `log_error` is a parameter so the decision and the message it emits are
-/// tested together: `connect()` passes `console::error_1`, which cannot run
-/// natively, so logging from inside this function is what keeps the report
-/// itself under test.
+/// `log_error` is a parameter so the decision and the message it builds are
+/// tested together, natively: `connect()` passes `console::error_1`, which
+/// aborts a native test process rather than recording anything, so a message
+/// assembled in `connect()` could not be asserted at all. What stays outside
+/// native coverage is the single forwarding call in `connect()`; the browser
+/// proof is what observes that line reach the console.
 ///
 /// `serde_json`'s error from a `Value` names the offending type but not the
 /// field it sat in, so this goes through `serde_path_to_error` to name the path
