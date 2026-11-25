@@ -21,8 +21,9 @@ OUTPUT_PATH="chart_app.html"
 
 # Fail before building anything if Cargo.lock would need to change, so the app
 # shipped inside Kyomi comes from the reviewed lock and never from a fresh
-# resolution of the manifest. Every caller — CI, release, desktop, the canary
-# and local builds — goes through this script, so this is the only copy.
+# resolution of the manifest. Keeping the check here rather than in a workflow
+# means every caller inherits it: this script is the chart app's only build
+# entry point, so there is one copy rather than one per caller.
 #
 # Trunk's own `--locked` cannot do this. Trunk 0.21.14 first resolves the
 # project with `cargo metadata` (src/config/manifest.rs → MetadataCommand)
