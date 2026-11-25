@@ -26,7 +26,11 @@
      `apply_host_styles` copies onto `:root`; fall back to the app's own
      background when a host sends none. The table's sticky header and
      right-edge fade are opaque over the surface they sit on (CHA-20), so
-     they must use that same colour or they show a band. */
+     they must use that same colour or they show a band.
+
+     In dark mode this also paints the page itself (see `:root.dark` below),
+     so the host's background, the area behind the chart and the table chrome
+     all resolve to one colour. */
   --chartml-bg: #ffffff;
   --chartml-table-surface: var(--color-background-primary, var(--chartml-bg));
 }
@@ -91,7 +95,18 @@ body {
 }
 
 :root:not(.dark) { color-scheme: light; }
-:root.dark { color-scheme: dark; }
+:root.dark {
+  color-scheme: dark;
+  /* Paint the page ourselves instead of leaving it transparent: with
+     `color-scheme: dark` the browser paints its own canvas colour behind the
+     chart (#121212 in Chromium, #1E1E1E in WebKit) rather than letting the
+     host's surface through. A root background propagates to the canvas, so
+     the host's `--color-background-primary` — or the app's own dark
+     background when a host sends none — is what appears behind the chart.
+     `--chartml-table-surface` resolves to exactly the same colour, so the
+     table's opaque header and right-edge fade sit on it with no band. */
+  background-color: var(--chartml-table-surface);
+}
 
 /* Kyomi logo button in chart header */
 .kyomi-logo-link {
@@ -125,12 +140,6 @@ body {
   --chartml-bg: #262626;
   --chartml-surface: #262626;
   --chartml-surface-overlay: rgba(38, 38, 38, 0.8);
-  /* `color-scheme: dark` on :root makes the browser paint its own canvas
-     behind the transparent page instead of letting the host's surface
-     through, so the host's `--color-background-primary` is not what shows
-     behind the chart in dark mode. `Canvas` is exactly the colour the
-     browser paints there. */
-  --chartml-table-surface: Canvas;
   --chartml-border: #383838;
   --chartml-border-input: #4a4a4a;
   --chartml-grid: #383838;
