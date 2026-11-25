@@ -75,24 +75,38 @@ pub struct HostCss {
     pub fonts: Option<String>,
 }
 
-/// Read the `hostContext` out of a `ui/initialize` result.
+/// Resolve the `hostContext` of a `ui/initialize` result, reporting one that
+/// cannot be read.
 ///
-/// `Ok(None)` means the host sent no context at all, which the protocol allows.
-/// `Err` means a context was sent but this build could not read it; it carries
-/// serde's explanation, and the caller reports it. The two must not be
-/// conflated, because a context dropped here leaves the charts on default
-/// colours and fonts with nothing saying why.
+/// A host that sends no context at all is valid, which the protocol allows: the
+/// app gets `HostContext::default()` and nothing is reported. A context that is
+/// present but unreadable — one bad field type anywhere, including an explicit
+/// `null` — is reported through `log_error`, because falling back to the default
+/// silently is what left charts on default colours and fonts with no
+/// explanation. The app still renders, on that default context.
+///
+/// `log_error` is a parameter so the decision and the message it emits are
+/// tested together: `connect()` passes `console::error_1`, which cannot run
+/// natively, so logging from inside this function is what keeps the report
+/// itself under test.
 ///
 /// `serde_json`'s error from a `Value` names the offending type but not the
 /// field it sat in, so this goes through `serde_path_to_error` to name the path
 /// — one unexpected type in `styles` otherwise discards the whole theme.
-fn parse_host_context(result: &Value) -> Result<Option<HostContext>, String> {
+fn host_context_from_initialize(
+    result: &Value,
+    log_error: &mut dyn FnMut(&str),
+) -> HostContext {
     let Some(value) = result.get("hostContext") else {
-        return Ok(None);
+        return HostContext::default();
     };
-    serde_path_to_error::deserialize::<_, HostContext>(value.clone())
-        .map(Some)
-        .map_err(|error| error.to_string())
+    match serde_path_to_error::deserialize::<_, HostContext>(value.clone()) {
+        Ok(host_context) => host_context,
+        Err(error) => {
+            log_error(&format!("[kyomi-mcp] ui/initialize host context ignored: {error}"));
+            HostContext::default()
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -187,16 +201,8 @@ impl McpTransport {
 
         // Extract host context. A host that sends none is valid; one that sends
         // a context this build cannot read is reported, not silently replaced.
-        let host_context = match parse_host_context(&result) {
-            Ok(Some(host_context)) => host_context,
-            Ok(None) => HostContext::default(),
-            Err(error) => {
-                web_sys::console::error_1(
-                    &format!("[kyomi-mcp] host context ignored: {error}").into(),
-                );
-                HostContext::default()
-            }
-        };
+        let mut log_error = |message: &str| web_sys::console::error_1(&message.into());
+        let host_context = host_context_from_initialize(&result, &mut log_error);
 
         *self.host_context.borrow_mut() = Some(host_context.clone());
 
@@ -502,6 +508,16 @@ pub fn apply_host_styles(styles: &HostStyles) {
 mod tests {
     use super::*;
 
+    /// Run the production reporting path and return the context plus every
+    /// message it asked to log. This is the same function `connect()` calls, so
+    /// a version that stops logging a context it cannot read fails these tests.
+    fn initialize_with(result: &Value) -> (HostContext, Vec<String>) {
+        let mut logged = Vec::new();
+        let mut log_error = |message: &str| logged.push(message.to_string());
+        let context = host_context_from_initialize(result, &mut log_error);
+        (context, logged)
+    }
+
     #[test]
     fn valid_host_context_is_read() {
         let result = serde_json::json!({
@@ -517,10 +533,13 @@ mod tests {
             }
         });
 
-        let context = parse_host_context(&result)
-            .expect("a context in the protocol's shape must parse")
-            .expect("the host sent a context");
+        let (context, logged) = initialize_with(&result);
 
+        assert_eq!(
+            logged,
+            Vec::<String>::new(),
+            "a context in the protocol's shape must be read without a report"
+        );
         assert_eq!(context.theme.as_deref(), Some("dark"));
         assert_eq!(context.display_mode.as_deref(), Some("inline"));
         assert_eq!(context.locale.as_deref(), Some("en-GB"));
@@ -539,9 +558,16 @@ mod tests {
     fn missing_host_context_is_not_an_error() {
         let result = serde_json::json!({ "protocolVersion": PROTOCOL_VERSION });
 
-        assert!(
-            parse_host_context(&result).expect("no context at all is valid").is_none(),
+        let (context, logged) = initialize_with(&result);
+
+        assert_eq!(
+            logged,
+            Vec::<String>::new(),
             "a host that sends no context must not be reported as one that failed"
+        );
+        assert_eq!(
+            context.theme, None,
+            "a host that sends no context renders with the default context"
         );
     }
 
@@ -556,9 +582,18 @@ mod tests {
             }
         });
 
-        let message = parse_host_context(&result)
-            .expect_err("a context this build cannot read must be reported");
+        let (context, logged) = initialize_with(&result);
 
+        assert_eq!(
+            logged.len(),
+            1,
+            "an unreadable context must produce exactly one report, got: {logged:?}"
+        );
+        let message = &logged[0];
+        assert!(
+            message.starts_with("[kyomi-mcp] ui/initialize host context ignored: "),
+            "the report must carry the app's console prefix, got: {message}"
+        );
         assert!(
             message.contains("styles.variables.--color-background-primary"),
             "the report must name the field that failed, got: {message}"
@@ -567,18 +602,35 @@ mod tests {
             message.contains("invalid type: integer `17`, expected a string"),
             "the report must carry serde's own explanation, got: {message}"
         );
+        assert_eq!(
+            context.theme, None,
+            "the unreadable context must not be half-applied"
+        );
     }
 
     #[test]
     fn null_host_context_is_reported_not_treated_as_absent() {
         let result = serde_json::json!({ "hostContext": null });
 
-        let message = parse_host_context(&result)
-            .expect_err("an explicit null context is malformed, not absent");
+        let (context, logged) = initialize_with(&result);
 
+        assert_eq!(
+            logged.len(),
+            1,
+            "an explicit null context is malformed and must be reported, got: {logged:?}"
+        );
+        let message = &logged[0];
+        assert!(
+            message.starts_with("[kyomi-mcp] ui/initialize host context ignored: "),
+            "the report must carry the app's console prefix, got: {message}"
+        );
         assert!(
             message.contains("expected struct HostContext"),
             "the report must say what the host sent instead, got: {message}"
+        );
+        assert_eq!(
+            context.theme, None,
+            "the null context falls back to the default context"
         );
     }
 }
