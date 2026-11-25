@@ -210,7 +210,7 @@ Key crates and where they live:
 | `kyomi-connect-protocol` | `~/repos/kyomi-connect` | `kyomi-connect-protocol` |
 | `kode-leptos` | `~/repos/kode` | `kode-leptos` |
 
-Version requirements are declared in the root `Cargo.toml` and resolved in `Cargo.lock`; read them there rather than repeating them here, where they go stale.
+Version requirements for the main workspace are declared in the root `Cargo.toml` and resolved in the root `Cargo.lock`; the MCP chart app is its own workspace with its own manifest and lock. Read the versions there rather than repeating them here, where they go stale.
 
 **Local dev** can use `[patch.crates-io]` overrides (see commented examples at the bottom of `Cargo.toml`) to point at local checkouts for faster iteration. These patches are dev-only and are not used in production builds.
 
