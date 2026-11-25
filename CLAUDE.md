@@ -196,7 +196,7 @@ Kyomi depends on crates from sibling repos (`chartml`, `kyomi-connect`) via **cr
 
 **This means fixes in those repos don't reach kyomi until:**
 1. The fix is merged to the external repo's main branch
-2. A version tag is pushed on that repo to trigger its publish CI (e.g. `v5.0.4` for chartml, `v1.3.2` for kyomi-connect)
+2. A version tag (`vMAJOR.MINOR.PATCH`) is pushed on that repo to trigger its publish CI
 3. The new version lands on crates.io
 4. Kyomi's `Cargo.lock` is updated: `cargo update <crate-name>`
 5. The lock file change is committed and a new kyomi release is cut
@@ -205,10 +205,12 @@ Key crates and where they live:
 
 | Crate | Source repo | Kyomi Cargo.toml key |
 |-------|-----------|---------------------|
-| `chartml-*` | `~/repos/chartml` | `chartml-chart-table = "5.0.4"` etc. |
-| `kyomi-datasource` | `~/repos/kyomi-connect` | `kyomi-datasource-drivers = { version = "1.3", package = "kyomi-datasource" }` |
-| `kyomi-connect-protocol` | `~/repos/kyomi-connect` | `kyomi-connect-protocol = "1.2"` |
-| `kode-leptos` | `~/repos/kode` | `kode-leptos = "0.2"` |
+| `chartml-*` | `~/repos/chartml` | `chartml-core`, `chartml-render`, `chartml-chart-*`, `chartml-leptos`, `chartml-datafusion` |
+| `kyomi-datasource` | `~/repos/kyomi-connect` | `kyomi-datasource-drivers` (published as `kyomi-datasource`) |
+| `kyomi-connect-protocol` | `~/repos/kyomi-connect` | `kyomi-connect-protocol` |
+| `kode-leptos` | `~/repos/kode` | `kode-leptos` |
+
+Version requirements for the main workspace are declared in the root `Cargo.toml` and resolved in the root `Cargo.lock`; the MCP chart app is its own workspace with its own manifest and lock. Read the versions there rather than repeating them here, where they go stale.
 
 **Local dev** can use `[patch.crates-io]` overrides (see commented examples at the bottom of `Cargo.toml`) to point at local checkouts for faster iteration. These patches are dev-only and are not used in production builds.
 
