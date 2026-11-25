@@ -40,6 +40,10 @@ wasm-bindgen-futures = "0.4"
 js-sys = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Reports the field path of a deserialization failure. serde_json's own error
+# from a `Value` names the bad type but not where it sat, so a host context that
+# fails to parse could not say which part of it the app could not read.
+serde_path_to_error = "0.1.20"
 serde_yaml = "0.9"
 console_error_panic_hook = "0.1"
 
