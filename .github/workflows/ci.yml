@@ -15,7 +15,8 @@
 #      needs its own postgres service (KYO-206)
 #   5. clippy (slow) — full workspace clippy + compilation check + unit
 #      tests, integration tests, and doctests (apps/server/tests/ — needs
-#      the postgres service below; KYO-236)
+#      the postgres service below; KYO-236), plus the MCP chart app's own
+#      native test suite (KYO-996)
 #   6. ssr-contract-tests (slow, runs parallel to clippy — see the job's own
 #      comment for why it's a separate job rather than a step tacked onto
 #      clippy) — real trunk build of crates/kyomi-ui, then the SSR contract
@@ -446,6 +447,26 @@ jobs:
 
       - name: Strip local-dev mold linker config
         run: sed -i '/# BEGIN_LOCAL_DEV_LINKER/,/# END_LOCAL_DEV_LINKER/d' .cargo/config.toml
+
+      # apps/mcp-chart-app-wasm is a separate Cargo workspace with its own
+      # lockfile, and before KYO-996 nothing ever ran its `#[cfg(test)]`
+      # suite: plain `cargo test` there did not even compile (setup_chartml
+      # returned Rc<ChartML> unconditionally, while chartml-leptos's
+      # ChartMLRef is Arc<ChartML> on native — where cargo test builds), so
+      # every chart-app change relied on manual browser checks. Run the suite
+      # natively here, in the already-required job that also builds this app,
+      # so a broken chart-app test fails CI. `--locked` keeps the app's
+      # separate Cargo.lock from silently re-resolving.
+      #
+      # Must stay below the mold strip: Cargo reads the repo-root
+      # .cargo/config.toml from this working directory, and its
+      # x86_64-unknown-linux-gnu table needs mold, which the runner does not
+      # have.
+      - name: cargo test (MCP chart app)
+        working-directory: apps/mcp-chart-app-wasm
+        env:
+          RUSTC_WRAPPER: ${{ env.SCCACHE_AVAILABLE == 'true' && 'sccache' || '' }}
+        run: cargo test --locked
 
       - name: cargo clippy (workspace, excluding desktop)
         env:
