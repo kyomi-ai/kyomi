@@ -9,8 +9,10 @@ edition = "2021"
 license = "AGPL-3.0-or-later"
 
 [dependencies]
-# ChartML — version "5" pulls from crates.io for CI/CD builds. Local dev
-# redirects via [patch.crates-io] below (stripped by CI sed, same as root).
+# ChartML comes from crates.io. This crate is its own workspace with its own
+# committed Cargo.lock, so its versions resolve independently of the root
+# workspace. Local dev wires in local checkouts with a [patch.crates-io]
+# override in ~/.cargo/config.toml; there is deliberately no patch block here.
 chartml-core = "5"
 chartml-chart-cartesian = "5"
 chartml-chart-pie = "5"
