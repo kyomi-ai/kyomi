@@ -2,8 +2,6 @@
 
 //! Root application component and shared state.
 
-use std::rc::Rc;
-
 use leptos::prelude::*;
 use chartml_core::ChartML;
 use chartml_chart_cartesian::CartesianRenderer;
@@ -11,7 +9,7 @@ use chartml_chart_pie::PieRenderer;
 use chartml_chart_scatter::ScatterRenderer;
 use chartml_chart_metric::MetricRenderer;
 use chartml_chart_table::TableRenderer;
-use chartml_leptos::ChartMLChart;
+use chartml_leptos::{ChartMLChart, ChartMLRef};
 
 use leptos::prelude::Callback;
 use kyomi_ui_components::dashboard::ChartHeaderBar;
@@ -68,7 +66,15 @@ impl AppState {
 // ChartML setup
 // ---------------------------------------------------------------------------
 
-fn setup_chartml(is_dark: bool, palette: Option<&[String]>) -> Rc<ChartML> {
+/// Build the configured `ChartML` instance.
+///
+/// Returns `chartml_leptos::ChartMLRef`, the type `ChartMLChart` takes. At the
+/// locked chartml-leptos 5.1.10 that alias is `std::rc::Rc<ChartML>` under
+/// `#[cfg(target_arch = "wasm32")]` and `std::sync::Arc<ChartML>` otherwise
+/// (`src/lib.rs:17-20`): `Rc` because ChartML's resolver holds `Rc`/`RefCell`
+/// on wasm32, `Arc` on native so the handle can cross task boundaries there.
+/// `cargo test` builds this crate for the host, where the `Arc` arm applies.
+fn setup_chartml(is_dark: bool, palette: Option<&[String]>) -> ChartMLRef {
     let mut c = ChartML::new();
     c.register_renderer("bar", CartesianRenderer::new());
     c.register_renderer("line", CartesianRenderer::new());
@@ -83,7 +89,7 @@ fn setup_chartml(is_dark: bool, palette: Option<&[String]>) -> Rc<ChartML> {
         .unwrap_or_else(|| kyomi_chart_theme::kyomi_palette("kyomi", is_dark));
     c.set_default_palette(colors);
     c.set_theme(kyomi_chart_theme::kyomi_theme(is_dark));
-    Rc::new(c)
+    ChartMLRef::new(c)
 }
 
 // ---------------------------------------------------------------------------
