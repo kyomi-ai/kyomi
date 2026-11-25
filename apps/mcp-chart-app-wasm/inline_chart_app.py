@@ -25,30 +25,44 @@ output_path = Path(sys.argv[2])
 wasm_file = next(dist.glob("*.wasm"))
 wasm_b64 = base64.b64encode(wasm_file.read_bytes()).decode()
 
-# Read the JS glue file
+# Read the JS glue file. Name the encoding instead of trusting the platform
+# default, which is the ANSI code page on Windows and would fail or corrupt a
+# non-ASCII character there.
 js_file = next(dist.glob("mcp-chart-app-wasm.js"))
-js_content = js_file.read_text()
+js_content = js_file.read_text(encoding="utf-8")
 
-# Read the CSS file(s)
+# Read the CSS file(s), for the same reason.
 css_parts = []
 for css_file in dist.glob("*.css"):
-    css_parts.append(css_file.read_text())
+    css_parts.append(css_file.read_text(encoding="utf-8"))
 css_content = "\n".join(css_parts)
 
 
-# Patch the JS glue to load WASM from inline base64 instead of fetch()
+# Patch the JS glue to load WASM from inline base64 instead of fetch().
 # wasm-bindgen's init function does:
 #   module_or_path = fetch(module_or_path);
-# We replace it to decode inline base64.
-js_patched = re.sub(
-    r"module_or_path\s*=\s*fetch\s*\(\s*module_or_path\s*\)\s*;",
-    f"""module_or_path = (async () => {{
+# We replace it to decode inline base64. This replacement is the only thing
+# that embeds the WASM, so it has to happen exactly once: a glue change that
+# removes or duplicates the line must fail the build rather than produce a
+# chart_app.html whose WASM is not embedded.
+FETCH_CALL = re.compile(r"module_or_path\s*=\s*fetch\s*\(\s*module_or_path\s*\)\s*;")
+js_patched, fetch_calls = FETCH_CALL.subn(
+    lambda _match: f"""module_or_path = (async () => {{
         const b64 = "{wasm_b64}";
         const binary = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
         return new Response(binary, {{ headers: {{ "content-type": "application/wasm" }} }});
     }})();""",
     js_content,
 )
+if fetch_calls != 1:
+    sys.exit(
+        f"error: expected exactly one `module_or_path = fetch(module_or_path);` "
+        f"in {js_file}, found {fetch_calls}.\n"
+        "wasm-bindgen changed the glue that loads the WASM module, so the inline "
+        "loader was not installed exactly once and chart_app.html would ship "
+        "without a working embedded WASM binary. Update FETCH_CALL in "
+        "inline_chart_app.py to match the new wasm-bindgen output."
+    )
 
 # Build the final single-file HTML
 final_html = f"""<!DOCTYPE html>
@@ -72,7 +86,11 @@ await __wbg_init();
 </body>
 </html>"""
 
-Path(output_path).write_text(final_html)
+# UTF-8 with LF newlines, not the platform defaults: the artifact is embedded
+# byte-for-byte, and a Windows text-mode write would encode to the ANSI code
+# page and translate newlines.
+with output_path.open("w", encoding="utf-8", newline="\n") as output_file:
+    output_file.write(final_html)
 wasm_size_kb = wasm_file.stat().st_size / 1024
 b64_size_kb = len(wasm_b64) / 1024
 html_size_kb = len(final_html) / 1024
