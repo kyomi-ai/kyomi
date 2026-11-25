@@ -33,6 +33,10 @@ OUTPUT_PATH="chart_app.html"
 # Verified against this pinned Trunk: `trunk build --locked` exits 0 and
 # rewrites Cargo.lock, while `cargo metadata --locked` fails with Cargo's lock
 # error. Run the same check Cargo does, before Trunk can touch the lock.
+#
+# A local `[patch.crates-io]` override changes resolution, so the lock has to
+# be updated in the same change; the check reports that rather than rewriting
+# the lock behind an unreviewed dependency.
 echo "==> Step 0: Verify Cargo.lock is current"
 cargo metadata --locked --format-version 1 > /dev/null
 
