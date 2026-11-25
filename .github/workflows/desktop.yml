@@ -225,18 +225,18 @@ jobs:
             Move-Item -Force "$($_.FullName).opt" $_.FullName
           }
 
-      - name: Build MCP chart app WASM (Linux/macOS)
-        if: matrix.os != 'windows'
+      # One build path on all three OSes: build.sh (Trunk + the Python inliner)
+      # is what turns dist/ into the single self-contained chart_app.html that
+      # kyomi-server embeds with include_str!. On Windows `shell: bash` is the
+      # runner's Git Bash (C:\Program Files\Git\bin is on the machine PATH) and
+      # build.sh's `python3` is the toolcache Python's python3.exe. Copying
+      # dist/index.html instead — as the old Windows-only pwsh branch did —
+      # ships a page that links external JS/WASM/CSS and draws nothing
+      # (KYO-990), so do not add a per-OS copy of the inliner here.
+      - name: Build MCP chart app WASM
         working-directory: apps/mcp-chart-app-wasm
+        shell: bash
         run: bash build.sh
-
-      - name: Build MCP chart app WASM (Windows)
-        if: matrix.os == 'windows'
-        working-directory: apps/mcp-chart-app-wasm
-        shell: pwsh
-        run: |
-          trunk build --release
-          Copy-Item dist/index.html chart_app.html
 
       - name: Bundle with cargo-tauri
         env:
