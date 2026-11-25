@@ -75,6 +75,26 @@ pub struct HostCss {
     pub fonts: Option<String>,
 }
 
+/// Read the `hostContext` out of a `ui/initialize` result.
+///
+/// `Ok(None)` means the host sent no context at all, which the protocol allows.
+/// `Err` means a context was sent but this build could not read it; it carries
+/// serde's explanation, and the caller reports it. The two must not be
+/// conflated, because a context dropped here leaves the charts on default
+/// colours and fonts with nothing saying why.
+///
+/// `serde_json`'s error from a `Value` names the offending type but not the
+/// field it sat in, so this goes through `serde_path_to_error` to name the path
+/// — one unexpected type in `styles` otherwise discards the whole theme.
+fn parse_host_context(result: &Value) -> Result<Option<HostContext>, String> {
+    let Some(value) = result.get("hostContext") else {
+        return Ok(None);
+    };
+    serde_path_to_error::deserialize::<_, HostContext>(value.clone())
+        .map(Some)
+        .map_err(|error| error.to_string())
+}
+
 // ---------------------------------------------------------------------------
 // Pending request tracking
 // ---------------------------------------------------------------------------
@@ -165,12 +185,18 @@ impl McpTransport {
 
         let result = self.send_request(METHOD_INITIALIZE, init_params).await?;
 
-        // Extract host context
-        let host_context: HostContext = result
-            .get("hostContext")
-            .cloned()
-            .and_then(|v| serde_json::from_value(v).ok())
-            .unwrap_or_default();
+        // Extract host context. A host that sends none is valid; one that sends
+        // a context this build cannot read is reported, not silently replaced.
+        let host_context = match parse_host_context(&result) {
+            Ok(Some(host_context)) => host_context,
+            Ok(None) => HostContext::default(),
+            Err(error) => {
+                web_sys::console::error_1(
+                    &format!("[kyomi-mcp] host context ignored: {error}").into(),
+                );
+                HostContext::default()
+            }
+        };
 
         *self.host_context.borrow_mut() = Some(host_context.clone());
 
@@ -469,5 +495,90 @@ pub fn apply_host_styles(styles: &HostStyles) {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn valid_host_context_is_read() {
+        let result = serde_json::json!({
+            "protocolVersion": PROTOCOL_VERSION,
+            "hostContext": {
+                "theme": "dark",
+                "displayMode": "inline",
+                "locale": "en-GB",
+                "styles": {
+                    "variables": { "--color-background-primary": "#111111" },
+                    "css": { "fonts": "@font-face { font-family: Inter; }" }
+                }
+            }
+        });
+
+        let context = parse_host_context(&result)
+            .expect("a context in the protocol's shape must parse")
+            .expect("the host sent a context");
+
+        assert_eq!(context.theme.as_deref(), Some("dark"));
+        assert_eq!(context.display_mode.as_deref(), Some("inline"));
+        assert_eq!(context.locale.as_deref(), Some("en-GB"));
+        let styles = context.styles.expect("styles were sent");
+        assert_eq!(
+            styles.variables.expect("variables were sent")["--color-background-primary"],
+            "#111111"
+        );
+        assert_eq!(
+            styles.css.expect("css was sent").fonts.as_deref(),
+            Some("@font-face { font-family: Inter; }")
+        );
+    }
+
+    #[test]
+    fn missing_host_context_is_not_an_error() {
+        let result = serde_json::json!({ "protocolVersion": PROTOCOL_VERSION });
+
+        assert!(
+            parse_host_context(&result).expect("no context at all is valid").is_none(),
+            "a host that sends no context must not be reported as one that failed"
+        );
+    }
+
+    #[test]
+    fn malformed_host_context_reports_the_field_that_failed() {
+        // One unexpected type deep inside `styles` is enough to cost the whole
+        // context, so the report has to name that field.
+        let result = serde_json::json!({
+            "hostContext": {
+                "theme": "dark",
+                "styles": { "variables": { "--color-background-primary": 17 } }
+            }
+        });
+
+        let message = parse_host_context(&result)
+            .expect_err("a context this build cannot read must be reported");
+
+        assert!(
+            message.contains("styles.variables.--color-background-primary"),
+            "the report must name the field that failed, got: {message}"
+        );
+        assert!(
+            message.contains("invalid type: integer `17`, expected a string"),
+            "the report must carry serde's own explanation, got: {message}"
+        );
+    }
+
+    #[test]
+    fn null_host_context_is_reported_not_treated_as_absent() {
+        let result = serde_json::json!({ "hostContext": null });
+
+        let message = parse_host_context(&result)
+            .expect_err("an explicit null context is malformed, not absent");
+
+        assert!(
+            message.contains("expected struct HostContext"),
+            "the report must say what the host sent instead, got: {message}"
+        );
     }
 }
