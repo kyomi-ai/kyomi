@@ -198,8 +198,8 @@ Kyomi depends on crates from sibling repos (`chartml`, `kyomi-connect`) via **cr
 1. The fix is merged to the external repo's main branch
 2. A version tag (`vMAJOR.MINOR.PATCH`) is pushed on that repo to trigger its publish CI
 3. The new version lands on crates.io
-4. Kyomi's `Cargo.lock` is updated: `cargo update <crate-name>`
-5. The lock file change is committed and a new kyomi release is cut
+4. Kyomi's lock files are updated: `cargo update <crate-name>` for each crate that changed, in every workspace that uses it: the repo root, and `apps/mcp-chart-app-wasm` when it uses that crate (the chart app is its own workspace with its own `Cargo.lock`, which `build.sh` checks and fails on if stale)
+5. The lock file changes are committed and a new kyomi release is cut
 
 Key crates and where they live:
 
@@ -212,7 +212,14 @@ Key crates and where they live:
 
 Version requirements for the main workspace are declared in the root `Cargo.toml` and resolved in the root `Cargo.lock`; the MCP chart app is its own workspace with its own manifest and lock. Read the versions there rather than repeating them here, where they go stale.
 
-**Local dev** can use `[patch.crates-io]` overrides (see commented examples at the bottom of `Cargo.toml`) to point at local checkouts for faster iteration. These patches are dev-only and are not used in production builds.
+**Local dev:** to test a local chartml or kyomi-connect change, put a `[patch.crates-io]` override in `~/.cargo/config.toml` with **absolute** paths. Never put it in a `Cargo.toml`: relative paths only resolve in a sibling layout, and the file is committed. The override applies to every worktree and is not used in CI or production builds. Patch every crate of that family the build uses, all from one checkout whose crates build together (the release tag the chart app's `Cargo.lock` currently resolves to is the natural choice).
+
+An override changes how the lock resolves, so any `--locked` command fails until the lock is regenerated under it: in the root workspace (run `cargo update -p <crate>` for every patched crate the root uses) and in the chart app, where `apps/mcp-chart-app-wasm/build.sh` Step 0 (`cargo metadata --locked`, KYO-998) enforces it. For the chart app:
+
+1. Patch every chartml crate listed in `apps/mcp-chart-app-wasm/Cargo.toml` (today: `chartml-core`, `chartml-chart-cartesian`, `chartml-chart-pie`, `chartml-chart-scatter`, `chartml-chart-metric`, `chartml-chart-table`, `chartml-leptos`).
+2. In `apps/mcp-chart-app-wasm`, regenerate the lock with `cargo update` naming each patched crate (`-p chartml-core -p chartml-chart-cartesian ...`). A crate you leave out stays on the registry version, and cargo only warns "patch ... was not used".
+3. Run `build.sh`. A server `cargo build` also runs it (from `apps/server/build.rs`) whenever `chart_app.html` is missing or older than its inputs, so it fails at Step 0 until this lock is regenerated too.
+4. Before committing, remove the override and run `git checkout -- apps/mcp-chart-app-wasm/Cargo.lock` (and the root `Cargo.lock` if you updated it). A lock that points at a local path must never be committed.
 
 ## Design System
 

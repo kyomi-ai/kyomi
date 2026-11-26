@@ -11,8 +11,12 @@ license = "AGPL-3.0-or-later"
 [dependencies]
 # ChartML comes from crates.io. This crate is its own workspace with its own
 # committed Cargo.lock, so its versions resolve independently of the root
-# workspace. Local dev wires in local checkouts with a [patch.crates-io]
-# override in ~/.cargo/config.toml; there is deliberately no patch block here.
+# workspace. To test a local chartml checkout, put a [patch.crates-io] override
+# for every chartml crate below in ~/.cargo/config.toml (there is
+# deliberately no patch block here). build.sh's `cargo metadata --locked` check
+# then fails until you regenerate this lock under the override with
+# `cargo update -p <each patched crate>`; discard that lock change before
+# committing. See CLAUDE.md, "External Crate Dependencies".
 chartml-core = "5"
 chartml-chart-cartesian = "5"
 chartml-chart-pie = "5"

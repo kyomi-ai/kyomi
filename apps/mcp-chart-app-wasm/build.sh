@@ -34,9 +34,12 @@ OUTPUT_PATH="chart_app.html"
 # rewrites Cargo.lock, while `cargo metadata --locked` fails with Cargo's lock
 # error. Run the same check Cargo does, before Trunk can touch the lock.
 #
-# A local `[patch.crates-io]` override changes resolution, so the lock has to
-# be updated in the same change; the check reports that rather than rewriting
-# the lock behind an unreviewed dependency.
+# A real dependency version change updates and commits the lock in the same
+# change; the check reports a stale lock rather than rewriting it behind an
+# unreviewed dependency. A local `[patch.crates-io]` override also changes
+# resolution, so this check fails under one until the lock is regenerated; that
+# lock change is temporary and is discarded before committing (see CLAUDE.md,
+# "External Crate Dependencies").
 echo "==> Step 0: Verify Cargo.lock is current"
 cargo metadata --locked --format-version 1 > /dev/null
 
