@@ -16,11 +16,12 @@ use std::time::SystemTime;
 
 /// True when `chart_app.html` is missing, incomplete, or older than any input.
 ///
-/// An input whose own metadata cannot be read counts as stale: freshness
-/// cannot be proven, and `build.sh` reports the missing file itself. Timestamps
-/// are the only freshness signal available, because `build.sh` writes no
-/// manifest of its inputs. Equality counts as stale so that a same-tick write
-/// never hides a change.
+/// An input that cannot be read is skipped: the build script rejects a missing
+/// input before it asks, because treating it as stale would rebuild the chart
+/// app on every build instead of failing once. Timestamps are the only
+/// freshness signal available, because `build.sh` writes no manifest of its
+/// inputs. Equality counts as stale so that a same-tick write never hides a
+/// change.
 pub fn is_stale(chart_app_html: &Path, inputs: &[PathBuf]) -> bool {
     let artifact_modified =
         match fs::metadata(chart_app_html).and_then(|metadata| metadata.modified()) {
@@ -33,7 +34,7 @@ pub fn is_stale(chart_app_html: &Path, inputs: &[PathBuf]) -> bool {
 
     inputs
         .iter()
-        .any(|input| newest_modified(input).is_none_or(|modified| modified >= artifact_modified))
+        .any(|input| newest_modified(input).is_some_and(|modified| modified >= artifact_modified))
 }
 
 /// Newest modification time at or below `path`; `None` when it cannot be read.

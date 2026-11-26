@@ -52,9 +52,10 @@ fn main() {
     // directory for the same reason: tracking the directory would rerun this
     // script — and relink the server — after every build that rewrites the
     // generated `output.css`.
-    let source_inputs = [
+    let inputs = [
         chart_app_dir.join("src"),
         chart_app_dir.join("Cargo.toml"),
+        chart_app_dir.join("Cargo.lock"),
         chart_app_dir.join("build.sh"),
         chart_app_dir.join("inline_chart_app.py"),
         chart_app_dir.join("index.html"),
@@ -65,20 +66,28 @@ fn main() {
         // into it. A change to either makes the embedded app stale.
         repo_root.join("crates").join("kyomi-ui-components"),
         repo_root.join("crates").join("kyomi-chart-theme"),
+        // This script's own files: an artifact made by an older build recipe
+        // is rebuilt once after the recipe changes.
+        manifest_dir.join("build.rs"),
+        manifest_dir.join("build_support.rs"),
     ];
-
-    // `Cargo.lock` and this script's own files change the artifact too. They
-    // are not chart app inputs the build may rewrite, so they are appended
-    // after the source list.
-    let mut inputs = source_inputs.to_vec();
-    inputs.push(chart_app_dir.join("Cargo.lock"));
-    inputs.push(manifest_dir.join("build.rs"));
-    inputs.push(manifest_dir.join("build_support.rs"));
 
     for input in &inputs {
         println!("cargo:rerun-if-changed={}", input.display());
     }
     println!("cargo:rerun-if-changed={}", chart_app_html.display());
+
+    // Cargo reruns a script whose tracked path is missing on every invocation,
+    // so a renamed or removed input would rebuild the chart app on every build
+    // without ever failing. Fail once, naming the input, instead.
+    if let Some(missing) = inputs.iter().find(|input| !input.exists()) {
+        panic!(
+            "kyomi-server build.rs: the chart app input list is out of date: {} does not exist. \
+             Update the list in apps/server/build.rs to match what \
+             apps/mcp-chart-app-wasm/build.sh reads.",
+            missing.display()
+        );
+    }
 
     if !is_stale(&chart_app_html, &inputs) {
         eprintln!(

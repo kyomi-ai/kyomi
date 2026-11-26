@@ -119,12 +119,14 @@ fn nested_input_newer_than_the_artifact_is_stale() {
 }
 
 #[test]
-fn missing_input_makes_the_artifact_stale() {
+fn missing_input_does_not_make_the_artifact_stale() {
     let dir = scratch_dir("missing-input");
     let artifact = dir.join("chart_app.html");
     write_artifact_at(&artifact, future_base());
 
-    assert!(build_support::is_stale(&artifact, &[dir.join("absent")]));
+    // The build script rejects a missing input before asking; staleness must
+    // not turn it into a rebuild on every build.
+    assert!(!build_support::is_stale(&artifact, &[dir.join("absent")]));
 
     fs::remove_dir_all(&dir).expect("remove scratch dir");
 }
