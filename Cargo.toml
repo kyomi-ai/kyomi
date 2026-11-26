@@ -153,8 +153,8 @@ kyomi-datasource-drivers = { version = "1.6.2", package = "kyomi-datasource" }
 # ChartML rendering — resolved from crates.io, which is what CI and Docker builds
 # use. To try a local chartml checkout, put a `[patch.crates-io]` override in
 # `~/.cargo/config.toml` (absolute paths, applies to every worktree, never
-# committed) rather than in this file; see CLAUDE.md, "External Crate
-# Dependencies" for the steps.
+# committed) rather than in this file. `--locked` commands fail until the lock is
+# regenerated under the override; see CLAUDE.md, "External Crate Dependencies".
 # 5.2 minimum: Theme::table_surface / --chartml-table-surface (CHA-20).
 chartml-core = { version = "5.2", features = ["wasm-indexeddb"] }
 # 5.1 minimum: render_to_png_with_background (email dark-mode charts).
