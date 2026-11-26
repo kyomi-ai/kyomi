@@ -150,12 +150,11 @@ kyomi-types = { path = "crates/kyomi-types" }
 kyomi-connect-protocol = "1.4.1"
 kyomi-datasource-drivers = { version = "1.6.2", package = "kyomi-datasource" }
 
-# ChartML rendering — `"5"` pulls from crates.io for CI/CD + Docker builds
-# (after the chartml 5.0 release reaches the registry). Local dev redirects
-# these to `/home/jason/repos/chartml` via the `[patch.crates-io]` block at
-# the bottom of this file (between BEGIN_LOCAL_DEV_PATCHES /
-# END_LOCAL_DEV_PATCHES). The Dockerfile strips that block before
-# `cargo build`, so production always resolves against the registry.
+# ChartML rendering — resolved from crates.io, which is what CI and Docker builds
+# use. To try a local chartml checkout, put a `[patch.crates-io]` override in
+# `~/.cargo/config.toml` (absolute paths, applies to every worktree, never
+# committed) rather than in this file; see CLAUDE.md, "External Crate
+# Dependencies" for the steps.
 # 5.2 minimum: Theme::table_surface / --chartml-table-surface (CHA-20).
 chartml-core = { version = "5.2", features = ["wasm-indexeddb"] }
 # 5.1 minimum: render_to_png_with_background (email dark-mode charts).
@@ -271,11 +270,3 @@ inherits = "release"
 lto = false
 codegen-units = 16
 opt-level = "s"
-
-# Uncomment to use local checkouts for development:
-# [patch.crates-io]
-# chartml-leptos = { path = "../chartml/crates/chartml-leptos" }
-# chartml-core = { path = "../chartml/crates/chartml-core" }
-# chartml-chart-table = { path = "../chartml/crates/chartml-chart-table" }
-# kyomi-connect-protocol = { path = "../kyomi-connect/crates/kyomi-connect-protocol" }
-# kyomi-datasource = { path = "../kyomi-connect/crates/kyomi-datasource" }

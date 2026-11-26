@@ -198,8 +198,8 @@ Kyomi depends on crates from sibling repos (`chartml`, `kyomi-connect`) via **cr
 1. The fix is merged to the external repo's main branch
 2. A version tag (`vMAJOR.MINOR.PATCH`) is pushed on that repo to trigger its publish CI
 3. The new version lands on crates.io
-4. Kyomi's `Cargo.lock` is updated: `cargo update <crate-name>`
-5. The lock file change is committed and a new kyomi release is cut
+4. Kyomi's lock files are updated: `cargo update <crate-name>` in the repo root **and** in `apps/mcp-chart-app-wasm` (its own workspace with its own `Cargo.lock`; `build.sh` fails if that lock is stale)
+5. The lock file changes are committed and a new kyomi release is cut
 
 Key crates and where they live:
 
@@ -212,8 +212,11 @@ Key crates and where they live:
 
 Version requirements for the main workspace are declared in the root `Cargo.toml` and resolved in the root `Cargo.lock`; the MCP chart app is its own workspace with its own manifest and lock. Read the versions there rather than repeating them here, where they go stale.
 
-**Local dev** can use `[patch.crates-io]` overrides (see commented examples at the bottom of `Cargo.toml`) to point at local checkouts for faster iteration. These patches are dev-only and are not used in production builds.
+**Local dev:** to test a local chartml or kyomi-connect change, put a `[patch.crates-io]` override in `~/.cargo/config.toml` with **absolute** paths. Never put it in a `Cargo.toml`: relative paths only resolve in a sibling layout, and the file is committed. The override applies to every worktree and is not used in CI or production builds. Patch every crate of that family the build uses, all from one checkout whose crates build together (a release tag is a safe choice).
 
-## Design System
+An override changes how the lock resolves, so any `--locked` command, including `apps/mcp-chart-app-wasm/build.sh` Step 0 (`cargo metadata --locked`), fails until the lock is regenerated under it. For the chart app:
 
-Always read `DESIGN.md` before making any visual or UI decisions. All font choices, colors, spacing, icons, and aesthetic direction are defined there. Do not deviate without explicit user approval.
+1. Patch all seven chartml crates it uses: `chartml-core`, `chartml-chart-cartesian`, `chartml-chart-pie`, `chartml-chart-scatter`, `chartml-chart-metric`, `chartml-chart-table`, `chartml-leptos`.
+2. In `apps/mcp-chart-app-wasm`, regenerate the lock with `cargo update` naming each patched crate (`-p chartml-core -p chartml-chart-cartesian ...`). A crate you leave out stays on the registry version, and cargo only warns "patch ... was not used".
+3. Run `build.sh`.
+4. Before committing, remove the override and run `git checkout -- apps/mcp-chart-app-wasm/Cargo.lock` (and the root `Cargo.lock` if you updated it). A lock that points at a local path must never be committed.
