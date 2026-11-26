@@ -50,7 +50,7 @@ fn main() {
     // `style/output.css` and `target/`) that must not become rerun triggers.
     // `style/` is represented by its Tailwind entry point rather than the
     // directory for the same reason: tracking the directory would rerun this
-    // script — and relink the server — after every build that rewrites the
+    // script — and recompile the server — after every build that rewrites the
     // generated `output.css`.
     let inputs = [
         chart_app_dir.join("src"),
