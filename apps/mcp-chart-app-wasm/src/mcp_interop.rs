@@ -215,14 +215,15 @@ fn setup_size_notifications(transport: Rc<McpTransport>) {
             *throttled.borrow_mut() = true;
 
             let throttled = throttled.clone();
-            let cb = Closure::once(move || {
+            // `once_into_js` lets JavaScript free the closure after the frame
+            // callback runs; a `forget()`ed one leaked on every resize frame.
+            let cb = Closure::once_into_js(move || {
                 *throttled.borrow_mut() = false;
                 with_transport(|t| t.send_size_changed());
             });
             if let Some(w) = web_sys::window() {
-                let _ = w.request_animation_frame(cb.as_ref().unchecked_ref());
+                let _ = w.request_animation_frame(cb.unchecked_ref());
             }
-            cb.forget();
         })
     };
 

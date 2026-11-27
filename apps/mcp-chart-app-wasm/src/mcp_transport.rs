@@ -432,18 +432,19 @@ impl McpTransport {
         // removes the entry; a response that arrives first removes the entry
         // itself, which turns the timer into a no-op.
         let pending = self.pending.clone();
-        let on_timeout = Closure::once(move || {
+        // `once_into_js` hands the closure to JavaScript, which frees it after the
+        // timer fires; a `forget()`ed closure would stay allocated for good.
+        let on_timeout = Closure::once_into_js(move || {
             expire_pending_request(&pending, id, method, REQUEST_TIMEOUT_MS);
         });
         let scheduled = window.set_timeout_with_callback_and_timeout_and_arguments_0(
-            on_timeout.as_ref().unchecked_ref(),
+            on_timeout.unchecked_ref(),
             REQUEST_TIMEOUT_MS,
         );
         if let Err(error) = scheduled {
             self.pending.borrow_mut().remove(&id);
             return Err(format!("Could not schedule the {method} request timeout: {error:?}"));
         }
-        on_timeout.forget();
 
         self.send_message(&msg);
 

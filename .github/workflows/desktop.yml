@@ -205,6 +205,14 @@ jobs:
           tar -xzf binaryen.tar.gz -C $env:TEMP
           Move-Item "$env:TEMP\binaryen-$env:BINARYEN_VERSION\bin\wasm-opt.exe" "$env:CARGO_HOME\bin\wasm-opt.exe"
 
+      # Trunk resolves the workspace with `cargo metadata` before it builds, and
+      # that rewrites a stale Cargo.lock, so installers could be built from a lock
+      # nobody reviewed. Fail on a stale root lock before either WASM app is
+      # built from it (same check as release.yml).
+      - name: Verify Cargo.lock is current
+        shell: bash
+        run: cargo metadata --locked --format-version 1 > /dev/null
+
       - name: Build Leptos WASM frontend (trunk, wasm-opt disabled)
         working-directory: crates/kyomi-ui
         run: trunk build --release

@@ -16,6 +16,14 @@
 //! the host's styles when the host provides them (see `main.css`), so they are
 //! compared by the fallback they keep: the colour the main app uses.
 //!
+//! Deliberately not compared: the chart app's dark `--chartml-*` overrides
+//! (the `:root.dark, :root[data-theme="dark"]` block). They give the chart app a
+//! neutral charcoal dark palette (`#262626` surface, `#e5e7eb` text) where the
+//! main app's `.dark` block uses Kyomi's warm near-black, because the chart app
+//! sits inside another product's dark surface rather than on Kyomi's page. The
+//! one value in that block that must follow the surface, `--chartml-separator`,
+//! has its own test below.
+//!
 //! `css_theme_parity.rs` guards the other direction of drift, between
 //! `kyomi_theme()` and the main app's `--chartml-*` block.
 
