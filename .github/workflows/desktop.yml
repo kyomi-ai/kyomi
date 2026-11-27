@@ -1,7 +1,13 @@
 # =============================================================================
 # Kyomi — Desktop Build
 # =============================================================================
-# Builds Tauri desktop installers for linux, macos and windows.
+# Builds Tauri desktop installers for linux and windows.
+#
+# MACOS IS NOT BUILT HERE (KYO-991). The macOS leg ran past its 300-minute
+# timeout in the "Bundle with cargo-tauri" step (run 45502116842: cancelled at
+# 5h00m; run 36956920730: 3h26m), and moving it to an Intel runner did not fix
+# it (run 45946651557: bundle 3h13m, job 3h53m). The macOS installer is built
+# outside GitHub Actions and attached to the release by hand.
 #
 # STATUS: active. The desktop app still ships; installers are built on demand
 # when a desktop release is cut, not on every version tag.
@@ -65,31 +71,6 @@ jobs:
             bundles: deb appimage
             sed_inplace: "sed -i"
             timeout: 120
-          # Observed execution max: 224.1m (last ~15 runs) — macOS desktop
-          # builds legitimately take 2-4 hours; do not lower this to match
-          # the other legs (KYO-259). That figure is execution time only;
-          # the 300m timeout below also has to absorb runner-acquisition
-          # queue delay, since timeout-minutes counts queued time too
-          # (KYO-322).
-          #
-          # 300 is deliberately the ceiling rather than something roomier:
-          # GitHub's own default job timeout is 360, so anything at or above
-          # that is indistinguishable from setting no timeout at all. This
-          # leg has the thinnest margin of the three (~34% over observed max,
-          # on only 5 samples spanning 125-224m) — that is the cost of the
-          # 360 cap, not an oversight. If a healthy build ever gets killed
-          # here, the fix is to make the build faster, not to raise this to
-          # 360 and silently give up the bound.
-          - os: macos
-            runner: macos-latest
-            trunk_arch: aarch64
-            trunk_os_suffix: apple-darwin
-            wasm_bindgen_arch: aarch64-apple-darwin
-            tailwind_binary: tailwindcss-macos-arm64
-            binaryen_arch: arm64-macos
-            bundles: dmg
-            sed_inplace: "sed -i ''"
-            timeout: 300
           # Observed execution max: 99.7m (last ~15 runs). 180m leaves
           # ~80m of headroom, which also covers runner-acquisition queue
           # delay — timeout-minutes counts queued time, not just
@@ -129,7 +110,7 @@ jobs:
         shell: pwsh
         run: echo "SCCACHE_AVAILABLE=false" >> $env:GITHUB_ENV
 
-      # --- Linux/macOS build tools ---
+      # --- Linux build tools ---
       - name: Install build dependencies (Linux)
         if: matrix.os == 'linux'
         run: |
@@ -138,18 +119,7 @@ jobs:
             build-essential pkg-config libssl-dev clang \
             libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
 
-      - name: Install build dependencies (macOS)
-        if: matrix.os == 'macos'
-        run: |
-          brew install brotli llvm
-          echo "$(brew --prefix llvm)/bin" >> $GITHUB_PATH
-
-      - name: Set wasm32 C compiler (macOS)
-        if: matrix.os == 'macos'
-        run: |
-          echo "CC_wasm32_unknown_unknown=$(brew --prefix llvm)/bin/clang" >> $GITHUB_ENV
-
-      - name: Strip local-dev linker and trunk profile (Linux/macOS)
+      - name: Strip local-dev linker and trunk profile (Linux)
         if: matrix.os != 'windows'
         run: |
           ${{ matrix.sed_inplace }} '/# BEGIN_LOCAL_DEV_LINKER/,/# END_LOCAL_DEV_LINKER/d' .cargo/config.toml
@@ -168,7 +138,7 @@ jobs:
         with:
           target: ${{ matrix.trunk_arch }}-${{ matrix.trunk_os_suffix }}
 
-      - name: Install wasm-bindgen-cli + tailwindcss + wasm-opt (Linux/macOS)
+      - name: Install wasm-bindgen-cli + tailwindcss + wasm-opt (Linux)
         if: matrix.os != 'windows'
         run: |
           set -euo pipefail
@@ -189,10 +159,6 @@ jobs:
           curl -fsSL "https://github.com/WebAssembly/binaryen/releases/download/${BINARYEN_VERSION}/binaryen-${BINARYEN_VERSION}-${{ matrix.binaryen_arch }}.tar.gz" \
             | tar -xz -C /tmp
           sudo mv "/tmp/binaryen-${BINARYEN_VERSION}/bin/wasm-opt" /usr/local/bin/wasm-opt
-          if [ -f "/tmp/binaryen-${BINARYEN_VERSION}/lib/libbinaryen.dylib" ]; then
-            sudo mkdir -p /usr/local/lib
-            sudo cp "/tmp/binaryen-${BINARYEN_VERSION}/lib/libbinaryen.dylib" /usr/local/lib/
-          fi
 
       - name: Install wasm-bindgen-cli + tailwindcss + wasm-opt (Windows)
         if: matrix.os == 'windows'
@@ -217,7 +183,7 @@ jobs:
         working-directory: crates/kyomi-ui
         run: trunk build --release
 
-      - name: Optimize WASM with wasm-opt (Linux/macOS)
+      - name: Optimize WASM with wasm-opt (Linux)
         if: matrix.os != 'windows'
         run: |
           for f in crates/kyomi-ui/dist/*_bg.wasm; do
@@ -267,6 +233,5 @@ jobs:
           files: |
             target/release/bundle/**/*.deb
             target/release/bundle/**/*.AppImage
-            target/release/bundle/**/*.dmg
             target/release/bundle/**/*.msi
             target/release/bundle/**/*.exe
