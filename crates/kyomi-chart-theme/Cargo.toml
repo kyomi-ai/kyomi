@@ -5,10 +5,17 @@ name = "kyomi-chart-theme"
 version = "0.1.0"
 edition = "2024"
 license.workspace = true
-description = "Kyomi chart palettes and editorial chart theme — shared across browser (kyomi-ui) and server (kyomi-agent) render paths."
+description = "Kyomi chart palettes, editorial chart theme and renderer registry — shared across the browser (kyomi-ui), the MCP chart app and server (kyomi-agent) render paths."
 
 [dependencies]
 chartml-core = { workspace = true }
+# The renderers `register_kyomi_renderers` installs, so every app that draws
+# Kyomi charts registers the same set from this one definition.
+chartml-chart-cartesian = { workspace = true }
+chartml-chart-pie = { workspace = true }
+chartml-chart-scatter = { workspace = true }
+chartml-chart-metric = { workspace = true }
+chartml-chart-table = { workspace = true }
 
 [lints]
 workspace = true

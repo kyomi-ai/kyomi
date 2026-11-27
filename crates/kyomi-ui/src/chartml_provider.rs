@@ -47,11 +47,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use chartml_chart_cartesian::CartesianRenderer;
-use chartml_chart_metric::MetricRenderer;
-use chartml_chart_pie::PieRenderer;
-use chartml_chart_scatter::ScatterRenderer;
-use chartml_chart_table::TableRenderer;
 use chartml_core::data::DataTable;
 use chartml_core::{DataSourceProvider, FetchError, FetchRequest, FetchResult};
 use chartml_datafusion::DataFusionTransform;
@@ -298,15 +293,7 @@ pub(crate) fn configured_chartml(
     let colors = kyomi_chart_theme::kyomi_palette(palette_name, is_dark);
     let theme = kyomi_chart_theme::kyomi_theme(is_dark);
     let chartml = use_chartml_configured(|c| {
-        c.register_renderer("bar", CartesianRenderer::new());
-        c.register_renderer("line", CartesianRenderer::new());
-        c.register_renderer("area", CartesianRenderer::new());
-        c.register_renderer("pie", PieRenderer::new());
-        c.register_renderer("donut", PieRenderer::new());
-        c.register_renderer("doughnut", PieRenderer::new());
-        c.register_renderer("scatter", ScatterRenderer::new());
-        c.register_renderer("metric", MetricRenderer::new());
-        c.register_renderer("table", TableRenderer::new());
+        kyomi_chart_theme::register_kyomi_renderers(c);
         c.register_transform(DataFusionTransform);
         c.set_default_palette(colors);
         c.set_theme(theme);

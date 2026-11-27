@@ -11,18 +11,16 @@ license = "AGPL-3.0-or-later"
 [dependencies]
 # ChartML comes from crates.io. This crate is its own workspace with its own
 # committed Cargo.lock, so its versions resolve independently of the root
-# workspace. To test a local chartml checkout, put a [patch.crates-io] override
-# for every chartml crate below in ~/.cargo/config.toml (there is
-# deliberately no patch block here). build.sh's `cargo metadata --locked` check
+# workspace. The chart renderers (chartml-chart-*) are not listed here: they
+# come in through kyomi-chart-theme, whose `register_kyomi_renderers` is the one
+# definition of which renderers Kyomi registers. To test a local chartml
+# checkout, put a [patch.crates-io] override for every chartml crate in this
+# app's Cargo.lock in ~/.cargo/config.toml (there is deliberately no patch block
+# here). build.sh's `cargo metadata --locked` check
 # then fails until you regenerate this lock under the override with
 # `cargo update -p <each patched crate>`; discard that lock change before
 # committing. See CLAUDE.md, "External Crate Dependencies".
 chartml-core = "5"
-chartml-chart-cartesian = "5"
-chartml-chart-pie = "5"
-chartml-chart-scatter = "5"
-chartml-chart-metric = "5"
-chartml-chart-table = "5.1.1"
 chartml-leptos = "5.0.3"
 
 kyomi-ui-components = { path = "../../crates/kyomi-ui-components" }

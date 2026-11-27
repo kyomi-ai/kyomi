@@ -67,10 +67,16 @@
   --radius-md: 0.5rem;
 }
 
+/* The header bar (`bg-secondary`) and the chart card follow the host's
+   * secondary surface (`--color-background-secondary` in `hostContext.styles`,
+   * copied onto `:root` by `apply_host_styles`) when the host provides one, so
+   * they sit on the host's own colours; without it they keep Kyomi's dark
+   * surface. tests/chart_app_css_parity.rs requires the fallback to equal the
+   * main app's value. */
 .dark {
   --color-primary: #d97706;
   --color-primary-foreground: #ffffff;
-  --color-secondary: #24201E;
+  --color-secondary: var(--color-background-secondary, #24201E);
   --color-secondary-foreground: #A8A29E;
   --color-accent: #451A03;
   --color-accent-foreground: #F5F3EF;
@@ -80,7 +86,7 @@
   --color-muted-foreground: #A8A29E;
   --color-background: #12100F;
   --color-foreground: #F5F3EF;
-  --color-card: #24201E;
+  --color-card: var(--color-background-secondary, #24201E);
   --color-card-foreground: #F5F3EF;
   --color-popover: #2A2623;
   --color-popover-foreground: #F5F3EF;
@@ -144,7 +150,9 @@ body {
   --chartml-border-input: #4a4a4a;
   --chartml-grid: #383838;
   --chartml-annotation: #9ca3af;
-  --chartml-separator: #262626;
+  /* Separators (dot outlines, slice gaps) must match the surface the chart sits
+     on, which is the host's background when it provides one. */
+  --chartml-separator: var(--chartml-table-surface);
   --chartml-axis-line: #9ca3af;
   --chartml-spinner-track: rgba(255, 255, 255, 0.1);
   --chartml-spinner-head: #e5e7eb;

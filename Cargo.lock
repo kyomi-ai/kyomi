@@ -6519,6 +6519,11 @@ dependencies = [
 name = "kyomi-chart-theme"
 version = "0.1.0"
 dependencies = [
+ "chartml-chart-cartesian",
+ "chartml-chart-metric",
+ "chartml-chart-pie",
+ "chartml-chart-scatter",
+ "chartml-chart-table",
  "chartml-core",
 ]
 

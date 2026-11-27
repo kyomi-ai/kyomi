@@ -21,21 +21,55 @@ if len(sys.argv) != 3:
 dist = Path(sys.argv[1])
 output_path = Path(sys.argv[2])
 
-# Read and base64-encode the WASM binary
-wasm_file = next(dist.glob("*.wasm"))
+GLUE_JS_NAME = "mcp-chart-app-wasm.js"
+
+
+def find_inputs(dist: Path):
+    """Return `(wasm_file, js_file, css_files)` from a Trunk build directory.
+
+    Each input has to be exactly what the page is built from. A directory with
+    a part missing would otherwise end in a bare `StopIteration` or an empty
+    `<style>`, and one with two `.wasm` files would inline whichever the
+    filesystem listed first, so every one of those fails here with the name of
+    the problem instead.
+    """
+    if not dist.is_dir():
+        sys.exit(f"error: {dist} is not a directory: run the Trunk build first (build.sh does).")
+
+    wasm_files = sorted(dist.glob("*.wasm"))
+    if not wasm_files:
+        sys.exit(f"error: no .wasm file in {dist}: the Trunk build did not produce the app's WASM binary.")
+    if len(wasm_files) > 1:
+        names = ", ".join(file.name for file in wasm_files)
+        sys.exit(
+            f"error: {len(wasm_files)} .wasm files in {dist} ({names}); expected exactly one. "
+            "A stale file from an earlier build would be inlined or skipped arbitrarily: "
+            "clear the directory and build again (build.sh does)."
+        )
+
+    js_file = dist / GLUE_JS_NAME
+    if not js_file.is_file():
+        sys.exit(f"error: no {GLUE_JS_NAME} in {dist}: the Trunk build did not produce the wasm-bindgen glue.")
+
+    css_files = sorted(dist.glob("*.css"))
+    if not css_files:
+        sys.exit(f"error: no .css file in {dist}: the Trunk build did not produce the app's stylesheet.")
+
+    return wasm_files[0], js_file, css_files
+
+
+wasm_file, js_file, css_files = find_inputs(dist)
+
+# Base64-encode the WASM binary
 wasm_b64 = base64.b64encode(wasm_file.read_bytes()).decode()
 
 # Read the JS glue file. Name the encoding instead of trusting the platform
 # default, which is the ANSI code page on Windows and would fail or corrupt a
 # non-ASCII character there.
-js_file = next(dist.glob("mcp-chart-app-wasm.js"))
 js_content = js_file.read_text(encoding="utf-8")
 
 # Read the CSS file(s), for the same reason.
-css_parts = []
-for css_file in dist.glob("*.css"):
-    css_parts.append(css_file.read_text(encoding="utf-8"))
-css_content = "\n".join(css_parts)
+css_content = "\n".join(css_file.read_text(encoding="utf-8") for css_file in css_files)
 
 
 # Patch the JS glue to load WASM from inline base64 instead of fetch().

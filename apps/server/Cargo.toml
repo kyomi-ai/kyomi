@@ -68,6 +68,11 @@ rust-embed = { workspace = true }
 any_spawner = { version = "0.3", features = ["tokio"] }
 tokio-tungstenite = { version = "0.28", default-features = false }
 
+# build.rs reads `cargo metadata` output for the MCP chart app's local packages
+# (see build_support.rs).
+[build-dependencies]
+serde_json = { workspace = true }
+
 [dev-dependencies]
 kyomi-mcp-client = { workspace = true }
 kyomi-core = { workspace = true, features = ["test-helpers"] }

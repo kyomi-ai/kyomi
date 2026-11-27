@@ -1,0 +1,44 @@
+name: Install pinned Trunk
+description: >-
+  Install the one Trunk release every workflow builds the WASM apps with. This
+  action is the only place the version is written; workflows must not install
+  Trunk any other way (scripts/lint/check-trunk-pin.sh enforces it).
+inputs:
+  target:
+    description: >-
+      Target triple of the Trunk release asset for the Linux and macOS runners,
+      for example x86_64-unknown-linux-gnu or aarch64-apple-darwin. Windows
+      builds Trunk from source and ignores it.
+    required: false
+    default: x86_64-unknown-linux-gnu
+runs:
+  using: composite
+  steps:
+    - id: pin
+      shell: bash
+      run: echo "version=0.21.14" >> "$GITHUB_OUTPUT"
+
+    - name: Install Trunk (Linux and macOS)
+      if: runner.os != 'Windows'
+      shell: bash
+      env:
+        TRUNK_VERSION: ${{ steps.pin.outputs.version }}
+        TRUNK_TARGET: ${{ inputs.target }}
+      run: |
+        set -euo pipefail
+        SUDO=""
+        if [ "$RUNNER_OS" = "Linux" ]; then
+          SUDO=sudo
+        fi
+        $SUDO curl -fsSL "https://github.com/trunk-rs/trunk/releases/download/v${TRUNK_VERSION}/trunk-${TRUNK_TARGET}.tar.gz" \
+          | $SUDO tar -xz -C /usr/local/bin trunk
+        trunk --version
+
+    - name: Install Trunk (Windows)
+      if: runner.os == 'Windows'
+      shell: pwsh
+      env:
+        TRUNK_VERSION: ${{ steps.pin.outputs.version }}
+      run: |
+        cargo install trunk --version "=$env:TRUNK_VERSION" --locked
+        trunk --version

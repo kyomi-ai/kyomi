@@ -77,6 +77,54 @@ def run_inliner(dist: Path, output: Path) -> subprocess.CompletedProcess:
 
 
 class InlinerFaultTests(unittest.TestCase):
+    def assert_fails_naming(self, dist: Path, output: Path, *expected: str):
+        result = run_inliner(dist, output)
+
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertNotIn("Traceback", result.stderr, "the failure must be a message, not a crash")
+        for text in expected:
+            self.assertIn(text, result.stderr)
+        self.assertFalse(output.exists(), "a failed inline must not leave a chart_app.html behind")
+
+    def test_missing_dist_directory_fails_clearly(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.assert_fails_naming(root / "dist", root / "chart_app.html", "is not a directory")
+
+    def test_no_wasm_file_fails_clearly(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            dist = make_dist(root, JS_WITH_FETCH)
+            (dist / "mcp-chart-app-wasm_bg.wasm").unlink()
+            self.assert_fails_naming(dist, root / "chart_app.html", "no .wasm file")
+
+    def test_more_than_one_wasm_file_fails_clearly(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            dist = make_dist(root, JS_WITH_FETCH)
+            (dist / "stale_bg.wasm").write_bytes(b"\x00asm\x01\x00\x00\x00stale")
+            self.assert_fails_naming(
+                dist,
+                root / "chart_app.html",
+                "2 .wasm files",
+                "mcp-chart-app-wasm_bg.wasm",
+                "stale_bg.wasm",
+            )
+
+    def test_no_glue_js_fails_clearly(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            dist = make_dist(root, JS_WITH_FETCH)
+            (dist / "mcp-chart-app-wasm.js").unlink()
+            self.assert_fails_naming(dist, root / "chart_app.html", "no mcp-chart-app-wasm.js")
+
+    def test_no_css_file_fails_clearly(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            dist = make_dist(root, JS_WITH_FETCH)
+            (dist / "mcp-chart-app-wasm.css").unlink()
+            self.assert_fails_naming(dist, root / "chart_app.html", "no .css file")
+
     def test_missing_fetch_line_fails_with_clear_error(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

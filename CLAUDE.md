@@ -216,7 +216,7 @@ Version requirements for the main workspace are declared in the root `Cargo.toml
 
 An override changes how the lock resolves, so any `--locked` command fails until the lock is regenerated under it: in the root workspace (run `cargo update -p <crate>` for every patched crate the root uses) and in the chart app, where `apps/mcp-chart-app-wasm/build.sh` Step 0 (`cargo metadata --locked`, KYO-998) enforces it. For the chart app:
 
-1. Patch every chartml crate listed in `apps/mcp-chart-app-wasm/Cargo.toml` (today: `chartml-core`, `chartml-chart-cartesian`, `chartml-chart-pie`, `chartml-chart-scatter`, `chartml-chart-metric`, `chartml-chart-table`, `chartml-leptos`).
+1. Patch every chartml crate in `apps/mcp-chart-app-wasm/Cargo.lock`. Its manifest names only `chartml-core` and `chartml-leptos`; the renderers come in through `kyomi-chart-theme` (today: `chartml-core`, `chartml-chart-cartesian`, `chartml-chart-pie`, `chartml-chart-scatter`, `chartml-chart-metric`, `chartml-chart-table`, `chartml-leptos`).
 2. In `apps/mcp-chart-app-wasm`, regenerate the lock with `cargo update` naming each patched crate (`-p chartml-core -p chartml-chart-cartesian ...`). A crate you leave out stays on the registry version, and cargo only warns "patch ... was not used".
 3. Run `build.sh`. A server `cargo build` also runs it (from `apps/server/build.rs`) whenever `chart_app.html` is missing or older than its inputs, so it fails at Step 0 until this lock is regenerated too.
 4. Before committing, remove the override and run `git checkout -- apps/mcp-chart-app-wasm/Cargo.lock` (and the root `Cargo.lock` if you updated it). A lock that points at a local path must never be committed.

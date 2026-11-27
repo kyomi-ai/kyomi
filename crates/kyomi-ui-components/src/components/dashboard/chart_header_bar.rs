@@ -15,7 +15,7 @@ use phosphor_leptos::Icon;
 // ---------------------------------------------------------------------------
 
 /// Chart types available in the type selector dropdown.
-const CHART_TYPES: &[(&str, &str)] = &[
+pub const CHART_TYPES: &[(&str, &str)] = &[
     ("bar", "Bar"),
     ("line", "Line"),
     ("area", "Area"),

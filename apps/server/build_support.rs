@@ -68,3 +68,148 @@ fn is_complete_artifact(path: &Path) -> bool {
     };
     html.starts_with("<!DOCTYPE html>") && html.trim_end().ends_with("</html>")
 }
+
+/// Every input `build.sh` reads for the chart app, as paths for `build.rs` to
+/// track and for [`is_stale`] to compare against the artifact.
+///
+/// `cargo_home` is where Cargo keeps the user's own configuration
+/// (`$CARGO_HOME`, else `~/.cargo`). `local_manifests` are the `Cargo.toml` of
+/// every package the chart app builds from a local path (see
+/// [`local_package_manifests`]).
+///
+/// Why each one is here, and what was left out on purpose:
+///
+/// - The chart app's own sources, manifest, lock, scripts and Tailwind entry
+///   point, and the two in-repo crates it compiles in.
+/// - The root `Cargo.toml`: the in-repo crates inherit their dependency
+///   versions and features from `[workspace.dependencies]`, so a change there
+///   changes what the chart app compiles without touching any file above.
+/// - Every Cargo configuration file that applies to the build (see
+///   [`cargo_config_files`]): the repo's `.cargo/config.toml` carries the wasm32
+///   `rustflags` (`--cfg=has_std`, `--cfg=leptos_debuginfo`) that shape the
+///   app, and a `[patch.crates-io]` override, which only the user's own
+///   configuration may hold, changes which chartml sources are compiled.
+/// - The sources of every local-path package, which is how a patched chartml
+///   checkout is rebuilt when its code changes.
+/// - `rust-toolchain.toml`: the compiler is an input to the WASM it emits.
+///
+/// The root `Cargo.lock` is not an input: the chart app resolves from its own
+/// `Cargo.lock` (`build.sh` fails when that is stale), which is tracked.
+pub fn chart_app_inputs(
+    repo_root: &Path,
+    manifest_dir: &Path,
+    cargo_home: Option<&Path>,
+    local_manifests: &[PathBuf],
+) -> Vec<PathBuf> {
+    let chart_app_dir = repo_root.join("apps").join("mcp-chart-app-wasm");
+    let mut inputs = vec![
+        chart_app_dir.join("src"),
+        chart_app_dir.join("Cargo.toml"),
+        chart_app_dir.join("Cargo.lock"),
+        chart_app_dir.join("build.sh"),
+        chart_app_dir.join("inline_chart_app.py"),
+        chart_app_dir.join("index.html"),
+        chart_app_dir.join("Trunk.toml"),
+        chart_app_dir.join("style").join("main.css"),
+        // `kyomi-ui-components` is compiled into the chart app and scanned by
+        // its Tailwind `@source` directives; `kyomi-chart-theme` is compiled
+        // into it. A change to either makes the embedded app stale.
+        repo_root.join("crates").join("kyomi-ui-components"),
+        repo_root.join("crates").join("kyomi-chart-theme"),
+        repo_root.join("Cargo.toml"),
+        repo_root.join(".cargo").join("config.toml"),
+        repo_root.join("rust-toolchain.toml"),
+        // This script's own files: an artifact made by an older build recipe
+        // is rebuilt once after the recipe changes.
+        manifest_dir.join("build.rs"),
+        manifest_dir.join("build_support.rs"),
+    ];
+    inputs.extend(cargo_config_files(&chart_app_dir, cargo_home));
+    for manifest in local_manifests {
+        inputs.extend(local_package_inputs(manifest));
+    }
+    inputs.sort();
+    inputs.dedup();
+    inputs
+}
+
+/// The Cargo configuration files that exist and apply to a build run from
+/// `chart_app_dir`: `.cargo/config.toml` (or the older `.cargo/config`) in that
+/// directory and each of its ancestors, then the same files in `cargo_home`.
+///
+/// Only files that exist are returned, because Cargo reruns a build script on
+/// every invocation when a path it was told to track is missing. A file created
+/// later is picked up by the next run that something else triggers; the
+/// override it holds cannot change the output unnoticed in the meantime,
+/// because a changed resolution fails `build.sh`'s `cargo metadata --locked`
+/// until the lock is regenerated, and the lock is tracked.
+pub fn cargo_config_files(chart_app_dir: &Path, cargo_home: Option<&Path>) -> Vec<PathBuf> {
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    for dir in chart_app_dir.ancestors() {
+        let cargo_dir = dir.join(".cargo");
+        candidates.push(cargo_dir.join("config.toml"));
+        candidates.push(cargo_dir.join("config"));
+    }
+    if let Some(home) = cargo_home {
+        candidates.push(home.join("config.toml"));
+        candidates.push(home.join("config"));
+    }
+    candidates.retain(|candidate| candidate.is_file());
+    candidates.sort();
+    candidates.dedup();
+    candidates
+}
+
+/// The `Cargo.toml` of every package built from a local path, read from the
+/// output of `cargo metadata --format-version 1` for the chart app.
+///
+/// Those are the packages whose sources live outside Cargo's registry cache:
+/// the in-repo crates, and any crate a local `[patch.crates-io]` override points
+/// at a checkout. `exclude` (the chart app's own manifest) is left out, because
+/// the chart app's own inputs are tracked individually.
+///
+/// A metadata document that is not the expected shape is an error rather than
+/// an empty list: an empty list would silently stop tracking a patched checkout.
+pub fn local_package_manifests(metadata_json: &str, exclude: &Path) -> Result<Vec<PathBuf>, String> {
+    let metadata: serde_json::Value = serde_json::from_str(metadata_json)
+        .map_err(|error| format!("cargo metadata output is not JSON: {error}"))?;
+    let packages = metadata
+        .get("packages")
+        .and_then(serde_json::Value::as_array)
+        .ok_or("cargo metadata output has no `packages` array")?;
+
+    let mut manifests = Vec::new();
+    for package in packages {
+        // `source` is null for a package built from a local path.
+        if !package.get("source").is_some_and(serde_json::Value::is_null) {
+            continue;
+        }
+        let manifest = package
+            .get("manifest_path")
+            .and_then(serde_json::Value::as_str)
+            .ok_or("a local package in cargo metadata output has no `manifest_path`")?;
+        let manifest = PathBuf::from(manifest);
+        if manifest != exclude {
+            manifests.push(manifest);
+        }
+    }
+    Ok(manifests)
+}
+
+/// What to track for one local package: its manifest, its `build.rs` and its
+/// `src` directory, when they exist. The rest of its directory is left out so a
+/// checkout outside this repository, which holds its own `target/` and `.git/`,
+/// does not make every build of the server look stale.
+fn local_package_inputs(manifest: &Path) -> Vec<PathBuf> {
+    let Some(dir) = manifest.parent() else {
+        return vec![manifest.to_path_buf()];
+    };
+    let mut inputs = vec![manifest.to_path_buf()];
+    for optional in ["build.rs", "src"] {
+        let path = dir.join(optional);
+        if path.exists() {
+            inputs.push(path);
+        }
+    }
+    inputs
+}

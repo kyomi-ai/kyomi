@@ -41,7 +41,6 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  TRUNK_VERSION: 0.21.14
   WASM_BINDGEN_VERSION: 0.2.121
   TAILWIND_VERSION: v4.2.2
   BINARYEN_VERSION: version_128
@@ -164,7 +163,12 @@ jobs:
           (Get-Content -Raw .cargo/config.toml) -replace '(?s)# BEGIN_LOCAL_DEV_LINKER.*?# END_LOCAL_DEV_LINKER\r?\n?', '' -replace '(?s)# BEGIN_LOCAL_DEV_DEBUGINFO.*?# END_LOCAL_DEV_DEBUGINFO\r?\n?', '' | Set-Content .cargo/config.toml -NoNewline
           (Get-Content crates/kyomi-ui/Trunk.toml) | Where-Object { $_ -notmatch 'cargo_profile' } | Set-Content crates/kyomi-ui/Trunk.toml
 
-      - name: Install trunk + wasm-bindgen-cli + tailwindcss + wasm-opt (Linux/macOS)
+      - name: Install pinned Trunk
+        uses: ./.github/actions/setup-trunk
+        with:
+          target: ${{ matrix.trunk_arch }}-${{ matrix.trunk_os_suffix }}
+
+      - name: Install wasm-bindgen-cli + tailwindcss + wasm-opt (Linux/macOS)
         if: matrix.os != 'windows'
         run: |
           set -euo pipefail
@@ -173,8 +177,6 @@ jobs:
           else
             SUDO=""
           fi
-          $SUDO curl -fsSL "https://github.com/trunk-rs/trunk/releases/download/v${TRUNK_VERSION}/trunk-${{ matrix.trunk_arch }}-${{ matrix.trunk_os_suffix }}.tar.gz" \
-            | $SUDO tar -xz -C /usr/local/bin trunk
           $SUDO curl -fsSL "https://github.com/wasm-bindgen/wasm-bindgen/releases/download/${WASM_BINDGEN_VERSION}/wasm-bindgen-${WASM_BINDGEN_VERSION}-${{ matrix.wasm_bindgen_arch }}.tar.gz" \
             | $SUDO tar -xz --strip-components=1 -C /usr/local/bin \
                 "wasm-bindgen-${WASM_BINDGEN_VERSION}-${{ matrix.wasm_bindgen_arch }}/wasm-bindgen"
@@ -192,11 +194,10 @@ jobs:
             sudo cp "/tmp/binaryen-${BINARYEN_VERSION}/lib/libbinaryen.dylib" /usr/local/lib/
           fi
 
-      - name: Install trunk + wasm-bindgen-cli + tailwindcss + wasm-opt (Windows)
+      - name: Install wasm-bindgen-cli + tailwindcss + wasm-opt (Windows)
         if: matrix.os == 'windows'
         shell: pwsh
         run: |
-          cargo install trunk --version "^$env:TRUNK_VERSION" --locked
           cargo install wasm-bindgen-cli --version "=$env:WASM_BINDGEN_VERSION" --locked
           Invoke-WebRequest -Uri "https://github.com/tailwindlabs/tailwindcss/releases/download/$env:TAILWIND_VERSION/tailwindcss-windows-x64.exe" -OutFile "$env:CARGO_HOME\bin\tailwindcss.exe"
           $binaryenUrl = "https://github.com/WebAssembly/binaryen/releases/download/$env:BINARYEN_VERSION/binaryen-$env:BINARYEN_VERSION-x86_64-windows.tar.gz"
