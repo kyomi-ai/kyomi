@@ -187,7 +187,7 @@ fn fail(chart_app_dir: &std::path::Path, reason: &str) -> ! {
          cd {} && bash build.sh\n\n\
          The chart app build needs `trunk`, `tailwindcss` and `python3`, and the \
          `wasm32-unknown-unknown` target; `.github/workflows/ci.yml` installs the first two in \
-         \"Install trunk\" and \"Install tailwindcss\", the runner image provides python3, and the \
+         \"Install pinned Trunk\" and \"Install tailwindcss\", the runner image provides python3, and the \
          target comes from rust-toolchain.toml via `setup-rust`. A stale \
          apps/mcp-chart-app-wasm/Cargo.lock also stops the build: update the lock in the same \
          change as the manifest.",
