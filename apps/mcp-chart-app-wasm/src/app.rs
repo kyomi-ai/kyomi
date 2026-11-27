@@ -341,4 +341,19 @@ mod tests {
         }
         assert!(checked > SWITCHABLE_TYPES.len(), "CHART_TYPES was empty");
     }
+
+    /// The one picker list (`CHART_TYPES`) drives the header bar here and in the
+    /// main app, and the chart builder's type select. It may carry labels and
+    /// leave out aliases (`donut`), but every entry must be a type
+    /// `register_kyomi_renderers` registers (`KYOMI_CHART_TYPES`).
+    #[test]
+    fn every_picker_type_is_a_shared_renderer_type() {
+        for (chart_type, _label) in CHART_TYPES {
+            assert!(
+                KYOMI_CHART_TYPES.contains(chart_type),
+                "the shared picker offers {chart_type:?}, which \
+                 kyomi_chart_theme::KYOMI_CHART_TYPES does not register a renderer for"
+            );
+        }
+    }
 }

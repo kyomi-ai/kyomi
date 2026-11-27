@@ -37,7 +37,7 @@ use chartml_leptos::ChartMLChart;
 use leptos::prelude::*;
 
 use crate::chartml_provider::RefreshAllSignal;
-use crate::components::dashboard::chart_header_bar::ChartHeaderBar;
+use kyomi_ui_components::dashboard::ChartHeaderBar;
 use crate::components::dashboard::markdown_renderer::{
     apply_spec_overrides, default_chart_height_for_type, extract_chart_height, extract_chart_mode,
     extract_chart_orientation, extract_chart_type, substitute_params,
