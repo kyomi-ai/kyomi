@@ -231,8 +231,8 @@ fn find_closing_fence(text: &str) -> Option<usize> {
 /// (or fails to parse), return a single-element vec containing the original
 /// block content unchanged.
 pub(crate) fn split_chartml_block(block_content: &str) -> Vec<String> {
-    match serde_yaml::from_str::<serde_json::Value>(block_content) {
-        Ok(serde_json::Value::Array(items)) => {
+    match serde_yaml::from_str::<serde_yaml::Value>(block_content) {
+        Ok(serde_yaml::Value::Sequence(items)) => {
             let per_item: Vec<String> = items
                 .iter()
                 .filter_map(|v| serde_yaml::to_string(v).ok())
@@ -265,19 +265,19 @@ pub(crate) fn splice_chartml_item(
     array_index: usize,
     new_item_yaml: &str,
 ) -> Option<String> {
-    let parsed: serde_json::Value = serde_yaml::from_str(block_content).ok()?;
+    // Parsed as `serde_yaml::Value`, whose mappings keep their key order, so
+    // splicing one item does not reorder the keys of the others (or its own).
+    let parsed: serde_yaml::Value = serde_yaml::from_str(block_content).ok()?;
     match parsed {
-        serde_json::Value::Array(mut items) => {
+        serde_yaml::Value::Sequence(mut items) => {
             if array_index >= items.len() {
                 return None;
             }
-            let new_item: serde_json::Value =
-                serde_yaml::from_str(new_item_yaml).ok()?;
+            let new_item: serde_yaml::Value = serde_yaml::from_str(new_item_yaml).ok()?;
             items[array_index] = new_item;
-            let replacement = serde_json::Value::Array(items);
-            serde_yaml::to_string(&replacement).ok()
+            serde_yaml::to_string(&serde_yaml::Value::Sequence(items)).ok()
         }
-        serde_json::Value::Object(_) => {
+        serde_yaml::Value::Mapping(_) => {
             if array_index != 0 {
                 return None;
             }
@@ -1720,5 +1720,26 @@ mod type_switch_tests {
     #[test]
     fn an_item_without_visualize_is_not_switched() {
         assert!(switch_chart_item_type("type: chart\ntitle: x\n", "line").is_none());
+    }
+
+    const TWO_CHARTS: &str = "- type: chart\n  version: 1\n  title: First\n  data:\n    provider: inline\n    rows:\n    - region: North\n      revenue: 120\n      cost: 80\n  visualize:\n    type: bar\n    columns: region\n    rows:\n    - revenue\n- type: chart\n  version: 1\n  title: Second\n  data:\n    provider: inline\n    rows:\n    - region: South\n      revenue: 90\n      cost: 60\n  visualize:\n    type: bar\n    columns: region\n    rows:\n    - revenue\n";
+
+    /// A chart that is one item of a list block: switching its type through the
+    /// split, the item switch and the splice, as the editor does, changes only
+    /// that item's `visualize` and keeps every other line in the block as is.
+    #[test]
+    fn switching_one_chart_of_a_block_list_changes_only_its_visualize() {
+        let items = split_chartml_block(TWO_CHARTS);
+        assert_eq!(items.len(), 2);
+        let switched = switch_chart_item_type(&items[1], "line").expect("switches");
+        let block = splice_chartml_item(TWO_CHARTS, 1, &switched).expect("splices");
+        // Everything before the switched chart's `visualize` (the whole first
+        // chart and the second chart's own keys and data) is as written.
+        let head = |text: &str| {
+            let cut = text.rfind("  visualize:").expect("second chart has visualize");
+            text[..cut].to_string()
+        };
+        assert_eq!(head(&block), head(TWO_CHARTS), "{block}");
+        assert!(block.contains("type: line"), "{block}");
     }
 }
