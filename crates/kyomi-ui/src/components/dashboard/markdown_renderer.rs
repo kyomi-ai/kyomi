@@ -648,6 +648,10 @@ pub(crate) fn apply_spec_overrides(
     // Apply type override
     let effective_type = if let Some(t) = type_override {
         viz.insert("type".to_string(), serde_json::Value::String(t.to_string()));
+        // Switching across chart/table/metric changes which fields the type
+        // reads (columns/rows vs value), the same conversion the MCP chart app
+        // makes, so the new type has what it needs to render.
+        kyomi_chart_theme::convert_visualize_for_type_change(viz, &original_type, t);
         t.to_string()
     } else {
         original_type.clone()
@@ -1534,5 +1538,91 @@ mod splice_tests {
     #[test]
     fn set_chart_height_returns_none_on_invalid_yaml() {
         assert!(set_chart_height("type: [unclosed", 300.0).is_none());
+    }
+}
+
+// ---------------------------------------------------------------------------
+// apply_spec_overrides — switching chart type across categories (KYO-999)
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod type_switch_tests {
+    use super::*;
+
+    const BAR_YAML: &str = "type: chart\nversion: 1\ntitle: Revenue\n\
+        data:\n  provider: inline\n  rows:\n    - { region: North, revenue: 120, cost: 80 }\n\
+        visualize:\n  type: bar\n  columns: region\n  rows:\n    - revenue\n    - cost\n";
+
+    fn viz_of(yaml: &str) -> serde_json::Value {
+        let spec: serde_json::Value = serde_yaml::from_str(yaml).expect("yaml parses");
+        spec.get("visualize").cloned().expect("visualize present")
+    }
+
+    /// A bar chart switched to metric must name the field to show, as the MCP
+    /// chart app's switch does; without `value` the metric renderer fails with
+    /// "Missing required field: visualize.value".
+    #[test]
+    fn bar_to_metric_sets_the_value_field_from_the_first_row() {
+        let out = apply_spec_overrides(BAR_YAML, Some("metric"), None, None);
+        let viz = viz_of(&out);
+        assert_eq!(viz["type"], "metric");
+        assert_eq!(viz["value"], "revenue");
+        assert!(viz.get("rows").is_none() && viz.get("columns").is_none(), "{viz}");
+    }
+
+    /// A bar chart switched to table must list its fields as table columns;
+    /// the table renderer reads `columns`.
+    #[test]
+    fn bar_to_table_turns_the_axes_into_table_columns() {
+        let out = apply_spec_overrides(BAR_YAML, Some("table"), None, None);
+        let viz = viz_of(&out);
+        assert_eq!(viz["type"], "table");
+        let fields: Vec<&str> = viz["columns"]
+            .as_array()
+            .expect("columns is a list")
+            .iter()
+            .map(|c| c["field"].as_str().expect("field"))
+            .collect();
+        assert_eq!(fields, ["region", "revenue", "cost"]);
+        assert!(viz.get("rows").is_none(), "{viz}");
+    }
+
+    /// A table switched back to a chart gets an x axis and y rows again.
+    #[test]
+    fn table_to_bar_turns_the_columns_into_axes() {
+        let table_yaml = "type: chart\nversion: 1\ndata:\n  provider: inline\n  rows: []\n\
+            visualize:\n  type: table\n  columns:\n    - field: region\n    - field: revenue\n    - field: cost\n";
+        let out = apply_spec_overrides(table_yaml, Some("bar"), None, None);
+        let viz = viz_of(&out);
+        assert_eq!(viz["type"], "bar");
+        assert_eq!(viz["columns"], "region");
+        assert_eq!(viz["rows"], serde_json::json!(["revenue", "cost"]));
+    }
+
+    /// `rows: revenue` (a single field, not a list) is valid ChartML, so the
+    /// switch must keep it rather than drop it.
+    #[test]
+    fn a_single_field_rows_survives_the_switch_to_table_and_metric() {
+        let yaml = "type: chart\nversion: 1\ndata:\n  provider: inline\n  rows: []\n\
+            visualize:\n  type: bar\n  columns: region\n  rows: revenue\n";
+        let table = viz_of(&apply_spec_overrides(yaml, Some("table"), None, None));
+        let fields: Vec<&str> = table["columns"]
+            .as_array()
+            .expect("columns is a list")
+            .iter()
+            .map(|c| c["field"].as_str().expect("field"))
+            .collect();
+        assert_eq!(fields, ["region", "revenue"]);
+        let metric = viz_of(&apply_spec_overrides(yaml, Some("metric"), None, None));
+        assert_eq!(metric["value"], "revenue");
+    }
+
+    /// Switching within a category (bar to line) leaves the axes alone.
+    #[test]
+    fn bar_to_line_keeps_the_axes() {
+        let viz = viz_of(&apply_spec_overrides(BAR_YAML, Some("line"), None, None));
+        assert_eq!(viz["type"], "line");
+        assert_eq!(viz["columns"], "region");
+        assert_eq!(viz["rows"], serde_json::json!(["revenue", "cost"]));
     }
 }

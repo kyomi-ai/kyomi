@@ -11,7 +11,7 @@ use kyomi_ui_components::dashboard::chart_header_bar::CHART_TYPES;
 use kyomi_ui_components::dashboard::ChartHeaderBar;
 use crate::info_panel::InfoPanel;
 use crate::dashboard_panel::DashboardPanel;
-use crate::type_convert::convert_visualize_for_type_change;
+use kyomi_chart_theme::convert_visualize_for_type_change;
 
 const KYOMI_LOGO_SVG: &str = r#"<svg width="18" height="18" viewBox="0 0 50 50" xmlns="http://www.w3.org/2000/svg"><g transform="translate(25, 25)"><g fill="currentColor"><polygon points="0,-22 3.5,-9 0,-5.5 -3.5,-9"/><polygon points="15.5,-15.5 9,-3.5 5.5,-5.5 9,-9"/><polygon points="22,0 9,3.5 5.5,0 9,-3.5"/><polygon points="15.5,15.5 3.5,9 0,5.5 3.5,9"/><polygon points="0,22 -3.5,9 0,5.5 3.5,9"/><polygon points="-15.5,15.5 -9,3.5 -5.5,5.5 -9,9"/><polygon points="-22,0 -9,-3.5 -5.5,0 -9,3.5"/><polygon points="-15.5,-15.5 -3.5,-9 0,-5.5 -3.5,-9"/></g><circle cx="0" cy="0" r="4.5" fill="currentColor"/></g></svg>"#;
 

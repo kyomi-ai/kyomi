@@ -1347,6 +1347,7 @@ dependencies = [
  "chartml-chart-scatter",
  "chartml-chart-table",
  "chartml-core",
+ "serde_json",
 ]
 
 [[package]]
