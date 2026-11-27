@@ -609,28 +609,6 @@ fn CodeBlockView(
     }
 }
 
-/// After a chart's type changes: drop the properties the new type does not
-/// have (orientation outside bar, mode outside bar/area) and the per-row `mark`
-/// overrides, so the new type applies uniformly.
-fn strip_properties_incompatible_with(
-    viz: &mut serde_json::Map<String, serde_json::Value>,
-    new_type: &str,
-) {
-    if new_type != "bar" {
-        viz.remove("orientation");
-    }
-    if new_type != "bar" && new_type != "area" {
-        viz.remove("mode");
-    }
-    if let Some(arr) = viz.get_mut("rows").and_then(|r| r.as_array_mut()) {
-        for item in arr.iter_mut() {
-            if let Some(obj) = item.as_object_mut() {
-                obj.remove("mark");
-            }
-        }
-    }
-}
-
 /// Switch one chart item's type in place, for saving to the dashboard source.
 ///
 /// Only the item's `visualize` block is rewritten (the type, the fields the new
@@ -642,7 +620,18 @@ fn strip_properties_incompatible_with(
 #[cfg(any(target_arch = "wasm32", test))]
 pub(crate) fn switch_chart_item_type(yaml: &str, new_type: &str) -> Option<String> {
     let mut item: serde_yaml::Value = serde_yaml::from_str(yaml).ok()?;
-    let visualize = item.get_mut("visualize")?;
+    switch_visualize_type_in_place(item.get_mut("visualize")?, new_type)?;
+    serde_yaml::to_string(&item).ok()
+}
+
+/// Switch a `visualize` mapping's type in place through
+/// `kyomi_chart_theme::switch_visualize_type`, the one cleanup every chart-type
+/// switch uses, keeping the keys that remain in the order they were written.
+/// Returns `None` when `visualize` is not a mapping.
+pub(crate) fn switch_visualize_type_in_place(
+    visualize: &mut serde_yaml::Value,
+    new_type: &str,
+) -> Option<()> {
     let original = visualize.as_mapping()?.clone();
     let mut viz_json = match serde_json::to_value(&*visualize).ok()? {
         serde_json::Value::Object(map) => map,
@@ -653,20 +642,15 @@ pub(crate) fn switch_chart_item_type(yaml: &str, new_type: &str) -> Option<Strin
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
-    viz_json.insert("type".to_string(), serde_json::Value::String(new_type.to_string()));
-    if new_type != original_type {
-        kyomi_chart_theme::convert_visualize_for_type_change(&mut viz_json, &original_type, new_type);
-        strip_properties_incompatible_with(&mut viz_json, new_type);
-    }
+    kyomi_chart_theme::switch_visualize_type(&mut viz_json, &original_type, new_type);
     *visualize = serde_yaml::Value::Mapping(rebuild_in_original_order(&original, viz_json)?);
-    serde_yaml::to_string(&item).ok()
+    Some(())
 }
 
 /// `converted` (a `serde_json` map, so its keys are sorted) as a YAML mapping
 /// laid out like `original`: keys that survive keep their position, and a value
 /// the switch did not change keeps its own YAML (so its nested key order too);
 /// keys the switch added come last, and keys it removed are gone.
-#[cfg(any(target_arch = "wasm32", test))]
 fn rebuild_in_original_order(
     original: &serde_yaml::Mapping,
     mut converted: serde_json::Map<String, serde_json::Value>,
@@ -691,9 +675,9 @@ fn rebuild_in_original_order(
 /// - Applies `type_override` to `visualize.type`
 /// - Applies `orientation_override` (Some = set, None = remove)
 /// - Applies `mode_override` (Some = set, None = remove)
-/// - When type changes, strips per-row `mark` overrides so the new type applies uniformly
-/// - When switching away from bar, removes incompatible `orientation`
-/// - When switching away from bar/area, removes incompatible `mode`
+/// - A type change goes through `kyomi_chart_theme::switch_visualize_type`: it
+///   converts the fields across chart/table/metric and drops the `orientation`,
+///   `mode` and per-row `mark` the new type does not have
 pub(crate) fn apply_spec_overrides(
     yaml: &str,
     type_override: Option<&str>,
@@ -716,18 +700,6 @@ pub(crate) fn apply_spec_overrides(
         .unwrap_or("")
         .to_string();
 
-    // Apply type override
-    let effective_type = if let Some(t) = type_override {
-        viz.insert("type".to_string(), serde_json::Value::String(t.to_string()));
-        // Switching across chart/table/metric changes which fields the type
-        // reads (columns/rows vs value), the same conversion the MCP chart app
-        // makes, so the new type has what it needs to render.
-        kyomi_chart_theme::convert_visualize_for_type_change(viz, &original_type, t);
-        t.to_string()
-    } else {
-        original_type.clone()
-    };
-
     // Apply orientation override (Some(Some("horizontal")) = set, Some(None) = remove)
     if let Some(orient_val) = orientation_override {
         if let Some(o) = orient_val {
@@ -749,9 +721,10 @@ pub(crate) fn apply_spec_overrides(
         }
     }
 
-    // If type changed, clean up incompatible properties
-    if type_override.is_some() && effective_type != original_type {
-        strip_properties_incompatible_with(viz, &effective_type);
+    // Apply the type override last, through the one shared switch, so a type
+    // change also drops an orientation/mode the new type does not have.
+    if let Some(t) = type_override {
+        kyomi_chart_theme::switch_visualize_type(viz, &original_type, t);
     }
 
     // Re-serialize to YAML
@@ -1808,5 +1781,67 @@ mod type_switch_tests {
             ["visualize:", "  type: metric", "  title: Keep me", "  value: revenue"],
             "{saved}"
         );
+    }
+
+    /// A bar chart authored with each setting some other type drops.
+    const BAR_WITH_EVERY_SETTING: &str = "type: chart\nversion: 1\ntitle: Revenue\n\
+        data:\n  provider: inline\n  rows:\n  - region: North\n    revenue: 120\n    cost: 80\n\
+        visualize:\n  type: bar\n  columns: region\n  orientation: horizontal\n  mode: stacked\n\
+        \x20 rows:\n  - field: revenue\n    mark: line\n    label: Revenue\n  - cost\n";
+
+    /// What `kyomi_chart_theme::switch_visualize_type` gives for the fixture.
+    fn shared_switch(new_type: &str) -> serde_json::Value {
+        let mut viz = match viz_of(BAR_WITH_EVERY_SETTING) {
+            serde_json::Value::Object(map) => map,
+            other => panic!("visualize is not a map: {other}"),
+        };
+        kyomi_chart_theme::switch_visualize_type(&mut viz, "bar", new_type);
+        serde_json::Value::Object(viz)
+    }
+
+    /// A dashboard's switch is the shared cleanup: the view (`apply_spec_overrides`)
+    /// and the saved item (`switch_chart_item_type`) both give the visualize block
+    /// `switch_visualize_type` gives, orientation, mode and row marks included.
+    #[test]
+    fn a_dashboard_switch_is_the_shared_cleanup() {
+        for new_type in ["line", "area", "table", "metric"] {
+            let expected = shared_switch(new_type);
+            let view = apply_spec_overrides(BAR_WITH_EVERY_SETTING, Some(new_type), None, None);
+            assert_eq!(viz_of(&view), expected, "view, bar -> {new_type}");
+            let saved = switch_chart_item_type(BAR_WITH_EVERY_SETTING, new_type).expect("switches");
+            assert_eq!(viz_of(&saved), expected, "saved, bar -> {new_type}");
+        }
+    }
+
+    /// The save keeps the author's key order: the surviving keys of `visualize`
+    /// stay where they were written, and the cleanup only removes keys.
+    #[test]
+    fn a_saved_switch_through_the_shared_cleanup_keeps_the_key_order() {
+        let saved = switch_chart_item_type(BAR_WITH_EVERY_SETTING, "line").expect("switches");
+        assert_eq!(
+            visualize_lines(&saved),
+            [
+                "visualize:",
+                "  type: line",
+                "  columns: region",
+                "  rows:",
+                "  - field: revenue",
+                "    label: Revenue",
+                "  - cost",
+            ],
+            "{saved}"
+        );
+    }
+
+    /// An orientation chosen on the header bar does not outlive a switch to a
+    /// type without orientations.
+    #[test]
+    fn a_type_override_wins_over_an_orientation_override_the_new_type_cannot_have() {
+        let out = apply_spec_overrides(BAR_YAML, Some("line"), Some(Some("horizontal")), Some(Some("stacked")));
+        let viz = viz_of(&out);
+        assert!(viz.get("orientation").is_none(), "{viz}");
+        assert!(viz.get("mode").is_none(), "{viz}");
+        let out = apply_spec_overrides(BAR_YAML, None, Some(Some("horizontal")), None);
+        assert_eq!(viz_of(&out)["orientation"], "horizontal");
     }
 }

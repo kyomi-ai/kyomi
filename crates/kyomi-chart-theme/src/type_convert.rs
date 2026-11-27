@@ -1,13 +1,26 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-//! Port of `convertVisualizeForTypeChange()` from the JS MCP app.
+//! The one place a chart-type switch rewrites a `visualize` block.
 //!
-//! When a user switches chart type across categories (chart ↔ table ↔ metric),
-//! the visualize structure must be converted to match the target type's schema.
-//! Shared by every surface with a chart-type picker (the app's dashboards and
-//! the MCP chart app), so a switch gives the same spec on both.
+//! [`switch_visualize_type`] is what every surface with a chart-type picker
+//! calls (the MCP chart app, dashboards and the chart builder), so the same
+//! switch gives the same spec on all of them. It drops the settings only the old
+//! type had (`orientation`, `mode`, per-row `mark`), then, across the
+//! chart / table / metric categories, converts the fields (a port of
+//! `convertVisualizeForTypeChange()` from the JS MCP app).
 
 use serde_json::{json, Map, Value};
+
+/// Remove `key` and return its value, keeping the order of the other keys.
+///
+/// `Map::remove` would swap the last key into the gap when serde_json's
+/// `preserve_order` is on (the MCP chart app turns it on), which reorders the
+/// author's keys; `retain` keeps them in place.
+fn take_key(map: &mut Map<String, Value>, key: &str) -> Option<Value> {
+    let value = map.get(key).cloned();
+    map.retain(|k, _| k != key);
+    value
+}
 
 /// Classify a chart type into its category.
 fn category(chart_type: &str) -> &'static str {
@@ -18,10 +31,45 @@ fn category(chart_type: &str) -> &'static str {
     }
 }
 
+/// Switch a `visualize` map from `from_type` to `to_type`, in place.
+///
+/// Sets `type` to `to_type`. When the type actually changes it also
+/// 1. drops what the new type does not have: `orientation` unless the new type
+///    is `bar`, `mode` unless it is `bar` or `area`, and the per-row `mark`
+///    overrides so the new type applies uniformly; then
+/// 2. converts the fields across categories (chart / table / metric).
+///
+/// The marks go first so they are not carried into a table's columns. Keys that
+/// stay keep their position in `viz` (it keeps whatever order the map has).
+pub fn switch_visualize_type(viz: &mut Map<String, Value>, from_type: &str, to_type: &str) {
+    viz.insert("type".to_string(), Value::String(to_type.to_string()));
+    if from_type == to_type {
+        return;
+    }
+    strip_properties_incompatible_with(viz, to_type);
+    convert_visualize_for_type_change(viz, from_type, to_type);
+}
+
+fn strip_properties_incompatible_with(viz: &mut Map<String, Value>, new_type: &str) {
+    if new_type != "bar" {
+        take_key(viz, "orientation");
+    }
+    if new_type != "bar" && new_type != "area" {
+        take_key(viz, "mode");
+    }
+    if let Some(rows) = viz.get_mut("rows").and_then(Value::as_array_mut) {
+        for row in rows {
+            if let Some(row) = row.as_object_mut() {
+                take_key(row, "mark");
+            }
+        }
+    }
+}
+
 /// Convert the `visualize` object when switching between incompatible type categories.
 ///
 /// Operates in-place on the visualize map. Does nothing if the categories are the same.
-pub fn convert_visualize_for_type_change(
+fn convert_visualize_for_type_change(
     viz: &mut Map<String, Value>,
     from_type: &str,
     to_type: &str,
@@ -87,7 +135,7 @@ fn table_to_chart(viz: &mut Map<String, Value>) {
         match obj {
             Some(o) => {
                 let mut clean = o.clone();
-                clean.remove("width");
+                take_key(&mut clean, "width");
                 if clean.len() == 1 && clean.contains_key("field") {
                     Some(Value::String(field))
                 } else {
@@ -98,7 +146,7 @@ fn table_to_chart(viz: &mut Map<String, Value>) {
         }
     }).collect();
 
-    viz.remove("columns");
+    take_key(viz, "columns");
     if let Some(x) = first {
         viz.insert("columns".to_string(), Value::String(x));
     }
@@ -117,17 +165,17 @@ fn table_to_metric(viz: &mut Map<String, Value>) {
     if let Some(field) = value_col.and_then(extract_field) {
         viz.insert("value".to_string(), Value::String(field));
     }
-    viz.remove("columns");
-    viz.remove("rows");
+    take_key(viz, "columns");
+    take_key(viz, "rows");
 }
 
 fn metric_to_chart(viz: &mut Map<String, Value>) {
-    let value = viz.remove("value");
-    viz.remove("label");
-    viz.remove("format");
-    viz.remove("compareWith");
-    viz.remove("invertTrend");
-    viz.remove("columns");
+    let value = take_key(viz, "value");
+    take_key(viz, "label");
+    take_key(viz, "format");
+    take_key(viz, "compareWith");
+    take_key(viz, "invertTrend");
+    take_key(viz, "columns");
 
     let rows = if let Some(v) = value {
         vec![v]
@@ -138,12 +186,12 @@ fn metric_to_chart(viz: &mut Map<String, Value>) {
 }
 
 fn metric_to_table(viz: &mut Map<String, Value>) {
-    let value = viz.remove("value");
-    let label = viz.remove("label");
-    let format = viz.remove("format");
-    viz.remove("compareWith");
-    viz.remove("invertTrend");
-    viz.remove("rows");
+    let value = take_key(viz, "value");
+    let label = take_key(viz, "label");
+    let format = take_key(viz, "format");
+    take_key(viz, "compareWith");
+    take_key(viz, "invertTrend");
+    take_key(viz, "rows");
 
     let mut cols = Vec::new();
     if let Some(Value::String(field)) = value {
@@ -161,8 +209,8 @@ fn metric_to_table(viz: &mut Map<String, Value>) {
 }
 
 fn chart_to_table(viz: &mut Map<String, Value>) {
-    let columns_val = viz.remove("columns");
-    let rows_val = viz.remove("rows");
+    let columns_val = take_key(viz, "columns");
+    let rows_val = take_key(viz, "rows");
 
     let mut cols = Vec::new();
 
@@ -188,8 +236,8 @@ fn chart_to_table(viz: &mut Map<String, Value>) {
 }
 
 fn chart_to_metric(viz: &mut Map<String, Value>) {
-    let rows_val = viz.remove("rows");
-    viz.remove("columns");
+    let rows_val = take_key(viz, "rows");
+    take_key(viz, "columns");
 
     // Use first row field as metric value
     if let Some(first) = rows_val.map(entries).and_then(|items| items.into_iter().next())
@@ -270,5 +318,97 @@ mod tests {
         })).unwrap();
         convert_visualize_for_type_change(&mut to_metric, "bar", "metric");
         assert_eq!(to_metric["value"], "revenue");
+    }
+
+    const TYPES: [&str; 8] = ["bar", "line", "area", "scatter", "pie", "doughnut", "table", "metric"];
+
+    /// A bar chart authored with every setting some type drops.
+    fn bar_with_every_setting() -> Map<String, Value> {
+        serde_json::from_value(json!({
+            "type": "bar",
+            "columns": "region",
+            "orientation": "horizontal",
+            "mode": "stacked",
+            "rows": [
+                {"field": "revenue", "mark": "line", "label": "Revenue"},
+                {"field": "cost"}
+            ]
+        })).unwrap()
+    }
+
+    /// Every ordered pair of picker types: `type` is the new type, `orientation`
+    /// survives only on bar, `mode` only on bar and area, and a row's `mark` on
+    /// none (a switch to the same type changes nothing).
+    #[test]
+    fn every_type_pair_drops_what_the_new_type_does_not_have() {
+        for from in TYPES {
+            for to in TYPES {
+                let mut viz = bar_with_every_setting();
+                viz.insert("type".to_string(), json!(from));
+                let before = viz.clone();
+                switch_visualize_type(&mut viz, from, to);
+                let pair = format!("{from} -> {to}");
+                assert_eq!(viz["type"], to, "{pair}");
+                if from == to {
+                    assert_eq!(viz, before, "{pair}");
+                    continue;
+                }
+                assert_eq!(viz.contains_key("orientation"), to == "bar", "{pair}: {viz:?}");
+                assert_eq!(viz.contains_key("mode"), to == "bar" || to == "area", "{pair}: {viz:?}");
+                let marks = viz
+                    .values()
+                    .filter_map(Value::as_array)
+                    .flatten()
+                    .filter(|entry| entry.get("mark").is_some())
+                    .count();
+                assert_eq!(marks, 0, "{pair}: {viz:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn bar_to_line_keeps_the_fields_and_drops_orientation_mode_and_marks() {
+        let mut viz = bar_with_every_setting();
+        switch_visualize_type(&mut viz, "bar", "line");
+        assert_eq!(
+            Value::Object(viz),
+            json!({
+                "type": "line",
+                "columns": "region",
+                "rows": [{"field": "revenue", "label": "Revenue"}, {"field": "cost"}]
+            })
+        );
+    }
+
+    #[test]
+    fn bar_to_table_drops_the_settings_and_the_marks_do_not_reach_the_columns() {
+        let mut viz = bar_with_every_setting();
+        switch_visualize_type(&mut viz, "bar", "table");
+        assert_eq!(
+            Value::Object(viz),
+            json!({
+                "type": "table",
+                "columns": [
+                    {"field": "region"},
+                    {"field": "revenue", "label": "Revenue"},
+                    {"field": "cost"}
+                ]
+            })
+        );
+    }
+
+    #[test]
+    fn bar_to_area_keeps_the_mode_and_drops_the_orientation() {
+        let mut viz = bar_with_every_setting();
+        switch_visualize_type(&mut viz, "bar", "area");
+        assert_eq!(viz["mode"], "stacked");
+        assert!(!viz.contains_key("orientation"));
+    }
+
+    #[test]
+    fn bar_to_metric_names_the_value_and_drops_the_settings() {
+        let mut viz = bar_with_every_setting();
+        switch_visualize_type(&mut viz, "bar", "metric");
+        assert_eq!(Value::Object(viz), json!({"type": "metric", "value": "revenue"}));
     }
 }

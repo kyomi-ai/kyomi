@@ -45,6 +45,7 @@ use crate::server_fns::datasources::list_datasources;
 use crate::chartml_provider::configured_chartml;
 #[cfg(target_arch = "wasm32")]
 use super::markdown_renderer::{kyomi_palette, kyomi_theme};
+use super::markdown_renderer::switch_visualize_type_in_place;
 use super::shared::{BTN_BASE, BTN_DEFAULT, BTN_SIZE};
 use kyomi_ui_components::dashboard::chart_header_bar::CHART_TYPES;
 
@@ -290,16 +291,14 @@ fn ast_get_chart_type(ast: &Value) -> String {
     get_string_at(ast, &["visualize", "type"]).unwrap_or_else(|| "bar".to_string())
 }
 
+/// Switch the chart type through the one cleanup every type switch uses (see
+/// `switch_visualize_type_in_place`), so the builder gives the same `visualize`
+/// block as the MCP chart app and a dashboard, with the author's key order kept.
 pub(crate) fn ast_set_chart_type(ast: &mut Value, val: &str) {
     ensure_root_mapping(ast);
     ensure_nested_mapping(ast, "visualize");
     let vis = ast.get_mut("visualize").expect("ensured");
-    if let Some(map) = vis.as_mapping_mut() {
-        map.insert(
-            Value::String("type".to_string()),
-            Value::String(val.to_string()),
-        );
-    }
+    switch_visualize_type_in_place(vis, val);
 }
 
 fn ast_get_x_field(ast: &Value) -> String {
@@ -1425,13 +1424,6 @@ pub fn ChartBuilderModal(
                                                     )
                                                     on_change=move |ct: String| {
                                                         mutate_ast(ast, yaml_text, yaml_parse_error, move |a| {
-                                                            // Clear incompatible modifiers on type change.
-                                                            if ct != "bar" {
-                                                                ast_set_orientation(a, None);
-                                                            }
-                                                            if ct != "bar" && ct != "area" {
-                                                                ast_set_mode(a, None);
-                                                            }
                                                             ast_set_chart_type(a, &ct);
                                                         });
                                                     }
@@ -1988,5 +1980,55 @@ fn ChartCopilot(
             custom_ws_events=vec!["chart_update".to_string()]
             on_custom_ws_event=on_custom
         />
+    }
+}
+
+#[cfg(test)]
+mod type_switch_tests {
+    use super::*;
+
+    const BAR_WITH_EVERY_SETTING: &str = "type: chart\nversion: 1\ntitle: Revenue\n\
+        visualize:\n  type: bar\n  columns: region\n  orientation: horizontal\n  mode: stacked\n\
+        \x20 rows:\n  - field: revenue\n    mark: line\n    label: Revenue\n  - cost\n";
+
+    fn switched(new_type: &str) -> Value {
+        let mut ast: Value = serde_yaml::from_str(BAR_WITH_EVERY_SETTING).expect("parses");
+        ast_set_chart_type(&mut ast, new_type);
+        ast
+    }
+
+    fn visualize_json(ast: &Value) -> serde_json::Value {
+        serde_json::to_value(ast.get("visualize").expect("visualize")).expect("json")
+    }
+
+    /// The builder's type select is the shared cleanup: the same `visualize`
+    /// block `kyomi_chart_theme::switch_visualize_type` gives (what the MCP chart
+    /// app and a dashboard produce), including a table's `columns`.
+    #[test]
+    fn the_builder_switch_is_the_shared_cleanup() {
+        for new_type in ["line", "area", "table", "metric"] {
+            let original: Value = serde_yaml::from_str(BAR_WITH_EVERY_SETTING).expect("parses");
+            let serde_json::Value::Object(mut expected) = visualize_json(&original) else {
+                panic!("visualize is not a map")
+            };
+            kyomi_chart_theme::switch_visualize_type(&mut expected, "bar", new_type);
+            assert_eq!(
+                visualize_json(&switched(new_type)),
+                serde_json::Value::Object(expected),
+                "bar -> {new_type}"
+            );
+        }
+    }
+
+    /// The author's key order survives: the keys that stay are where they were
+    /// written, outside `visualize` too.
+    #[test]
+    fn the_builder_switch_keeps_the_key_order() {
+        let ast = switched("line");
+        let keys: Vec<&str> = ast.as_mapping().expect("mapping").keys().filter_map(Value::as_str).collect();
+        assert_eq!(keys, ["type", "version", "title", "visualize"]);
+        let viz_keys: Vec<&str> = ast["visualize"].as_mapping().expect("mapping").keys().filter_map(Value::as_str).collect();
+        assert_eq!(viz_keys, ["type", "columns", "rows"]);
+        assert_eq!(serialize_ast(&ast).matches("mark").count(), 0);
     }
 }
