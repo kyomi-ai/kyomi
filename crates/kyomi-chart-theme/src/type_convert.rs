@@ -192,10 +192,10 @@ fn chart_to_metric(viz: &mut Map<String, Value>) {
     viz.remove("columns");
 
     // Use first row field as metric value
-    if let Some(first) = rows_val.map(entries).and_then(|items| items.into_iter().next()) {
-        if let Some(field) = extract_field(&first) {
-            viz.insert("value".to_string(), Value::String(field));
-        }
+    if let Some(first) = rows_val.map(entries).and_then(|items| items.into_iter().next())
+        && let Some(field) = extract_field(&first)
+    {
+        viz.insert("value".to_string(), Value::String(field));
     }
 }
 

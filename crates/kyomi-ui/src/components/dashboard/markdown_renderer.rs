@@ -1625,4 +1625,21 @@ mod type_switch_tests {
         assert_eq!(viz["columns"], "region");
         assert_eq!(viz["rows"], serde_json::json!(["revenue", "cost"]));
     }
+
+    /// A switch is saved to the dashboard source as `apply_spec_overrides`'s
+    /// output and the chart then renders from that source with no override, so
+    /// the saved spec has to render as the new type on its own (and switching
+    /// to the type it already has changes nothing).
+    #[test]
+    fn the_saved_spec_of_a_switch_renders_as_the_new_type_on_its_own() {
+        for new_type in ["metric", "table"] {
+            let saved = apply_spec_overrides(BAR_YAML, Some(new_type), None, None);
+            let reloaded = apply_spec_overrides(&saved, None, None, None);
+            assert_eq!(viz_of(&reloaded), viz_of(&saved), "{new_type}");
+            let again = apply_spec_overrides(&saved, Some(new_type), None, None);
+            assert_eq!(viz_of(&again), viz_of(&saved), "{new_type}");
+        }
+        let saved = apply_spec_overrides(BAR_YAML, Some("metric"), None, None);
+        assert_eq!(viz_of(&saved)["value"], "revenue");
+    }
 }
