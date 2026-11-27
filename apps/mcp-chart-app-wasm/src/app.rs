@@ -175,12 +175,7 @@ pub fn App() -> impl IntoView {
     let on_orientation_change = Callback::new(move |orientation: Option<String>| {
         state.spec.update(|spec_opt| {
             if let Some(spec) = spec_opt {
-                if let Some(viz) = spec.get_mut("visualize").and_then(|v| v.as_object_mut()) {
-                    match orientation {
-                        Some(o) => { viz.insert("orientation".to_string(), serde_json::Value::String(o)); }
-                        None => { viz.remove("orientation"); }
-                    }
-                }
+                set_visualize_key(spec, "orientation", orientation);
             }
         });
     });
@@ -188,12 +183,7 @@ pub fn App() -> impl IntoView {
     let on_mode_change = Callback::new(move |mode: Option<String>| {
         state.spec.update(|spec_opt| {
             if let Some(spec) = spec_opt {
-                if let Some(viz) = spec.get_mut("visualize").and_then(|v| v.as_object_mut()) {
-                    match mode {
-                        Some(m) => { viz.insert("mode".to_string(), serde_json::Value::String(m)); }
-                        None => { viz.remove("mode"); }
-                    }
-                }
+                set_visualize_key(spec, "mode", mode);
             }
         });
     });
@@ -276,6 +266,20 @@ pub fn App() -> impl IntoView {
                 }}
             }
         })}
+    }
+}
+
+/// Set (`Some`) or remove (`None`) one `visualize` key. Removing uses `retain`,
+/// since with `preserve_order` `Map::remove` swaps the last key into the gap and
+/// would reorder the author's keys.
+fn set_visualize_key(spec: &mut serde_json::Value, key: &str, value: Option<String>) {
+    if let Some(viz) = spec.get_mut("visualize").and_then(|v| v.as_object_mut()) {
+        match value {
+            Some(v) => {
+                viz.insert(key.to_string(), serde_json::Value::String(v));
+            }
+            None => viz.retain(|k, _| k != key),
+        }
     }
 }
 
@@ -382,5 +386,17 @@ mod tests {
         assert_eq!(keys, ["type", "columns", "rows"]);
         let top: Vec<&str> = spec.as_object().unwrap().keys().map(String::as_str).collect();
         assert_eq!(top, ["title", "visualize"]);
+    }
+
+    /// Clearing an orientation or mode keeps the order of the other keys.
+    #[test]
+    fn clearing_an_orientation_or_mode_keeps_the_key_order() {
+        let mut spec: serde_json::Value = serde_json::from_str(BAR_SPEC).unwrap();
+        set_visualize_key(&mut spec, "orientation", None);
+        set_visualize_key(&mut spec, "mode", None);
+        let keys: Vec<&str> = spec["visualize"].as_object().unwrap().keys().map(String::as_str).collect();
+        assert_eq!(keys, ["type", "columns", "rows"]);
+        set_visualize_key(&mut spec, "orientation", Some("horizontal".to_string()));
+        assert_eq!(spec["visualize"]["orientation"], "horizontal");
     }
 }

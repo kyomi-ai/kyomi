@@ -294,11 +294,14 @@ fn ast_get_chart_type(ast: &Value) -> String {
 /// Switch the chart type through the one cleanup every type switch uses (see
 /// `switch_visualize_type_in_place`), so the builder gives the same `visualize`
 /// block as the MCP chart app and a dashboard, with the author's key order kept.
-pub(crate) fn ast_set_chart_type(ast: &mut Value, val: &str) {
+///
+/// Returns `false` (the AST untouched) when `visualize` cannot be switched, i.e. it
+/// has a key that is not text.
+pub(crate) fn ast_set_chart_type(ast: &mut Value, val: &str) -> bool {
     ensure_root_mapping(ast);
     ensure_nested_mapping(ast, "visualize");
     let vis = ast.get_mut("visualize").expect("ensured");
-    switch_visualize_type_in_place(vis, val);
+    switch_visualize_type_in_place(vis, val).is_some()
 }
 
 fn ast_get_x_field(ast: &Value) -> String {
@@ -1423,9 +1426,24 @@ pub fn ChartBuilderModal(
                                                             .collect::<Vec<_>>()
                                                     )
                                                     on_change=move |ct: String| {
-                                                        mutate_ast(ast, yaml_text, yaml_parse_error, move |a| {
-                                                            ast_set_chart_type(a, &ct);
+                                                        let mut switched_ok = true;
+                                                        mutate_ast(ast, yaml_text, yaml_parse_error, |a| {
+                                                            switched_ok = ast_set_chart_type(a, &ct);
                                                         });
+                                                        if !switched_ok {
+                                                            yaml_parse_error.set(Some(
+                                                                "Cannot switch the chart type: `visualize` has a key that is not text."
+                                                                    .to_string(),
+                                                            ));
+                                                            return;
+                                                        }
+                                                        // The switch rewrote `rows` (and `columns`), so the
+                                                        // series list is re-derived from the AST, as after a
+                                                        // YAML-tab edit; otherwise a series edit would write
+                                                        // the old type's rows back.
+                                                        let switched = visual_series_from_ast(&ast.get_untracked());
+                                                        set_next_series_id.set(next_id_after(&switched));
+                                                        visual_series.set(switched);
                                                     }
                                                 />
 
@@ -1993,7 +2011,7 @@ mod type_switch_tests {
 
     fn switched(new_type: &str) -> Value {
         let mut ast: Value = serde_yaml::from_str(BAR_WITH_EVERY_SETTING).expect("parses");
-        ast_set_chart_type(&mut ast, new_type);
+        assert!(ast_set_chart_type(&mut ast, new_type));
         ast
     }
 
@@ -2020,6 +2038,21 @@ mod type_switch_tests {
         }
     }
 
+    /// After a switch the series list is re-derived from the AST: a bar chart's
+    /// two series are gone from a table's `visualize` (the builder shows one
+    /// blank row), and a metric switched back to a chart has its single row.
+    #[test]
+    fn the_series_list_follows_the_switched_ast() {
+        let table = switched("table");
+        let blank = visual_series_from_ast(&table);
+        assert_eq!(blank.len(), 1);
+        assert!(blank[0].y_field.is_empty());
+        let mut metric = switched("metric");
+        assert!(ast_set_chart_type(&mut metric, "bar"));
+        let fields: Vec<String> = visual_series_from_ast(&metric).into_iter().map(|s| s.y_field).collect();
+        assert_eq!(fields, ["revenue"]);
+    }
+
     /// The author's key order survives: the keys that stay are where they were
     /// written, outside `visualize` too.
     #[test]
@@ -2030,5 +2063,15 @@ mod type_switch_tests {
         let viz_keys: Vec<&str> = ast["visualize"].as_mapping().expect("mapping").keys().filter_map(Value::as_str).collect();
         assert_eq!(viz_keys, ["type", "columns", "rows"]);
         assert_eq!(serialize_ast(&ast).matches("mark").count(), 0);
+    }
+
+    /// A `visualize` block that cannot be switched is reported, not ignored, and
+    /// is left as it was.
+    #[test]
+    fn a_visualize_with_a_non_text_key_is_reported_and_left_alone() {
+        let mut ast: Value = serde_yaml::from_str("type: chart\nvisualize:\n  type: bar\n  1: x\n").expect("parses");
+        let before = ast.clone();
+        assert!(!ast_set_chart_type(&mut ast, "line"));
+        assert_eq!(ast, before);
     }
 }

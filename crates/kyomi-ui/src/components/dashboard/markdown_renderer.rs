@@ -657,7 +657,9 @@ fn rebuild_in_original_order(
 ) -> Option<serde_yaml::Mapping> {
     let mut rebuilt = serde_yaml::Mapping::new();
     for (key, old_value) in original {
-        let Some(name) = key.as_str() else { continue };
+        // A key that is not text cannot be matched to the converted map, and
+        // skipping it would drop it from the saved item, so the switch is refused.
+        let name = key.as_str()?;
         let Some(new_value) = converted.remove(name) else { continue };
         let unchanged = serde_json::to_value(old_value).ok().as_ref() == Some(&new_value);
         let value = if unchanged { old_value.clone() } else { serde_yaml::to_value(new_value).ok()? };
@@ -1708,6 +1710,12 @@ mod type_switch_tests {
             viz_of(&table),
             viz_of(&apply_spec_overrides(AUTHORED_YAML, Some("table"), None, None))
         );
+    }
+
+    /// A `visualize` key that is not text is refused, never dropped from the save.
+    #[test]
+    fn an_item_whose_visualize_has_a_non_text_key_is_not_switched() {
+        assert!(switch_chart_item_type("type: chart\nvisualize:\n  type: bar\n  1: x\n", "line").is_none());
     }
 
     #[test]
