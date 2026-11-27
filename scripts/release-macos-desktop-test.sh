@@ -78,7 +78,7 @@ assert_value "--dry-run accepts any ref" "dry-run origin/main" \
 assert_run "a missing tool is named and stops the run" 1 "required tool not found on PATH: no-such-tool-xyz" \
     in_script require_tool no-such-tool-xyz
 if [ "$(uname -s)-$(uname -m)" != "Darwin-arm64" ]; then
-    assert_run "a host that is not an Apple-silicon Mac is refused" 1 "must" \
+    assert_run "a host that is not an Apple-silicon Mac is refused" 1 "must run on a Mac" \
         "$SCRIPT" v2.7.17
 fi
 
@@ -112,6 +112,65 @@ assert_run "a pin written twice fails loudly" 1 "more than one version" \
     in_script pin_binaryen "$TMP/tree"
 assert_run "a tree without the file fails loudly" 1 "does not exist" \
     in_script pin_trunk "$TMP/nowhere"
+
+# --- origin remote -> GH_REPO ------------------------------------------------------
+assert_value "https remote" "kyomi-ai/kyomi" "$(in_script origin_slug https://github.com/kyomi-ai/kyomi.git)"
+assert_value "https remote without .git" "kyomi-ai/kyomi" "$(in_script origin_slug https://github.com/kyomi-ai/kyomi)"
+assert_value "ssh remote" "kyomi-ai/kyomi" "$(in_script origin_slug git@github.com:kyomi-ai/kyomi.git)"
+assert_run "a remote that is not github.com is refused" 1 "not a github.com remote" \
+    in_script origin_slug https://example.com/kyomi-ai/kyomi.git
+
+# --- dmg verification, with stand-ins for the macOS tools -------------------------
+# inspect_app is what decides "arm64-only and ad-hoc signed", so it is run with
+# fake lipo/plutil/codesign whose answers the test controls.
+mkdir -p "$TMP/stubs" "$TMP/app/Contents/MacOS"
+printf '#!/bin/sh\n' > "$TMP/app/Contents/MacOS/kyomi-desktop"
+chmod +x "$TMP/app/Contents/MacOS/kyomi-desktop"
+echo plist > "$TMP/app/Contents/Info.plist"
+: > "$TMP/fake.dmg"
+cat > "$TMP/stubs/lipo" <<'SH'
+#!/bin/sh
+case "$1" in
+    -info) echo "Non-fat file: $2 is architecture: $STUB_ARCHS" ;;
+    -archs) echo "$STUB_ARCHS" ;;
+esac
+SH
+printf '#!/bin/sh\necho "{ plist }"\n' > "$TMP/stubs/plutil"
+cat > "$TMP/stubs/codesign" <<'SH'
+#!/bin/sh
+if [ "$1" = "--verify" ]; then
+    exit "$STUB_VERIFY_RC"
+fi
+printf '%s\n' "$STUB_SIGNATURE" >&2
+SH
+chmod +x "$TMP/stubs/lipo" "$TMP/stubs/plutil" "$TMP/stubs/codesign"
+GOOD_SIGNATURE=$'Identifier=ai.kyomi.desktop\nSignature=adhoc'
+
+inspect() { (
+    export PATH="$TMP/stubs:$PATH" STUB_ARCHS="$1" STUB_VERIFY_RC="$2" STUB_SIGNATURE="$3"
+    source "$SCRIPT"
+    inspect_app "$TMP/app" "$TMP/fake.dmg"
+); }
+assert_run "an arm64, verified, ad-hoc signed app passes" 0 "" inspect arm64 0 "$GOOD_SIGNATURE"
+assert_run "an x86_64 app is refused" 1 "not arm64 only" inspect x86_64 0 "$GOOD_SIGNATURE"
+assert_run "a universal app is refused" 1 "not arm64 only" inspect "arm64 x86_64" 0 "$GOOD_SIGNATURE"
+assert_run "a signature that does not verify is refused" 1 "does not verify" inspect arm64 1 "$GOOD_SIGNATURE"
+assert_run "a Developer ID signature is refused (CI signed ad hoc)" 1 "not ad-hoc signed" \
+    inspect arm64 0 $'Identifier=ai.kyomi.desktop\nSignature size=9000'
+assert_run "an unexpected bundle identifier is refused" 1 "identifier is not ai.kyomi.desktop" \
+    inspect arm64 0 $'Identifier=com.example.other\nSignature=adhoc'
+
+# --- the config strip CI did (BSD sed -i '', so only where that sed exists) --------
+if [ "$(uname -s)" = Darwin ]; then
+    mkdir -p "$TMP/strip/.cargo" "$TMP/strip/crates/kyomi-ui"
+    printf 'keep1\n# BEGIN_LOCAL_DEV_LINKER\nlinker\n# END_LOCAL_DEV_LINKER\nkeep2\n# BEGIN_LOCAL_DEV_DEBUGINFO\ndbg\n# END_LOCAL_DEV_DEBUGINFO\nkeep3\n' > "$TMP/strip/.cargo/config.toml"
+    printf 'a = 1\ncargo_profile = "wasm-dev"\nb = 2\n' > "$TMP/strip/crates/kyomi-ui/Trunk.toml"
+    in_script strip_local_dev_config "$TMP/strip"
+    assert_value "the local-dev linker and debuginfo blocks are stripped" "keep1 keep2 keep3" \
+        "$(tr '\n' ' ' < "$TMP/strip/.cargo/config.toml" | sed 's/ $//')"
+    assert_value "the trunk cargo_profile line is stripped" "a = 1 b = 2" \
+        "$(tr '\n' ' ' < "$TMP/strip/crates/kyomi-ui/Trunk.toml" | sed 's/ $//')"
+fi
 
 # --- the real repository still carries every pin the script reads ---------------
 assert_value "real trunk pin is a version" "ok" \

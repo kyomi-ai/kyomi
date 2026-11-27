@@ -21,11 +21,14 @@
 #   scripts/release-macos-desktop.sh --dry-run <ref>    build and verify any git
 #                                                       ref; upload nothing
 #
-# <tag> is a release tag (vMAJOR.MINOR.PATCH, for example v2.7.17) whose GitHub release already exists
-# (release.yml creates it). Run from a logged-in Mac session with `gh`
+# <tag> is a release tag (vMAJOR.MINOR.PATCH, for example v2.7.17) whose
+# GitHub release already exists (release.yml creates it) and does not yet have
+# a Mac installer attached. Run from a logged-in Mac session with `gh`
 # authenticated for the repository. A release build takes about 45 minutes
-# plus the one-off compile of the pinned tauri-cli. Set CARGO_TARGET_DIR to
-# keep build products between runs; otherwise every run compiles from scratch.
+# plus the one-off compile of the pinned tauri-cli. Set CARGO_TARGET_DIR to an
+# absolute path to keep build products between runs; otherwise every run
+# compiles from scratch. If the final upload fails, the built dmg is copied to
+# the current directory so the upload can be retried without a rebuild.
 #
 # Exit codes: 0 success; 2 usage error; 1 any other failure. Nothing here
 # falls back: a missing tool, a version mismatch or a failed step stops the run.
@@ -33,6 +36,7 @@
 
 set -euo pipefail
 
+START_DIR="$PWD"
 TAG_PATTERN='^v[0-9]+\.[0-9]+\.[0-9]+$'
 
 die() {
@@ -70,6 +74,14 @@ require_tool() {
 require_apple_silicon_mac() {
     [ "$(uname -s)" = Darwin ] || die "this builds the macOS installer and must run on a Mac (this is $(uname -s))"
     [ "$(uname -m)" = arm64 ] || die "the installer is arm64 and must be built on an Apple-silicon Mac (this is $(uname -m))"
+}
+
+# origin_slug <remote-url> -> OWNER/REPO, for the https and ssh forms GitHub gives
+origin_slug() {
+    local slug
+    slug="$(printf '%s\n' "$1" | sed -nE 's#^(https://github\.com/|git@github\.com:|ssh://git@github\.com/)([^/]+/[^/]+)$#\2#p' | sed -E 's#\.git$##')"
+    [ -n "$slug" ] || die "origin is not a github.com remote: $1"
+    printf '%s\n' "$slug"
 }
 
 # Validates the argument and prints "<mode> <ref>" (mode: release or dry-run).
@@ -138,34 +150,51 @@ inspect_app() {
     binary="$app/Contents/MacOS/kyomi-desktop"
     [ -x "$binary" ] || die "$dmg does not contain Kyomi.app/Contents/MacOS/kyomi-desktop"
 
-    lipo -info "$binary"
-    archs="$(lipo -archs "$binary")"
+    # Every command ends in `|| die`: this runs inside a subshell on the left of
+    # `||`, where bash ignores `set -e`, so a bare failing command would be missed.
+    lipo -info "$binary" || die "lipo cannot read $binary"
+    archs="$(lipo -archs "$binary")" || die "lipo cannot read the architectures of $binary"
     [ "$archs" = arm64 ] || die "the app binary is '$archs', not arm64 only"
 
-    (cd "$app" && find . -type f | LC_ALL=C sort)
-    plutil -p "$app/Contents/Info.plist"
-    codesign --verify --deep --strict "$app"
-    signature="$(codesign -dvv "$app" 2>&1)"
+    (cd "$app" && find . -type f | LC_ALL=C sort) || die "cannot list the files in $app"
+    plutil -p "$app/Contents/Info.plist" || die "cannot read $app/Contents/Info.plist"
+    codesign --verify --deep --strict "$app" || die "the code signature of $app does not verify"
+    signature="$(codesign -dvv "$app" 2>&1)" || die "codesign cannot describe $app"
     printf '%s\n' "$signature"
     printf '%s\n' "$signature" | grep -q '^Signature=adhoc$' \
         || die "the app is not ad-hoc signed (CI signed it with identity \"-\")"
     printf '%s\n' "$signature" | grep -q '^Identifier=ai.kyomi.desktop$' \
         || die "the app's identifier is not ai.kyomi.desktop"
-    du -sk "$dmg" "$app" "$binary"
+    du -sk "$dmg" "$app" "$binary" || die "cannot size $app"
 }
 
+# The mountpoint lives under $WORK and MOUNT is detached by cleanup, so an
+# interrupted or failed run never leaves the dmg attached.
 verify_dmg() {
-    local dmg="$1" mount status=0
-    mount="$(mktemp -d -t kyomi-dmg)"
-    hdiutil attach -readonly -nobrowse -mountpoint "$mount" "$dmg" > /dev/null
-    (inspect_app "$mount/Kyomi.app" "$dmg") || status=$?
-    hdiutil detach "$mount" > /dev/null
-    rmdir "$mount"
+    local dmg="$1" status=0
+    MOUNT="$WORK/dmg-mount"
+    mkdir -p "$MOUNT"
+    hdiutil attach -readonly -nobrowse -mountpoint "$MOUNT" "$dmg" > /dev/null \
+        || die "cannot mount $dmg"
+    (inspect_app "$MOUNT/Kyomi.app" "$dmg") || status=$?
+    hdiutil detach "$MOUNT" > /dev/null || die "cannot detach $MOUNT"
+    MOUNT=""
     [ "$status" -eq 0 ] || die "verification of $dmg failed"
 }
 
+# Runs on every exit, including failed runs. Each step is best effort because
+# cleanup must not hide the error that ended the run; what it cannot remove is
+# named, never silently left.
+MOUNT=""
 cleanup() {
-    git -C "$REPO" worktree remove --force "$SRC" > /dev/null 2>&1 || true
+    cd "$START_DIR"
+    if [ -n "$MOUNT" ]; then
+        hdiutil detach -force "$MOUNT" > /dev/null 2>&1 \
+            || printf 'release-macos-desktop: could not detach %s\n' "$MOUNT" >&2
+    fi
+    git -C "$REPO" worktree remove --force "$SRC" > /dev/null 2>&1 \
+        || printf 'release-macos-desktop: could not remove worktree %s (git worktree prune)\n' "$SRC" >&2
+    git -C "$REPO" worktree prune
     rm -rf "$WORK"
 }
 
@@ -188,13 +217,21 @@ main() {
         gh auth status > /dev/null 2>&1 || die "gh is not authenticated (gh auth login)"
     fi
 
-    local commit tools
+    local commit tools existing
     REPO="$(git rev-parse --show-toplevel)" || die "run this from inside a kyomi checkout"
     if [ "$mode" = release ]; then
+        # gh reads the repository from GH_REPO; take it from origin, where the
+        # tag is fetched from, not from whichever remote gh would guess.
+        GH_REPO="$(origin_slug "$(git -C "$REPO" remote get-url origin)")"
+        export GH_REPO
         git -C "$REPO" fetch --quiet origin "refs/tags/$ref:refs/tags/$ref" \
-            || die "tag $ref is not on origin"
-        gh release view "$ref" > /dev/null 2>&1 \
-            || die "no GitHub release exists for $ref; push the tag and let release.yml create it first"
+            || die "could not fetch tag $ref from origin (git's message is above)"
+        # Check the release before the 45-minute build, not after it.
+        gh release view "$ref" > /dev/null \
+            || die "no GitHub release exists for $ref in $GH_REPO; push the tag and let release.yml create it first"
+        existing="$(gh release view "$ref" --json assets --jq '[.assets[].name | select(endswith("_aarch64.dmg"))] | join(" ")')"
+        [ -z "$existing" ] \
+            || die "release $ref already has a Mac installer ($existing); delete that asset first if it must be replaced"
         commit="$(git -C "$REPO" rev-parse --verify "refs/tags/$ref^{commit}")"
     else
         commit="$(git -C "$REPO" rev-parse --verify "$ref^{commit}")" || die "$ref is not a git ref"
@@ -205,24 +242,36 @@ main() {
     tools="$WORK/tools"
     trap cleanup EXIT
 
+    # Interrupting the run still removes the worktree: turn the signals into an
+    # exit so the EXIT trap runs.
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+
     echo "==> clean checkout of $ref ($commit)"
     git -C "$REPO" worktree add --quiet --detach "$SRC" "$commit"
 
-    install_pinned_tools "$tools" "$SRC"
-    strip_local_dev_config "$SRC"
-
-    # The build environment CI had: pinned toolchain from rust-toolchain.toml
-    # (so no inherited override), Homebrew llvm first on PATH, and CI=true,
-    # which makes Tauri's dmg bundler skip the Finder-scripted window styling
-    # exactly as it did on the runner.
-    unset RUSTUP_TOOLCHAIN RUSTC_WRAPPER
+    # The build environment CI had: the toolchain pinned by rust-toolchain.toml
+    # (so nothing inherited from this shell picks another compiler, wrapper or
+    # flags), Homebrew llvm first on PATH, and CI=true, which makes Tauri's dmg
+    # bundler skip the Finder-scripted window styling exactly as it did on the
+    # runner. Everything below runs from inside the checkout.
+    unset RUSTUP_TOOLCHAIN RUSTC_WRAPPER RUSTC_WORKSPACE_WRAPPER CARGO_BUILD_RUSTC_WRAPPER \
+        RUSTFLAGS CARGO_ENCODED_RUSTFLAGS CARGO_BUILD_TARGET
     export PATH="$tools/bin:$llvm/bin:$PATH"
     export CC_wasm32_unknown_unknown="$llvm/bin/clang"
     export CARGO_TERM_COLOR=always
     export CI=true
+    cd "$SRC"
 
+    # Cheap and first: a stale lock, or a local [patch.crates-io] override in
+    # ~/.cargo/config.toml (which changes resolution), stops the run before any
+    # download or compile.
     echo "==> verify Cargo.lock is current"
-    (cd "$SRC" && cargo metadata --locked --format-version 1 > /dev/null)
+    cargo metadata --locked --format-version 1 > /dev/null \
+        || die "Cargo.lock is stale or a local [patch.crates-io] override is active; a release must build from the lock on the registry"
+
+    install_pinned_tools "$tools" "$SRC"
+    strip_local_dev_config "$SRC"
 
     echo "==> trunk build --release (kyomi-ui)"
     (cd "$SRC/crates/kyomi-ui" && trunk build --release)
@@ -258,7 +307,12 @@ main() {
     fi
 
     echo "==> upload $(basename "$dmg") to release $ref"
-    gh release upload "$ref" "$dmg"
+    if ! gh release upload "$ref" "$dmg"; then
+        # The work directory is deleted on exit, and it holds the only copy of a
+        # 45-minute build: keep the dmg so the upload can be retried by hand.
+        cp "$dmg" "$START_DIR/" || die "upload failed and the dmg could not be saved from $dmg"
+        die "upload to $ref failed; the built dmg is saved as $START_DIR/$(basename "$dmg"); retry with: gh release upload $ref $START_DIR/$(basename "$dmg")"
+    fi
     echo "==> done: $(basename "$dmg") attached to $ref"
 }
 

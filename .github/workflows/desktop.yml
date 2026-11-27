@@ -4,10 +4,12 @@
 # Builds Tauri desktop installers for linux and windows.
 #
 # MACOS IS NOT BUILT HERE (KYO-991). The macOS leg ran past its 300-minute
-# timeout in the "Bundle with cargo-tauri" step (run 45502116842: cancelled at
-# 5h00m; run 36956920730: 3h26m), and moving it to an Intel runner did not fix
-# it (run 45946651557: bundle 3h13m, job 3h53m). The macOS installer is built
-# outside GitHub Actions and attached to the release by hand.
+# timeout in the "Bundle with cargo-tauri" step. On the arm64 runner run
+# 45502116842 was cancelled at 5h00m inside that step and run 36956920730 spent
+# 3h26m in it; moving the leg to an Intel runner did not fix it (run
+# 45946651557: bundle step 3h13m, job 3h53m). The macOS installer is built
+# outside GitHub Actions and attached to the release by hand with
+# scripts/release-macos-desktop.sh (see kyomi-private docs/RELEASING.md).
 #
 # STATUS: active. The desktop app still ships; installers are built on demand
 # when a desktop release is cut, not on every version tag.
@@ -69,7 +71,6 @@ jobs:
             tailwind_binary: tailwindcss-linux-x64
             binaryen_arch: x86_64-linux
             bundles: deb appimage
-            sed_inplace: "sed -i"
             timeout: 120
           # Observed execution max: 99.7m (last ~15 runs). 180m leaves
           # ~80m of headroom, which also covers runner-acquisition queue
@@ -120,11 +121,11 @@ jobs:
             libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
 
       - name: Strip local-dev linker and trunk profile (Linux)
-        if: matrix.os != 'windows'
+        if: matrix.os == 'linux'
         run: |
-          ${{ matrix.sed_inplace }} '/# BEGIN_LOCAL_DEV_LINKER/,/# END_LOCAL_DEV_LINKER/d' .cargo/config.toml
-          ${{ matrix.sed_inplace }} '/# BEGIN_LOCAL_DEV_DEBUGINFO/,/# END_LOCAL_DEV_DEBUGINFO/d' .cargo/config.toml
-          ${{ matrix.sed_inplace }} '/cargo_profile/d' crates/kyomi-ui/Trunk.toml
+          sed -i '/# BEGIN_LOCAL_DEV_LINKER/,/# END_LOCAL_DEV_LINKER/d' .cargo/config.toml
+          sed -i '/# BEGIN_LOCAL_DEV_DEBUGINFO/,/# END_LOCAL_DEV_DEBUGINFO/d' .cargo/config.toml
+          sed -i '/cargo_profile/d' crates/kyomi-ui/Trunk.toml
 
       - name: Strip local-dev linker and trunk profile (Windows)
         if: matrix.os == 'windows'
@@ -139,23 +140,16 @@ jobs:
           target: ${{ matrix.trunk_arch }}-${{ matrix.trunk_os_suffix }}
 
       - name: Install wasm-bindgen-cli + tailwindcss + wasm-opt (Linux)
-        if: matrix.os != 'windows'
+        if: matrix.os == 'linux'
         run: |
           set -euo pipefail
-          if [ "${{ matrix.os }}" = "linux" ]; then
-            SUDO=sudo
-          else
-            SUDO=""
-          fi
-          $SUDO curl -fsSL "https://github.com/wasm-bindgen/wasm-bindgen/releases/download/${WASM_BINDGEN_VERSION}/wasm-bindgen-${WASM_BINDGEN_VERSION}-${{ matrix.wasm_bindgen_arch }}.tar.gz" \
-            | $SUDO tar -xz --strip-components=1 -C /usr/local/bin \
+          sudo curl -fsSL "https://github.com/wasm-bindgen/wasm-bindgen/releases/download/${WASM_BINDGEN_VERSION}/wasm-bindgen-${WASM_BINDGEN_VERSION}-${{ matrix.wasm_bindgen_arch }}.tar.gz" \
+            | sudo tar -xz --strip-components=1 -C /usr/local/bin \
                 "wasm-bindgen-${WASM_BINDGEN_VERSION}-${{ matrix.wasm_bindgen_arch }}/wasm-bindgen"
-          $SUDO curl -fsSL -o /usr/local/bin/tailwindcss \
+          sudo curl -fsSL -o /usr/local/bin/tailwindcss \
             "https://github.com/tailwindlabs/tailwindcss/releases/download/${TAILWIND_VERSION}/${{ matrix.tailwind_binary }}"
-          $SUDO chmod +x /usr/local/bin/tailwindcss
-          if [ "${{ matrix.os }}" = "linux" ]; then
-            sudo apt-get install -y --no-install-recommends brotli
-          fi
+          sudo chmod +x /usr/local/bin/tailwindcss
+          sudo apt-get install -y --no-install-recommends brotli
           curl -fsSL "https://github.com/WebAssembly/binaryen/releases/download/${BINARYEN_VERSION}/binaryen-${BINARYEN_VERSION}-${{ matrix.binaryen_arch }}.tar.gz" \
             | tar -xz -C /tmp
           sudo mv "/tmp/binaryen-${BINARYEN_VERSION}/bin/wasm-opt" /usr/local/bin/wasm-opt
@@ -184,7 +178,7 @@ jobs:
         run: trunk build --release
 
       - name: Optimize WASM with wasm-opt (Linux)
-        if: matrix.os != 'windows'
+        if: matrix.os == 'linux'
         run: |
           for f in crates/kyomi-ui/dist/*_bg.wasm; do
             wasm-opt --enable-bulk-memory-opt --enable-nontrapping-float-to-int -O -o "${f}.opt" "$f"
