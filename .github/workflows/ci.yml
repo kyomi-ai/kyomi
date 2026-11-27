@@ -762,6 +762,7 @@ jobs:
             scripts/lint/check-disposal-safety-test.sh
             scripts/lint/check-client-eval-test.sh
             scripts/lint/check-trunk-pin-test.sh
+            scripts/release-macos-desktop-test.sh
             scripts/repro-headless-subagent-survival-test.sh
             scripts/check-agent-run-result-test.sh
             scripts/pre-commit-hook-test.sh
