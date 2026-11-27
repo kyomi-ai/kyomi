@@ -183,6 +183,33 @@ else
     fail "cleanup removes the work directory even when the start directory is gone (rc $rc)" "$TMP/err"
 fi
 
+# On a Mac, cleanup must detach a dmg that is still mounted (an interrupted
+# verification) before it deletes the work directory.
+if [ "$(uname -s)" = Darwin ]; then
+    mkdir -p "$TMP/mnt/work/src" "$TMP/mnt/payload"
+    echo x > "$TMP/mnt/payload/file"
+    hdiutil create -quiet -srcfolder "$TMP/mnt/payload" -volname KyomiTest "$TMP/mnt/test.dmg"
+    physical="$(cd "$TMP/mnt/work" && pwd -P)"
+    mkdir -p "$physical/dmg-mount"
+    hdiutil attach -readonly -nobrowse -mountpoint "$physical/dmg-mount" "$TMP/mnt/test.dmg" > /dev/null
+    set +e
+    (
+        set -e
+        source "$SCRIPT"
+        START_DIR="$TMP" REPO="$TMP" WORK="$physical" SRC="$physical/src"
+        cleanup
+    ) > /dev/null 2> "$TMP/err"
+    rc=$?
+    set -e
+    checks=$((checks + 1))
+    if [ "$rc" -eq 0 ] && ! mount | grep -qF " on $physical/dmg-mount " && [ ! -e "$physical" ]; then
+        pass "cleanup detaches a still-mounted dmg and removes the work directory"
+    else
+        hdiutil detach -force "$physical/dmg-mount" > /dev/null 2>&1 || true
+        fail "cleanup detaches a still-mounted dmg and removes the work directory (rc $rc)" "$TMP/err"
+    fi
+fi
+
 # A TERM sent to the script while a long step runs must stop the step's whole
 # process group promptly, not after the step ends.
 # The step starts a grandchild and records its pid, so the test can check that
