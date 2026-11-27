@@ -1484,7 +1484,7 @@ mod splice_tests {
         // Take a sequence, split it, splice each item back at its own index,
         // and verify every intermediate parses to the same structure as the
         // original. We re-parse rather than compare strings because YAML
-        // re-serialization may reorder keys or normalize whitespace.
+        // re-serialization may normalize whitespace and indentation.
         let block = "- type: bar\n  title: A\n  version: 1\n- type: line\n  title: B\n  version: 1\n- type: pie\n  title: C\n  version: 1\n";
         let items = split_chartml_block(block);
         assert_eq!(items.len(), 3);
