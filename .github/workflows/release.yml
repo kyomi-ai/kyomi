@@ -26,7 +26,6 @@ permissions:
 
 env:
   GHCR_REGISTRY: ghcr.io/kyomi-ai
-  TRUNK_VERSION: 0.21.14
   WASM_BINDGEN_VERSION: 0.2.121
   TAILWIND_VERSION: v4.2.2
   BINARYEN_VERSION: version_128
@@ -108,11 +107,14 @@ jobs:
       - name: Install brotli (Trunk post_build hook dependency)
         run: sudo apt-get install -y --no-install-recommends brotli
 
-      - name: Install trunk + wasm-bindgen-cli + tailwindcss + wasm-opt
+      - name: Install pinned Trunk
+        uses: ./.github/actions/setup-trunk
+        with:
+          target: ${{ matrix.trunk_arch }}-unknown-linux-gnu
+
+      - name: Install wasm-bindgen-cli + tailwindcss + wasm-opt
         run: |
           set -euo pipefail
-          sudo curl -fsSL "https://github.com/trunk-rs/trunk/releases/download/v${TRUNK_VERSION}/trunk-${{ matrix.trunk_arch }}-unknown-linux-gnu.tar.gz" \
-            | sudo tar -xz -C /usr/local/bin trunk
           sudo curl -fsSL "https://github.com/wasm-bindgen/wasm-bindgen/releases/download/${WASM_BINDGEN_VERSION}/wasm-bindgen-${WASM_BINDGEN_VERSION}-${{ matrix.wasm_bindgen_arch }}.tar.gz" \
             | sudo tar -xz --strip-components=1 -C /usr/local/bin \
                 "wasm-bindgen-${WASM_BINDGEN_VERSION}-${{ matrix.wasm_bindgen_arch }}/wasm-bindgen"
@@ -122,6 +124,14 @@ jobs:
           curl -fsSL "https://github.com/WebAssembly/binaryen/releases/download/${BINARYEN_VERSION}/binaryen-${BINARYEN_VERSION}-${{ matrix.binaryen_arch }}.tar.gz" \
             | tar -xz -C /tmp
           sudo mv "/tmp/binaryen-${BINARYEN_VERSION}/bin/wasm-opt" /usr/local/bin/wasm-opt
+
+      # Trunk resolves the workspace with `cargo metadata` before it builds, and
+      # that call rewrites a stale Cargo.lock, so a release built from a lock
+      # nobody reviewed would still pass the `--locked` release build below. Fail
+      # on a stale root lock before either WASM app is built from it; the chart
+      # app's build.sh makes the same check for its own lock.
+      - name: Verify Cargo.lock is current
+        run: cargo metadata --locked --format-version 1 > /dev/null
 
       - name: Build Leptos WASM frontend (trunk, wasm-opt disabled)
         working-directory: crates/kyomi-ui
@@ -272,11 +282,14 @@ jobs:
       - name: Install brotli (Trunk post_build hook dependency)
         run: sudo apt-get install -y --no-install-recommends brotli
 
-      - name: Install trunk + wasm-bindgen-cli + tailwindcss + wasm-opt
+      - name: Install pinned Trunk
+        uses: ./.github/actions/setup-trunk
+        with:
+          target: ${{ matrix.trunk_arch }}-${{ matrix.trunk_os_suffix }}
+
+      - name: Install wasm-bindgen-cli + tailwindcss + wasm-opt
         run: |
           set -euo pipefail
-          sudo curl -fsSL "https://github.com/trunk-rs/trunk/releases/download/v${TRUNK_VERSION}/trunk-${{ matrix.trunk_arch }}-${{ matrix.trunk_os_suffix }}.tar.gz" \
-            | sudo tar -xz -C /usr/local/bin trunk
           sudo curl -fsSL "https://github.com/wasm-bindgen/wasm-bindgen/releases/download/${WASM_BINDGEN_VERSION}/wasm-bindgen-${WASM_BINDGEN_VERSION}-${{ matrix.wasm_bindgen_arch }}.tar.gz" \
             | sudo tar -xz --strip-components=1 -C /usr/local/bin \
                 "wasm-bindgen-${WASM_BINDGEN_VERSION}-${{ matrix.wasm_bindgen_arch }}/wasm-bindgen"
@@ -286,6 +299,14 @@ jobs:
           curl -fsSL "https://github.com/WebAssembly/binaryen/releases/download/${BINARYEN_VERSION}/binaryen-${BINARYEN_VERSION}-${{ matrix.binaryen_arch }}.tar.gz" \
             | tar -xz -C /tmp
           sudo mv "/tmp/binaryen-${BINARYEN_VERSION}/bin/wasm-opt" /usr/local/bin/wasm-opt
+
+      # Trunk resolves the workspace with `cargo metadata` before it builds, and
+      # that call rewrites a stale Cargo.lock, so a release built from a lock
+      # nobody reviewed would still pass the `--locked` release build below. Fail
+      # on a stale root lock before either WASM app is built from it; the chart
+      # app's build.sh makes the same check for its own lock.
+      - name: Verify Cargo.lock is current
+        run: cargo metadata --locked --format-version 1 > /dev/null
 
       - name: Build Leptos WASM frontend (trunk, wasm-opt disabled)
         working-directory: crates/kyomi-ui

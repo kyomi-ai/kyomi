@@ -4,11 +4,6 @@
 
 use leptos::prelude::*;
 use chartml_core::ChartML;
-use chartml_chart_cartesian::CartesianRenderer;
-use chartml_chart_pie::PieRenderer;
-use chartml_chart_scatter::ScatterRenderer;
-use chartml_chart_metric::MetricRenderer;
-use chartml_chart_table::TableRenderer;
 use chartml_leptos::{ChartMLChart, ChartMLRef};
 
 use leptos::prelude::Callback;
@@ -76,14 +71,7 @@ impl AppState {
 /// `cargo test` builds this crate for the host, where the `Arc` arm applies.
 fn setup_chartml(is_dark: bool, palette: Option<&[String]>) -> ChartMLRef {
     let mut c = ChartML::new();
-    c.register_renderer("bar", CartesianRenderer::new());
-    c.register_renderer("line", CartesianRenderer::new());
-    c.register_renderer("area", CartesianRenderer::new());
-    c.register_renderer("pie", PieRenderer::new());
-    c.register_renderer("doughnut", PieRenderer::new());
-    c.register_renderer("scatter", ScatterRenderer::new());
-    c.register_renderer("metric", MetricRenderer::new());
-    c.register_renderer("table", TableRenderer::new());
+    kyomi_chart_theme::register_kyomi_renderers(&mut c);
     let colors = palette
         .map(|p| p.to_vec())
         .unwrap_or_else(|| kyomi_chart_theme::kyomi_palette("kyomi", is_dark));
@@ -299,5 +287,58 @@ pub fn App() -> impl IntoView {
                 }}
             }
         })}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use kyomi_chart_theme::KYOMI_CHART_TYPES;
+    use kyomi_ui_components::dashboard::chart_header_bar::CHART_TYPES;
+
+    /// The chart app draws exactly the chart types the main app does, because
+    /// both register their renderers through `register_kyomi_renderers`. Before
+    /// KYO-1001 each kept its own list and the chart app had no `donut`.
+    #[test]
+    fn the_chart_app_registers_the_same_chart_types_as_the_main_app() {
+        let mut registered = setup_chartml(false, None).registry().renderer_types();
+        registered.sort();
+
+        assert_eq!(registered, KYOMI_CHART_TYPES);
+    }
+
+    /// Every type the chart app can be asked to draw must have a renderer
+    /// registered in its ChartML setup.
+    ///
+    /// Two lists decide what the app can be asked to draw: the shared type
+    /// selector's `CHART_TYPES` (what the user can pick) and the app's own
+    /// `SWITCHABLE_TYPES` (whether the selector is shown for the current type).
+    /// Both a spec sent by the chart tool and one reached through the selector
+    /// render through the registry `setup_chartml` builds, so a type offered by
+    /// either list but not registered fails with chartml-core's
+    /// `UnknownChartType` — how "table" (KYO-987) shipped broken in the MCP app
+    /// while working in Kyomi's own dashboards. This asks the real registry
+    /// rather than reading source text, so it holds however the renderers are
+    /// registered (`kyomi_chart_theme::register_kyomi_renderers`, shared with the
+    /// main app, since KYO-1001).
+    #[test]
+    fn every_chart_type_the_app_offers_has_a_registered_renderer() {
+        let chartml = setup_chartml(false, None);
+
+        let offered = CHART_TYPES
+            .iter()
+            .map(|(chart_type, _label)| *chart_type)
+            .chain(SWITCHABLE_TYPES.iter().copied());
+        let mut checked = 0;
+        for chart_type in offered {
+            assert!(
+                chartml.registry().has_renderer(chart_type),
+                "the chart app can be asked for {chart_type:?} but setup_chartml registers no \
+                 renderer for it, so that type fails with chartml-core's UnknownChartType \
+                 instead of rendering"
+            );
+            checked += 1;
+        }
+        assert!(checked > SWITCHABLE_TYPES.len(), "CHART_TYPES was empty");
     }
 }

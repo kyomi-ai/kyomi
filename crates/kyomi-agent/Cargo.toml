@@ -46,11 +46,6 @@ typst = "0.14"
 # ChartML rendering
 chartml-core = { workspace = true }
 chartml-render = { workspace = true }
-chartml-chart-cartesian = { workspace = true }
-chartml-chart-pie = { workspace = true }
-chartml-chart-scatter = { workspace = true }
-chartml-chart-metric = { workspace = true }
-chartml-chart-table = { workspace = true }
 chartml-datafusion = { workspace = true }
 kyomi-chart-theme = { workspace = true }
 

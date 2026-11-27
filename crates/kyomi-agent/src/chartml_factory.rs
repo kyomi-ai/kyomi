@@ -6,11 +6,6 @@
 use chartml_core::theme::Theme;
 use kyomi_chart_theme::kyomi_theme;
 use chartml_core::ChartML;
-use chartml_chart_cartesian::CartesianRenderer;
-use chartml_chart_pie::PieRenderer;
-use chartml_chart_scatter::ScatterRenderer;
-use chartml_chart_metric::MetricRenderer;
-use chartml_chart_table::TableRenderer;
 use chartml_datafusion::DataFusionTransform;
 use std::sync::Once;
 
@@ -44,7 +39,7 @@ fn ensure_fonts_registered() {
 /// Create a fully configured ChartML instance with all chart renderers,
 /// the DataFusion transform pipeline, and the Kyomi editorial theme
 /// applied. Every server-side chart render path (PDF export, email
-/// snapshots, MCP chart app, watches alerts) should use this factory so
+/// snapshots, watches alerts) should use this factory so
 /// chart chrome matches the dashboard viewer's browser rendering.
 ///
 /// PDF snapshots are always rendered in light mode — print media has no
@@ -63,15 +58,8 @@ pub fn create_chartml() -> ChartML {
 pub fn create_chartml_with_theme(theme: Theme) -> ChartML {
     let mut chartml = ChartML::new();
 
-    // Register all chart type renderers
-    chartml.register_renderer("bar", CartesianRenderer::new());
-    chartml.register_renderer("line", CartesianRenderer::new());
-    chartml.register_renderer("area", CartesianRenderer::new());
-    chartml.register_renderer("pie", PieRenderer::new());
-    chartml.register_renderer("doughnut", PieRenderer::new());
-    chartml.register_renderer("scatter", ScatterRenderer::new());
-    chartml.register_renderer("metric", MetricRenderer::new());
-    chartml.register_renderer("table", TableRenderer::new());
+    // Register all chart type renderers (shared with the browser apps)
+    kyomi_chart_theme::register_kyomi_renderers(&mut chartml);
 
     // Register DataFusion-based transform middleware (sql, aggregate, forecast)
     chartml.register_transform(DataFusionTransform);
@@ -246,3 +234,20 @@ fn inject_palette(yaml: &str, palette: &[String]) -> String {
 #[cfg(test)]
 #[path = "chartml_html_tests.rs"]
 mod html_safety_tests;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The server-side render paths draw exactly the chart types the browser
+    /// apps do, because every one of them registers through
+    /// `register_kyomi_renderers`. Before KYO-1001 this list lacked `donut`, so
+    /// a donut chart rendered in the browser but not in a PDF or email.
+    #[test]
+    fn create_chartml_registers_every_kyomi_chart_type() {
+        let mut registered = create_chartml().registry().renderer_types();
+        registered.sort();
+
+        assert_eq!(registered, kyomi_chart_theme::KYOMI_CHART_TYPES);
+    }
+}

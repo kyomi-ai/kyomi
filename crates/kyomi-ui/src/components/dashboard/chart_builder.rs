@@ -1856,14 +1856,7 @@ fn build_remote_chartml(
     let colors = kyomi_palette("kyomi", is_dark);
     let theme = kyomi_theme(is_dark);
     let mut chartml_inst = chartml_core::ChartML::new();
-    chartml_inst.register_renderer("bar", chartml_chart_cartesian::CartesianRenderer::new());
-    chartml_inst.register_renderer("line", chartml_chart_cartesian::CartesianRenderer::new());
-    chartml_inst.register_renderer("area", chartml_chart_cartesian::CartesianRenderer::new());
-    chartml_inst.register_renderer("pie", chartml_chart_pie::PieRenderer::new());
-    chartml_inst.register_renderer("doughnut", chartml_chart_pie::PieRenderer::new());
-    chartml_inst.register_renderer("scatter", chartml_chart_scatter::ScatterRenderer::new());
-    chartml_inst.register_renderer("metric", chartml_chart_metric::MetricRenderer::new());
-    chartml_inst.register_renderer("table", chartml_chart_table::TableRenderer::new());
+    kyomi_chart_theme::register_kyomi_renderers(&mut chartml_inst);
     chartml_inst.register_transform(chartml_datafusion::DataFusionTransform);
     chartml_inst.set_default_palette(colors);
     chartml_inst.set_theme(theme);

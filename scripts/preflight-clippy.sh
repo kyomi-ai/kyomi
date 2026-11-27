@@ -5,9 +5,11 @@
 #
 # WHY THIS EXISTS
 #
-# .github/workflows/ci.yml's `clippy` job runs THREE separate `cargo clippy`
+# .github/workflows/ci.yml's `clippy` job runs FOUR separate `cargo clippy`
 # invocations ("cargo clippy (workspace, excluding desktop)", "cargo clippy
-# (all targets, incl. tests)", and "cargo clippy (kyomi-ui, wasm32)"). The
+# (all targets, incl. tests)", "cargo clippy (kyomi-ui, wasm32)" and, since
+# KYO-1001, "cargo clippy (MCP chart app)" — the chart app is its own Cargo
+# workspace, so the first three never lint it). The
 # /backlog-fast and /backlog skills document a pre-PR gate that only
 # approximates the FIRST of the three, so every lint that lives inside a
 # `#[cfg(test)]` module — exactly what the second pass alone catches — is
@@ -17,11 +19,11 @@
 # clippy::cloned_ref_to_slice_refs errors the documented gate had passed
 # clean over.
 #
-# This script is the single, tested, executable place these three flag
+# This script is the single, tested, executable place these four flag
 # strings live, so the skill documents (and any other caller) invoke it
 # instead of retyping the flags — the same consolidation KYO-422 applied to
 # scripts/check-ticket-in-flight.sh. Self-test: scripts/preflight-clippy-test.sh,
-# whose most important assertion parses the three `run: cargo clippy` lines
+# whose most important assertion parses the four `run: cargo clippy` lines
 # back out of ci.yml itself and diffs them against what this script actually
 # runs, so the two cannot silently drift apart again without a test noticing.
 #
@@ -64,8 +66,16 @@
 # it runs whenever kyomi-ui is among the narrowed crates, or whenever -p is
 # omitted entirely (the full, unnarrowed run). When narrowing excludes
 # kyomi-ui, pass 3 is skipped — and the summary at the end says so by name,
-# rather than quietly reporting a clean run when only two of three passes
-# actually executed.
+# rather than quietly reporting a clean run when only some passes actually
+# executed.
+#
+# Pass 4 lints the MCP chart app (apps/mcp-chart-app-wasm), which is not a
+# member of the root workspace and so cannot be named by a real `-p`. The
+# package name `mcp-chart-app-wasm` is accepted by -p as the way to ask for
+# it: it runs pass 4 and is not passed on to passes 1 and 2. `-p
+# mcp-chart-app-wasm` alone therefore runs pass 4 only, which is the quick
+# check for a change confined to the chart app. Like pass 3, pass 4 runs in
+# the unnarrowed run and is skipped, by name, when -p narrowing leaves it out.
 #
 # WHY NARROWED SCOPE DIVERGES FROM CI — WORKSPACE FEATURE UNIFICATION
 # (KYO-723 — DO NOT "SIMPLIFY" THIS BACK TO A BARE -p RUN)
@@ -200,7 +210,7 @@ usage() {
     cat >&2 <<EOF
 Usage: $SCRIPT_NAME [-p <crate>]... [--help]
 
-Runs the same three \`cargo clippy\` invocations as ci.yml's \`clippy\` job, in
+Runs the same four \`cargo clippy\` invocations as ci.yml's \`clippy\` job, in
 the same order, with the same flags.
 
   -p <crate>   Narrow passes 1 and 2 to this crate instead of the full
@@ -215,6 +225,9 @@ the same order, with the same flags.
                (kyomi-ui / wasm32) still runs when kyomi-ui is among the
                given crates, or when -p is omitted entirely (the full run);
                otherwise it is skipped, and the summary says so explicitly.
+               The name mcp-chart-app-wasm selects pass 4 (the MCP chart app,
+               its own Cargo workspace) and is not passed to passes 1 and 2;
+               without it, pass 4 is skipped when -p is given.
   --help       Show this help and exit 0.
 
 Exit codes:
@@ -305,6 +318,14 @@ derive_unified_features() {
     echo "${sorted_features[*]}"
 }
 
+# The MCP chart app is its own Cargo workspace (KYO-1001), so it is linted by
+# its own pass rather than through a root-workspace `-p`.
+CHART_APP_PACKAGE="mcp-chart-app-wasm"
+CHART_APP_MANIFEST="apps/mcp-chart-app-wasm/Cargo.toml"
+CHART_APP_REQUESTED=0
+# Whether -p was given at all, whatever it named.
+NARROWED=0
+
 declare -a NARROW_CRATES=()
 
 while [ "$#" -gt 0 ]; do
@@ -314,7 +335,12 @@ while [ "$#" -gt 0 ]; do
                 echo "ERROR: -p requires a value" >&2
                 exit 2
             fi
-            NARROW_CRATES+=("$2")
+            NARROWED=1
+            if [ "$2" = "$CHART_APP_PACKAGE" ]; then
+                CHART_APP_REQUESTED=1
+            else
+                NARROW_CRATES+=("$2")
+            fi
             shift 2
             ;;
         --help | -h)
@@ -362,9 +388,19 @@ if [ "${#NARROW_CRATES[@]}" -gt 0 ]; then
     fi
 fi
 
+# Which passes run. The unnarrowed run (no -p at all) runs all four; with -p,
+# passes 1 and 2 run only when a root-workspace crate was named, pass 3 only
+# when kyomi-ui was, and pass 4 only when the chart app was.
+RUN_PASS12=1
 RUN_PASS3=1
-if [ "${#NARROW_CRATES[@]}" -gt 0 ]; then
+RUN_PASS4=1
+if [ "$NARROWED" -eq 1 ]; then
+    RUN_PASS12=0
     RUN_PASS3=0
+    RUN_PASS4="$CHART_APP_REQUESTED"
+    if [ "${#NARROW_CRATES[@]}" -gt 0 ]; then
+        RUN_PASS12=1
+    fi
     for crate in "${NARROW_CRATES[@]}"; do
         if [ "$crate" = "kyomi-ui" ]; then
             RUN_PASS3=1
@@ -396,11 +432,15 @@ run_pass() {
     echo
 }
 
-run_pass "pass 1 (workspace, excluding desktop)" \
-    cargo clippy --locked "${SCOPE_ARGS[@]}" "${FEATURE_ARGS[@]}" -- -D warnings
+if [ "$RUN_PASS12" -eq 1 ]; then
+    run_pass "pass 1 (workspace, excluding desktop)" \
+        cargo clippy --locked "${SCOPE_ARGS[@]}" "${FEATURE_ARGS[@]}" -- -D warnings
 
-run_pass "pass 2 (all targets, incl. tests)" \
-    cargo clippy --locked "${SCOPE_ARGS[@]}" "${FEATURE_ARGS[@]}" --all-targets -- -D warnings -A clippy::unwrap_used
+    run_pass "pass 2 (all targets, incl. tests)" \
+        cargo clippy --locked "${SCOPE_ARGS[@]}" "${FEATURE_ARGS[@]}" --all-targets -- -D warnings -A clippy::unwrap_used
+else
+    SKIPPED_PASSES+=("passes 1 and 2 (workspace) — skipped: -p named only ${CHART_APP_PACKAGE}")
+fi
 
 if [ "$RUN_PASS3" -eq 1 ]; then
     wasm32_installed=0
@@ -422,6 +462,15 @@ if [ "$RUN_PASS3" -eq 1 ]; then
     fi
 else
     SKIPPED_PASSES+=("pass 3 (kyomi-ui, wasm32) — skipped: -p narrowing did not include kyomi-ui")
+fi
+
+# Pass 4: the MCP chart app, its own Cargo workspace (KYO-1001). It targets the
+# host, like the app's own `cargo test`, so no extra rustup target is needed.
+if [ "$RUN_PASS4" -eq 1 ]; then
+    run_pass "pass 4 (MCP chart app)" \
+        cargo clippy --locked --manifest-path "$CHART_APP_MANIFEST" --all-targets -- -D warnings
+else
+    SKIPPED_PASSES+=("pass 4 (MCP chart app) — skipped: -p narrowing did not include ${CHART_APP_PACKAGE}")
 fi
 
 echo "===================================================================="

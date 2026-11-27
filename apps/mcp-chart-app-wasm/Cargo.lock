@@ -1341,6 +1341,11 @@ checksum = "a4933f3f57a8e9d9da04db23fb153356ecaf00cbd14aee46279c33dc80925c37"
 name = "kyomi-chart-theme"
 version = "0.1.0"
 dependencies = [
+ "chartml-chart-cartesian",
+ "chartml-chart-metric",
+ "chartml-chart-pie",
+ "chartml-chart-scatter",
+ "chartml-chart-table",
  "chartml-core",
 ]
 
@@ -1606,11 +1611,6 @@ dependencies = [
 name = "mcp-chart-app-wasm"
 version = "0.1.0"
 dependencies = [
- "chartml-chart-cartesian",
- "chartml-chart-metric",
- "chartml-chart-pie",
- "chartml-chart-scatter",
- "chartml-chart-table",
  "chartml-core",
  "chartml-leptos",
  "console_error_panic_hook",

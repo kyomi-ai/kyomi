@@ -21,6 +21,10 @@
 
 use chartml_core::theme::{BarCornerRadius, GridStyle, TextTransform, Theme, ZeroLineSpec};
 
+mod renderers;
+
+pub use renderers::{register_kyomi_renderers, KYOMI_CHART_TYPES};
+
 /// Return the 12-color qualitative palette for the given palette name.
 ///
 /// `is_dark` only affects palettes that override individual slots for

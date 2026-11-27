@@ -23,7 +23,7 @@
 # itself; it ships preinstalled on GitHub's hosted ubuntu runners and was
 # already present on the machine this was written and verified on.
 #
-# Test 10 is the load-bearing one: it parses the three `run: cargo clippy`
+# Test 10 is the load-bearing one: it parses the four `run: cargo clippy`
 # lines back out of THIS repo's real .github/workflows/ci.yml (located by
 # grepping for that content, never by a hardcoded line number — see
 # docs/standards/comments-documentation/anchor-a-citation-to-a-symbol-not-a-line-number.md)
@@ -273,23 +273,25 @@ echo "Running preflight-clippy self-tests..."
 echo
 
 # The known-good literal argv this suite pins passes 1-9 against. Test 10
-# separately re-derives these three strings from ci.yml itself and diffs
+# separately re-derives these four strings from ci.yml itself and diffs
 # them against the same CARGO_LOG shape, so a hand-edited mistake here and a
 # real drift in ci.yml are two independently-caught failure modes.
 PASS1_UNNARROWED="cargo clippy --locked --workspace --exclude kyomi-desktop -- -D warnings"
 PASS2_UNNARROWED="cargo clippy --locked --workspace --exclude kyomi-desktop --all-targets -- -D warnings -A clippy::unwrap_used"
 PASS3_LINE="cargo clippy --locked -p kyomi-ui --target wasm32-unknown-unknown --features hydrate -- -D warnings"
+PASS4_LINE="cargo clippy --locked --manifest-path apps/mcp-chart-app-wasm/Cargo.toml --all-targets -- -D warnings"
 
-# ─── Test 1: unnarrowed run emits exactly three cargo clippy calls, in ──────
+# ─── Test 1: unnarrowed run emits exactly four cargo clippy calls, in ───────
 # CI's order.
-echo "-- Test 1: unnarrowed run, three invocations in CI's order"
+echo "-- Test 1: unnarrowed run, four invocations in CI's order"
 reset_stubs
 run_preflight
 assert_exit "clean run against a fully-stubbed toolchain" 0
-assert_line_count "exactly three cargo invocations" "$CARGO_LOG" 3
+assert_line_count "exactly four cargo invocations" "$CARGO_LOG" 4
 assert_eq "pass 1 argv" "$PASS1_UNNARROWED" "$(sed -n '1p' "$CARGO_LOG")"
 assert_eq "pass 2 argv" "$PASS2_UNNARROWED" "$(sed -n '2p' "$CARGO_LOG")"
 assert_eq "pass 3 argv" "$PASS3_LINE" "$(sed -n '3p' "$CARGO_LOG")"
+assert_eq "pass 4 argv (the MCP chart app, its own Cargo workspace)" "$PASS4_LINE" "$(sed -n '4p' "$CARGO_LOG")"
 echo
 
 # ─── Test 2: pass 1 has neither --all-targets nor the unwrap_used allow ────
@@ -379,14 +381,37 @@ assert_eq "pass 3 argv is unaffected by narrowing or derivation (CI hardcodes -p
     "$PASS3_LINE" "$(sed -n '4p' "$CARGO_LOG")"
 echo
 
+# ─── Test 6c: -p mcp-chart-app-wasm selects pass 4 and nothing else ─────────
+# The chart app is its own Cargo workspace, so it cannot be a root `-p`: the
+# name asks for its pass instead and is never handed to passes 1 and 2.
+echo "-- Test 6c: -p mcp-chart-app-wasm alone runs pass 4 only"
+reset_stubs
+run_preflight -p mcp-chart-app-wasm
+assert_exit "chart-app-only run" 0
+assert_line_count "one clippy invocation, no cargo metadata lookup" "$CARGO_LOG" 1
+assert_eq "pass 4 argv" "$PASS4_LINE" "$(sed -n '1p' "$CARGO_LOG")"
+assert_contains "summary names passes 1 and 2 as skipped" "passes 1 and 2"
+echo
+
+echo "-- Test 6d: -p kyomi-auth -p mcp-chart-app-wasm runs passes 1, 2 and 4"
+reset_stubs
+run_preflight -p kyomi-auth -p mcp-chart-app-wasm
+assert_exit "narrowed run plus the chart app" 0
+assert_line_count "cargo metadata lookup + passes 1, 2 and 4" "$CARGO_LOG" 4
+assert_eq "pass 1 never receives the chart app's package name" \
+    "cargo clippy --locked -p kyomi-auth -- -D warnings" \
+    "$(sed -n '2p' "$CARGO_LOG")"
+assert_eq "pass 4 argv" "$PASS4_LINE" "$(sed -n '4p' "$CARGO_LOG")"
+echo
+
 # ─── Test 7: a failing pass 1 does not prevent passes 2 and 3 from running ──
-echo "-- Test 7: pass 1 failing still lets passes 2 and 3 run; exit is non-zero"
+echo "-- Test 7: pass 1 failing still lets passes 2, 3 and 4 run; exit is non-zero"
 reset_stubs
 export CARGO_FAIL_LINE="$PASS1_UNNARROWED"
 run_preflight
 unset CARGO_FAIL_LINE
 assert_exit "overall run reports failure" 1
-assert_line_count "all three invocations still happened" "$CARGO_LOG" 3
+assert_line_count "all four invocations still happened" "$CARGO_LOG" 4
 assert_contains "summary names pass 1 as the failure" "pass 1"
 assert_contains "summary says lints were found" "LINTS FOUND"
 echo
@@ -397,7 +422,7 @@ reset_stubs
 printf 'x86_64-unknown-linux-gnu\n' >"$RUSTUP_TARGETS_FILE"
 run_preflight
 assert_exit "cannot claim success when a pass could not run" 3
-assert_line_count "passes 1 and 2 still ran; pass 3 was never invoked" "$CARGO_LOG" 2
+assert_line_count "passes 1, 2 and 4 still ran; pass 3 was never invoked" "$CARGO_LOG" 3
 assert_contains "names the fix" "rustup target add wasm32-unknown-unknown"
 reset_stubs
 echo
@@ -428,11 +453,11 @@ if [ ! -f "$CI_YML" ]; then
     FAIL=$((FAIL + 1))
 else
     mapfile -t CI_CLIPPY_LINES < <(grep -E '^[[:space:]]*run: cargo clippy' "$CI_YML" | sed -E 's/^[[:space:]]*run: //')
-    if [ "${#CI_CLIPPY_LINES[@]}" -eq 3 ]; then
-        printf "  \xe2\x9c\x93 %s\n" "found exactly three 'run: cargo clippy' lines in ci.yml"
+    if [ "${#CI_CLIPPY_LINES[@]}" -eq 4 ]; then
+        printf "  \xe2\x9c\x93 %s\n" "found exactly four 'run: cargo clippy' lines in ci.yml"
         PASS=$((PASS + 1))
     else
-        printf "  \xe2\x9c\x97 %s \xe2\x80\x94 expected 3, found %d\n" "found exactly three 'run: cargo clippy' lines in ci.yml" "${#CI_CLIPPY_LINES[@]}"
+        printf "  \xe2\x9c\x97 %s \xe2\x80\x94 expected 4, found %d\n" "found exactly four 'run: cargo clippy' lines in ci.yml" "${#CI_CLIPPY_LINES[@]}"
         FAIL=$((FAIL + 1))
     fi
 

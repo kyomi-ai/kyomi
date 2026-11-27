@@ -13,7 +13,8 @@
 #   4. schema-parity (fast — only compiles kyomi-core, not the workspace) —
 #      diffs the Postgres and SQLite migration chains' resulting schemas;
 #      needs its own postgres service (KYO-206)
-#   5. clippy (slow) — full workspace clippy + compilation check + unit
+#   5. clippy (slow) — full workspace clippy (and the MCP chart app's own
+#      clippy gate, KYO-1001) + compilation check + unit
 #      tests, integration tests, and doctests (apps/server/tests/ — needs
 #      the postgres service below; KYO-236), plus the MCP chart app's own
 #      native test suite (KYO-996)
@@ -132,6 +133,12 @@ jobs:
       # --------------------------------------------------------------------
       - name: Client eval lint (CSP has no unsafe-eval)
         run: ./scripts/lint/check-client-eval.sh
+
+      # One pinned Trunk everywhere (KYO-1001): every workflow installs it
+      # through .github/actions/setup-trunk, the only place the version is
+      # written. Pure bash, milliseconds.
+      - name: Trunk pin lint (one pinned Trunk in every workflow)
+        run: ./scripts/lint/check-trunk-pin.sh
 
       # --------------------------------------------------------------------
       # Real-world identifier lint (KYO-662).
@@ -425,14 +432,22 @@ jobs:
       - name: Add cargo bin to PATH
         run: echo "$CARGO_HOME/bin" >> $GITHUB_PATH
 
-      - name: Install trunk
-        uses: taiki-e/install-action@trunk
+      - name: Install pinned Trunk
+        uses: ./.github/actions/setup-trunk
 
       - name: Install tailwindcss
         run: |
           curl -sLO https://github.com/tailwindlabs/tailwindcss/releases/download/v4.2.2/tailwindcss-linux-x64
           chmod +x tailwindcss-linux-x64
           sudo mv tailwindcss-linux-x64 /usr/local/bin/tailwindcss
+
+      # Before the chart app build, not after it: apps/server/build.rs tracks
+      # .cargo/config.toml as a chart app input (the config's wasm32 rustflags
+      # shape the app), so stripping after the build would make the file newer
+      # than chart_app.html and the server build would build the app a second
+      # time.
+      - name: Strip local-dev mold linker config
+        run: sed -i '/# BEGIN_LOCAL_DEV_LINKER/,/# END_LOCAL_DEV_LINKER/d' .cargo/config.toml
 
       - name: Build MCP chart app WASM (required by kyomi-server include_str!)
         working-directory: apps/mcp-chart-app-wasm
@@ -444,9 +459,6 @@ jobs:
       # An empty folder is enough — we don't need real assets to lint.
       - name: Ensure kyomi-ui/dist/ exists for RustEmbed
         run: mkdir -p crates/kyomi-ui/dist
-
-      - name: Strip local-dev mold linker config
-        run: sed -i '/# BEGIN_LOCAL_DEV_LINKER/,/# END_LOCAL_DEV_LINKER/d' .cargo/config.toml
 
       # apps/mcp-chart-app-wasm is a separate Cargo workspace with its own
       # lockfile, and before KYO-996 nothing ever ran its `#[cfg(test)]`
@@ -488,6 +500,17 @@ jobs:
         env:
           RUSTC_WRAPPER: ${{ env.SCCACHE_AVAILABLE == 'true' && 'sccache' || '' }}
         run: cargo clippy --locked -p kyomi-ui --target wasm32-unknown-unknown --features hydrate -- -D warnings
+
+      # The MCP chart app is its own Cargo workspace, so none of the passes
+      # above lint it (KYO-1001). Same bar as them: no `-A`, nothing allowed.
+      # --all-targets includes its test modules. Run from the repo root with
+      # --manifest-path so it stays one `run: cargo clippy ...` line like the
+      # passes above: the canary and scripts/preflight-clippy.sh read those
+      # lines and must agree with this one (preflight-clippy-test.sh checks).
+      - name: cargo clippy (MCP chart app)
+        env:
+          RUSTC_WRAPPER: ${{ env.SCCACHE_AVAILABLE == 'true' && 'sccache' || '' }}
+        run: cargo clippy --locked --manifest-path apps/mcp-chart-app-wasm/Cargo.toml --all-targets -- -D warnings
 
       # Isolated deterministic outbound transport fixtures run even if an unrelated
       # workspace test later fails. No external credentials or live MCP server.
@@ -647,8 +670,8 @@ jobs:
       - name: Add cargo bin to PATH
         run: echo "$CARGO_HOME/bin" >> $GITHUB_PATH
 
-      - name: Install trunk
-        uses: taiki-e/install-action@trunk
+      - name: Install pinned Trunk
+        uses: ./.github/actions/setup-trunk
 
       - name: Install tailwindcss
         run: |
@@ -659,12 +682,14 @@ jobs:
       - name: Install brotli (Trunk post_build hook dependency)
         run: sudo apt-get install -y --no-install-recommends brotli
 
+      # Before the chart app build so the strip does not make .cargo/config.toml
+      # newer than chart_app.html (see the clippy job).
+      - name: Strip local-dev mold linker config
+        run: sed -i '/# BEGIN_LOCAL_DEV_LINKER/,/# END_LOCAL_DEV_LINKER/d' .cargo/config.toml
+
       - name: Build MCP chart app WASM (required by kyomi-server include_str!)
         working-directory: apps/mcp-chart-app-wasm
         run: bash build.sh
-
-      - name: Strip local-dev mold linker config
-        run: sed -i '/# BEGIN_LOCAL_DEV_LINKER/,/# END_LOCAL_DEV_LINKER/d' .cargo/config.toml
 
       # Plain `trunk build`, not --release. Trunk.toml's cargo_profile =
       # "wasm-dev" is the fast path this job's whole existence depends on —
@@ -736,6 +761,7 @@ jobs:
             scripts/lint/check-server-fns-test.sh
             scripts/lint/check-disposal-safety-test.sh
             scripts/lint/check-client-eval-test.sh
+            scripts/lint/check-trunk-pin-test.sh
             scripts/repro-headless-subagent-survival-test.sh
             scripts/check-agent-run-result-test.sh
             scripts/pre-commit-hook-test.sh
@@ -758,3 +784,9 @@ jobs:
             exit 1
           fi
           echo "✅ All ${#suites[@]} worktree lifecycle self-test suites passed."
+
+      # The MCP chart app's inliner decides whether the page kyomi-server
+      # embeds contains the app, and its fault tests (KYO-992) never ran in
+      # CI. Standard library only; the runner image provides python3.
+      - name: MCP chart app inliner fault tests
+        run: python3 apps/mcp-chart-app-wasm/inline_chart_app_test.py

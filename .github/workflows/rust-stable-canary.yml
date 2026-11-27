@@ -24,7 +24,7 @@ jobs:
       # All configurations finish even when another discovers a new diagnostic.
       fail-fast: false
       matrix:
-        configuration: [workspace, all-targets, wasm-hydration]
+        configuration: [workspace, all-targets, wasm-hydration, mcp-chart-app]
     env:
       CARGO_TERM_COLOR: always
       # Also overrides the pin for subprocesses (including trunk's cargo calls).
@@ -64,8 +64,8 @@ jobs:
       - name: Add cargo bin to PATH
         run: echo "$CARGO_HOME/bin" >> "$GITHUB_PATH"
 
-      - name: Install trunk
-        uses: taiki-e/install-action@trunk
+      - name: Install pinned Trunk
+        uses: ./.github/actions/setup-trunk
 
       - name: Install tailwindcss
         run: |
@@ -73,14 +73,17 @@ jobs:
           chmod +x tailwindcss-linux-x64
           sudo mv tailwindcss-linux-x64 /usr/local/bin/tailwindcss
 
-      - name: Build MCP chart app WASM (same prerequisite as blocking CI)
-        working-directory: apps/mcp-chart-app-wasm
-        run: bash build.sh
-
+      # Before the chart app build, as in blocking CI: apps/server/build.rs
+      # tracks .cargo/config.toml as a chart app input, so stripping it after
+      # the build would trigger a second chart app build.
       - name: Prepare RustEmbed assets and CI linker configuration
         run: |
           mkdir -p crates/kyomi-ui/dist
           sed -i '/# BEGIN_LOCAL_DEV_LINKER/,/# END_LOCAL_DEV_LINKER/d' .cargo/config.toml
+
+      - name: Build MCP chart app WASM (same prerequisite as blocking CI)
+        working-directory: apps/mcp-chart-app-wasm
+        run: bash build.sh
 
       - name: Run Clippy configuration from blocking CI with latest stable
         env:
@@ -92,9 +95,9 @@ jobs:
           import os, re
           from pathlib import Path
           commands = re.findall(r"^\s*run: (cargo clippy .+)$", Path(".github/workflows/ci.yml").read_text(), re.M)
-          configurations = ["workspace", "all-targets", "wasm-hydration"]
+          configurations = ["workspace", "all-targets", "wasm-hydration", "mcp-chart-app"]
           if len(commands) != len(configurations):
-              raise SystemExit("Expected exactly three blocking CI Clippy configurations")
+              raise SystemExit("Expected exactly four blocking CI Clippy configurations")
           command = commands[configurations.index(os.environ["CANARY_CONFIGURATION"])]
           print(command.replace("cargo clippy ", "cargo +stable clippy ", 1))
           PYTHON

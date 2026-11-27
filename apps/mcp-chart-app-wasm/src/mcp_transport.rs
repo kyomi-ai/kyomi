@@ -75,15 +75,43 @@ pub struct HostCss {
     pub fonts: Option<String>,
 }
 
+/// Deserialize `value` as `T`, naming where in it a failure sat.
+///
+/// `serde_json`'s error from a `Value` names the offending type but not the
+/// field it sat in, so one unexpected type deep in a host payload costs the
+/// whole payload with nothing to say which part the app could not read. The
+/// failure is reported as `<root>.<field path>: <serde's explanation>`, where
+/// `root` names the payload the value came from (`hostContext`,
+/// `params.styles`, ...) so the path starts at something the host sent.
+pub fn deserialize_naming_path<T: serde::de::DeserializeOwned>(
+    value: &Value,
+    root: &str,
+) -> Result<T, String> {
+    serde_path_to_error::deserialize(value).map_err(|error| {
+        let path = error.path().to_string();
+        let location = if path == "." {
+            root.to_string()
+        } else {
+            format!("{root}.{path}")
+        };
+        format!("{location}: {}", error.inner())
+    })
+}
+
 /// Resolve the `hostContext` of a `ui/initialize` result, reporting one that
 /// cannot be read.
 ///
-/// A host that sends no context at all is valid, which the protocol allows: the
-/// app gets `HostContext::default()` and nothing is reported. A context that is
-/// present but unreadable — one bad field type anywhere, including an explicit
-/// `null` — is reported through `log_error`, because falling back to the default
-/// silently is what left charts on default colours and fonts with no
-/// explanation. The app still renders, on that default context.
+/// `Some` only when the host sent a context and it was read. A host that sends
+/// no context at all is valid, which the protocol allows: the result is `None`
+/// and nothing is reported. A context that is present but unreadable — one bad
+/// field type anywhere, including an explicit `null` — is also `None`, and is
+/// reported through `log_error`, because falling back to a default silently is
+/// what left charts on default colours and fonts with no explanation. The app
+/// still renders, without host values.
+///
+/// `None` rather than `HostContext::default()` so a caller can tell values the
+/// host sent from the absence of any: an all-`None` default context is
+/// indistinguishable from a real host that chose to send nothing in it.
 ///
 /// `log_error` is a parameter so the decision and the message it builds are
 /// tested together, natively: `connect()` passes `console::error_1`, which
@@ -91,24 +119,35 @@ pub struct HostCss {
 /// assembled in `connect()` could not be asserted at all. What stays outside
 /// native coverage is the single forwarding call in `connect()`; the browser
 /// proof is what observes that line reach the console.
-///
-/// `serde_json`'s error from a `Value` names the offending type but not the
-/// field it sat in, so this goes through `serde_path_to_error` to name the path
-/// — one unexpected type in `styles` otherwise discards the whole theme.
 fn host_context_from_initialize(
     result: &Value,
     log_error: &mut dyn FnMut(&str),
-) -> HostContext {
-    let Some(value) = result.get("hostContext") else {
-        return HostContext::default();
-    };
-    match serde_path_to_error::deserialize::<_, HostContext>(value.clone()) {
-        Ok(host_context) => host_context,
-        Err(error) => {
-            log_error(&format!("[kyomi-mcp] ui/initialize host context ignored: {error}"));
-            HostContext::default()
+) -> Option<HostContext> {
+    let value = result.get("hostContext")?;
+    match deserialize_naming_path::<HostContext>(value, "hostContext") {
+        Ok(host_context) => Some(host_context),
+        Err(detail) => {
+            log_error(&format!("[kyomi-mcp] ui/initialize host context ignored: {detail}"));
+            None
         }
     }
+}
+
+/// The size to post to the host for a measured document, or `None` when the
+/// measurement is not a size the host should act on.
+///
+/// A document measured before layout, or one with nothing in it, is `0 x 0`
+/// (or has a zero side); posting that makes the host collapse the iframe to
+/// nothing, and the chart then has no room to lay out and report a real size.
+/// Dimensions that are not finite positive numbers are treated the same way
+/// rather than being cast to an arbitrary integer.
+fn size_to_report(content_width: f64, content_height: f64, scrollbar_width: f64) -> Option<(u32, u32)> {
+    let width = (content_width + scrollbar_width).ceil();
+    let height = content_height.ceil();
+    if !(width.is_finite() && height.is_finite() && width > 0.0 && height > 0.0) {
+        return None;
+    }
+    Some((width as u32, height as u32))
 }
 
 // ---------------------------------------------------------------------------
@@ -117,6 +156,26 @@ fn host_context_from_initialize(
 
 type PendingCallback = Box<dyn FnOnce(Result<Value, String>)>;
 type PendingMap = Rc<RefCell<HashMap<u64, PendingCallback>>>;
+
+/// How long a request waits for the host's answer before failing. The MCP
+/// TypeScript SDK's own default request timeout, which the `ext-apps` SDK this
+/// transport replaces inherits.
+const REQUEST_TIMEOUT_MS: i32 = 60_000;
+
+/// Fail the request `id` because the host never answered it.
+///
+/// Removing the entry is what makes this safe to run after the host did answer:
+/// the response path removes the entry first, so a timer that fires late finds
+/// nothing and does nothing, and a request is never resolved twice.
+fn expire_pending_request(pending: &PendingMap, id: u64, method: &str, timeout_ms: i32) {
+    let Some(callback) = pending.borrow_mut().remove(&id) else {
+        return;
+    };
+    callback(Err(format!(
+        "{method} request timed out: the host did not answer within {} s",
+        timeout_ms / 1000
+    )));
+}
 
 // ---------------------------------------------------------------------------
 // Notification callbacks
@@ -140,6 +199,12 @@ pub struct McpTransport {
     pending: PendingMap,
     handlers: Rc<RefCell<Handlers>>,
     host_context: Rc<RefCell<Option<HostContext>>>,
+}
+
+impl Default for McpTransport {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl McpTransport {
@@ -172,7 +237,12 @@ impl McpTransport {
         self.handlers.borrow_mut().on_host_context_changed = Some(Box::new(cb));
     }
 
-    /// Get the host context from initialization.
+    /// The host context the host sent during initialization.
+    ///
+    /// `None` until `connect()` has completed, and afterwards when the host sent
+    /// no context or one this build could not read, so `Some` always means the
+    /// values in it came from the host. Never a stand-in default: code that acts
+    /// on a host value must not mistake the absence of one for the host's choice.
     pub fn get_host_context(&self) -> Option<HostContext> {
         self.host_context.borrow().clone()
     }
@@ -180,12 +250,14 @@ impl McpTransport {
     /// Start listening for messages and connect to the MCP host.
     ///
     /// Sends `ui/initialize`, waits for the host response, then sends
-    /// `ui/notifications/initialized`. Returns the host context.
+    /// `ui/notifications/initialized`. Returns the host context, or `None` when
+    /// the host sent none or one that could not be read (see
+    /// [`Self::get_host_context`]).
     pub async fn connect(
         &self,
         app_name: &str,
         app_version: &str,
-    ) -> Result<HostContext, String> {
+    ) -> Result<Option<HostContext>, String> {
         // Start the message listener
         self.start_listener();
 
@@ -206,7 +278,7 @@ impl McpTransport {
         let mut log_error = |message: &str| web_sys::console::error_1(&message.into());
         let host_context = host_context_from_initialize(&result, &mut log_error);
 
-        *self.host_context.borrow_mut() = Some(host_context.clone());
+        *self.host_context.borrow_mut() = host_context.clone();
 
         // Send ui/notifications/initialized
         self.send_notification(METHOD_INITIALIZED, serde_json::json!({}));
@@ -287,8 +359,14 @@ impl McpTransport {
             .and_then(|v| v.as_f64())
             .unwrap_or(content_width)
             - root.client_width() as f64;
-        let width = (content_width + scrollbar_w).ceil() as u32;
-        let height = content_height.ceil() as u32;
+
+        // Layout has not run yet, or the document has no content: there is no
+        // size to report, and the host would collapse the frame to it. The
+        // ResizeObserver reports again once layout gives the document a size.
+        let Some((width, height)) = size_to_report(content_width, content_height, scrollbar_w)
+        else {
+            return;
+        };
 
         self.send_notification(
             METHOD_SIZE_CHANGED,
@@ -341,11 +419,32 @@ impl McpTransport {
             "params": params
         });
 
+        let window = web_sys::window().ok_or("No window to schedule the request timeout")?;
+
         // Create a future that resolves when the response arrives
         let (tx, rx) = futures::channel::oneshot::channel::<Result<Value, String>>();
         self.pending.borrow_mut().insert(id, Box::new(|result| {
             let _ = tx.send(result);
         }));
+
+        // A host that never answers must not leave this request, and its
+        // pending entry, waiting forever. The timer fails the request and
+        // removes the entry; a response that arrives first removes the entry
+        // itself, which turns the timer into a no-op.
+        let pending = self.pending.clone();
+        // `once_into_js` hands the closure to JavaScript, which frees it after the
+        // timer fires; a `forget()`ed closure would stay allocated for good.
+        let on_timeout = Closure::once_into_js(move || {
+            expire_pending_request(&pending, id, method, REQUEST_TIMEOUT_MS);
+        });
+        let scheduled = window.set_timeout_with_callback_and_timeout_and_arguments_0(
+            on_timeout.unchecked_ref(),
+            REQUEST_TIMEOUT_MS,
+        );
+        if let Err(error) = scheduled {
+            self.pending.borrow_mut().remove(&id);
+            return Err(format!("Could not schedule the {method} request timeout: {error:?}"));
+        }
 
         self.send_message(&msg);
 
@@ -513,7 +612,7 @@ mod tests {
     /// Run the production reporting path and return the context plus every
     /// message it asked to log. This is the same function `connect()` calls, so
     /// a version that stops logging a context it cannot read fails these tests.
-    fn initialize_with(result: &Value) -> (HostContext, Vec<String>) {
+    fn initialize_with(result: &Value) -> (Option<HostContext>, Vec<String>) {
         let mut logged = Vec::new();
         let mut log_error = |message: &str| logged.push(message.to_string());
         let context = host_context_from_initialize(result, &mut log_error);
@@ -542,6 +641,7 @@ mod tests {
             Vec::<String>::new(),
             "a context in the protocol's shape must be read without a report"
         );
+        let context = context.expect("a readable context is the host's context");
         assert_eq!(context.theme.as_deref(), Some("dark"));
         assert_eq!(context.display_mode.as_deref(), Some("inline"));
         assert_eq!(context.locale.as_deref(), Some("en-GB"));
@@ -567,9 +667,9 @@ mod tests {
             Vec::<String>::new(),
             "a host that sends no context must not be reported as one that failed"
         );
-        assert_eq!(
-            context.theme, None,
-            "a host that sends no context renders with the default context"
+        assert!(
+            context.is_none(),
+            "a host that sends no context must not be given a default one that looks like its own"
         );
     }
 
@@ -604,9 +704,9 @@ mod tests {
             message.contains("invalid type: integer `17`, expected a string"),
             "the report must carry serde's own explanation, got: {message}"
         );
-        assert_eq!(
-            context.theme, None,
-            "the unreadable context must not be half-applied"
+        assert!(
+            context.is_none(),
+            "the unreadable context must not be half-applied or replaced by a default"
         );
     }
 
@@ -630,9 +730,126 @@ mod tests {
             message.contains("expected struct HostContext"),
             "the report must say what the host sent instead, got: {message}"
         );
-        assert_eq!(
-            context.theme, None,
-            "the null context falls back to the default context"
+        assert!(
+            context.is_none(),
+            "the null context must not be replaced by a default that looks like the host's"
         );
+    }
+
+    #[test]
+    fn a_host_that_sends_an_empty_context_is_distinguishable_from_one_that_sent_none() {
+        // `{}` is a real host context that happens to set nothing; it must not
+        // be confused with the absence of a context.
+        let sent = serde_json::json!({ "hostContext": {} });
+        let absent = serde_json::json!({});
+
+        assert!(initialize_with(&sent).0.is_some());
+        assert!(initialize_with(&absent).0.is_none());
+    }
+
+    #[test]
+    fn deserialize_naming_path_names_the_root_when_the_whole_value_is_wrong() {
+        let error = deserialize_naming_path::<HostContext>(&serde_json::json!(5), "params")
+            .expect_err("a number is not a host context");
+        assert!(
+            error.starts_with("params: "),
+            "a failure at the top must name the root alone, got: {error}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Request timeout
+    // -----------------------------------------------------------------------
+
+    /// Results delivered to a pending request's callback, in delivery order.
+    type Outcomes = Rc<RefCell<Vec<Result<Value, String>>>>;
+
+    /// A pending entry whose delivered result is recorded in `outcomes`.
+    fn pending_with_recorder(id: u64) -> (PendingMap, Outcomes) {
+        let outcomes = Rc::new(RefCell::new(Vec::new()));
+        let pending: PendingMap = Rc::new(RefCell::new(HashMap::new()));
+        let recorder = outcomes.clone();
+        pending.borrow_mut().insert(
+            id,
+            Box::new(move |result| recorder.borrow_mut().push(result)),
+        );
+        (pending, outcomes)
+    }
+
+    #[test]
+    fn an_unanswered_request_fails_with_a_clear_error_and_leaves_no_pending_entry() {
+        let (pending, outcomes) = pending_with_recorder(7);
+
+        expire_pending_request(&pending, 7, METHOD_TOOLS_CALL, 60_000);
+
+        assert!(
+            pending.borrow().is_empty(),
+            "the timed-out request's pending entry must be removed"
+        );
+        let outcomes = outcomes.borrow();
+        assert_eq!(outcomes.len(), 1, "the request must be failed exactly once");
+        let error = outcomes[0].as_ref().expect_err("a timeout is a failure");
+        assert!(
+            error.contains("tools/call") && error.contains("timed out") && error.contains("60 s"),
+            "the error must name the request and the wait, got: {error}"
+        );
+    }
+
+    #[test]
+    fn a_timer_that_fires_after_the_host_answered_does_nothing() {
+        let (pending, outcomes) = pending_with_recorder(3);
+        // The response path removes the entry before delivering the answer.
+        let callback = pending.borrow_mut().remove(&3).expect("entry was inserted");
+        callback(Ok(serde_json::json!({ "ok": true })));
+
+        expire_pending_request(&pending, 3, METHOD_TOOLS_CALL, 60_000);
+
+        let outcomes = outcomes.borrow();
+        assert_eq!(outcomes.len(), 1, "the answered request must not be failed again");
+        assert!(outcomes[0].is_ok());
+    }
+
+    #[test]
+    fn a_timeout_only_fails_the_request_it_belongs_to() {
+        let (pending, first) = pending_with_recorder(1);
+        let second = Rc::new(RefCell::new(Vec::new()));
+        let recorder = second.clone();
+        pending.borrow_mut().insert(
+            2,
+            Box::new(move |result| recorder.borrow_mut().push(result)),
+        );
+
+        expire_pending_request(&pending, 1, METHOD_INITIALIZE, 60_000);
+
+        assert_eq!(first.borrow().len(), 1);
+        assert!(second.borrow().is_empty(), "another request must keep waiting");
+        assert!(pending.borrow().contains_key(&2));
+    }
+
+    // -----------------------------------------------------------------------
+    // Size reporting
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn a_document_with_no_layout_reports_no_size() {
+        assert_eq!(size_to_report(0.0, 0.0, 0.0), None);
+    }
+
+    #[test]
+    fn a_document_with_a_zero_side_reports_no_size() {
+        assert_eq!(size_to_report(640.0, 0.0, 0.0), None);
+        assert_eq!(size_to_report(0.0, 480.0, 0.0), None);
+    }
+
+    #[test]
+    fn a_measurement_that_is_not_a_finite_size_reports_no_size() {
+        assert_eq!(size_to_report(f64::NAN, 480.0, 0.0), None);
+        assert_eq!(size_to_report(640.0, f64::INFINITY, 0.0), None);
+        assert_eq!(size_to_report(-1.0, 480.0, 0.0), None);
+    }
+
+    #[test]
+    fn a_laid_out_document_reports_its_size_rounded_up_with_the_scrollbar() {
+        assert_eq!(size_to_report(640.2, 480.4, 15.0), Some((656, 481)));
     }
 }

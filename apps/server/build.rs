@@ -44,33 +44,33 @@ fn main() {
     let chart_app_dir = repo_root.join("apps").join("mcp-chart-app-wasm");
     let chart_app_html = chart_app_dir.join("chart_app.html");
 
-    // Everything `build.sh` reads from the chart app. Directories are tracked
-    // recursively by Cargo; the list stays explicit because the chart app
-    // directory also holds build outputs (`chart_app.html`, `dist/`,
-    // `style/output.css` and `target/`) that must not become rerun triggers.
-    // `style/` is represented by its Tailwind entry point rather than the
-    // directory for the same reason: tracking the directory would rerun this
-    // script — and recompile the server — after every build that rewrites the
-    // generated `output.css`.
-    let inputs = [
-        chart_app_dir.join("src"),
-        chart_app_dir.join("Cargo.toml"),
-        chart_app_dir.join("Cargo.lock"),
-        chart_app_dir.join("build.sh"),
-        chart_app_dir.join("inline_chart_app.py"),
-        chart_app_dir.join("index.html"),
-        chart_app_dir.join("Trunk.toml"),
-        chart_app_dir.join("style").join("main.css"),
-        // `kyomi-ui-components` is compiled into the chart app and scanned by
-        // its Tailwind `@source` directives; `kyomi-chart-theme` is compiled
-        // into it. A change to either makes the embedded app stale.
-        repo_root.join("crates").join("kyomi-ui-components"),
-        repo_root.join("crates").join("kyomi-chart-theme"),
-        // This script's own files: an artifact made by an older build recipe
-        // is rebuilt once after the recipe changes.
-        manifest_dir.join("build.rs"),
-        manifest_dir.join("build_support.rs"),
-    ];
+    // Everything `build.sh` reads from the chart app: see `chart_app_inputs`
+    // for what is tracked and why. Directories are tracked recursively by
+    // Cargo; the list stays explicit because the chart app directory also holds
+    // build outputs (`chart_app.html`, `dist/`, `style/output.css` and
+    // `target/`) that must not become rerun triggers. `style/` is represented
+    // by its Tailwind entry point rather than the directory for the same
+    // reason: tracking the directory would rerun this script — and recompile
+    // the server — after every build that rewrites the generated `output.css`.
+    let local_manifests = local_package_manifests(
+        &chart_app_metadata(&chart_app_dir),
+        &chart_app_dir.join("Cargo.toml"),
+    )
+    .unwrap_or_else(|error| {
+        panic!("kyomi-server build.rs: could not list the chart app's local packages: {error}")
+    });
+    let cargo_home = std::env::var_os("CARGO_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME").map(|home| std::path::PathBuf::from(home).join(".cargo"))
+        });
+    let inputs = chart_app_inputs(
+        &repo_root,
+        &manifest_dir,
+        cargo_home.as_deref(),
+        &local_manifests,
+    );
+    println!("cargo:rerun-if-env-changed=CARGO_HOME");
 
     for input in &inputs {
         println!("cargo:rerun-if-changed={}", input.display());
@@ -148,6 +148,33 @@ fn main() {
     }
 }
 
+/// `cargo metadata` for the chart app, which lists every package it builds and
+/// where each one comes from. Run with `--locked`, as `build.sh` checks the
+/// lock, so it never rewrites `Cargo.lock`. A failure stops the server build
+/// here with Cargo's own message; `build.sh` would stop on the same cause.
+fn chart_app_metadata(chart_app_dir: &std::path::Path) -> String {
+    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+    let output = Command::new(cargo)
+        .args(["metadata", "--locked", "--format-version", "1"])
+        .current_dir(chart_app_dir)
+        .output()
+        .unwrap_or_else(|error| {
+            panic!("kyomi-server build.rs: could not run `cargo metadata` for the chart app: {error}")
+        });
+    if !output.status.success() {
+        panic!(
+            "kyomi-server build.rs: `cargo metadata --locked` failed for the chart app ({}):\n{}\n\
+             A stale apps/mcp-chart-app-wasm/Cargo.lock, or a local [patch.crates-io] override \
+             whose lock has not been regenerated, is the usual cause: see CLAUDE.md, \
+             \"External Crate Dependencies\".",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    String::from_utf8(output.stdout)
+        .unwrap_or_else(|error| panic!("kyomi-server build.rs: cargo metadata output is not UTF-8: {error}"))
+}
+
 /// Fail the server build with an actionable message.
 fn fail(chart_app_dir: &std::path::Path, reason: &str) -> ! {
     panic!(
@@ -160,7 +187,7 @@ fn fail(chart_app_dir: &std::path::Path, reason: &str) -> ! {
          cd {} && bash build.sh\n\n\
          The chart app build needs `trunk`, `tailwindcss` and `python3`, and the \
          `wasm32-unknown-unknown` target; `.github/workflows/ci.yml` installs the first two in \
-         \"Install trunk\" and \"Install tailwindcss\", the runner image provides python3, and the \
+         \"Install pinned Trunk\" and \"Install tailwindcss\", the runner image provides python3, and the \
          target comes from rust-toolchain.toml via `setup-rust`. A stale \
          apps/mcp-chart-app-wasm/Cargo.lock also stops the build: update the lock in the same \
          change as the manifest.",
