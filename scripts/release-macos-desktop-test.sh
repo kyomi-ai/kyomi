@@ -171,7 +171,7 @@ set +e
 (
     set -e
     source "$SCRIPT"
-    START_DIR="$TMP/no-such-dir" REPO="$TMP" WORK="$TMP/clean/work" SRC="$TMP/clean/work/src" MOUNT=""
+    START_DIR="$TMP/no-such-dir" REPO="$TMP" WORK="$TMP/clean/work" SRC="$TMP/clean/work/src"
     cleanup
 ) > /dev/null 2> "$TMP/err"
 rc=$?

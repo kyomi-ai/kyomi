@@ -106,24 +106,25 @@ parse_args() {
 # acted on at once (bash defers a trapped signal until a foreground command
 # ends, which here would be the end of a 45-minute build) and takes the whole
 # build tree down with it, not just the shell that started it.
-CHILD=""
 run_in() {
     local dir="$1" status=0
     shift
     set -m
     (cd "$dir" && exec "$@") < /dev/null &
-    CHILD=$!
-    wait "$CHILD" || status=$?
-    CHILD=""
+    wait "$!" || status=$?
+    set +m
     return "$status"
 }
 
-# terminate <exit-code>: the INT/TERM/HUP handler.
+# terminate <exit-code>: the INT/TERM/HUP handler. Under `set -m` every job's
+# process group id is the job's pid, which `jobs -p` lists, so the handler needs
+# no variable that could still be unset when the signal arrives.
 terminate() {
-    if [ -n "$CHILD" ]; then
-        kill -TERM -- "-$CHILD" 2> /dev/null || true
-        wait "$CHILD" 2> /dev/null || true
-    fi
+    local group
+    for group in $(jobs -p); do
+        kill -TERM -- "-$group" 2> /dev/null || true
+    done
+    wait 2> /dev/null || true
     exit "$1"
 }
 
@@ -194,7 +195,7 @@ inspect_app() {
     du -sk "$dmg" "$app" "$binary" || die "cannot size $app"
 }
 
-# The mountpoint lives under $WORK and MOUNT is detached by cleanup, so an
+# The mountpoint lives under $WORK, and cleanup detaches it if it is mounted, so an
 # interrupted or failed run never leaves the dmg attached.
 verify_dmg() {
     local dmg="$1" status=0
@@ -202,23 +203,24 @@ verify_dmg() {
     mkdir -p "$mountpoint"
     hdiutil attach -readonly -nobrowse -mountpoint "$mountpoint" "$dmg" > /dev/null \
         || die "cannot mount $dmg"
-    MOUNT="$mountpoint"
-    (inspect_app "$MOUNT/Kyomi.app" "$dmg") || status=$?
-    hdiutil detach "$MOUNT" > /dev/null || die "cannot detach $MOUNT"
-    MOUNT=""
+    (inspect_app "$mountpoint/Kyomi.app" "$dmg") || status=$?
+    hdiutil detach "$mountpoint" > /dev/null || die "cannot detach $mountpoint"
     [ "$status" -eq 0 ] || die "verification of $dmg failed"
 }
 
 # Runs on every exit, including failed runs. Each step is best effort because
 # cleanup must not hide the error that ended the run; what it cannot remove is
 # named, never silently left.
-MOUNT=""
 cleanup() {
     set +e # an EXIT trap runs under the script's `set -e`; every step must run
     cd "$START_DIR" || cd /
-    if [ -n "$MOUNT" ] && ! hdiutil detach -force "$MOUNT" > /dev/null 2>&1; then
-        printf 'release-macos-desktop: could not detach %s; leaving %s in place\n' "$MOUNT" "$WORK" >&2
-        return 0
+    # Ask the system, not a variable: a signal can arrive between the attach and
+    # any bookkeeping about it. $WORK is a physical path, as `mount` lists it.
+    if mount | grep -qF " on $WORK/dmg-mount "; then
+        if ! hdiutil detach -force "$WORK/dmg-mount" > /dev/null 2>&1; then
+            printf 'release-macos-desktop: could not detach %s; leaving %s in place\n' "$WORK/dmg-mount" "$WORK" >&2
+            return 0
+        fi
     fi
     if [ -e "$SRC/.git" ]; then
         git -C "$REPO" worktree remove --force "$SRC" > /dev/null 2>&1 \
@@ -271,7 +273,7 @@ main() {
         commit="$(git -C "$REPO" rev-parse --verify "$ref^{commit}")" || die "$ref is not a git ref"
     fi
 
-    WORK="$(mktemp -d -t kyomi-macos-release)"
+    WORK="$(cd "$(mktemp -d -t kyomi-macos-release)" && pwd -P)"
     SRC="$WORK/src"
     tools="$WORK/tools"
     trap cleanup EXIT
@@ -323,7 +325,7 @@ main() {
     local wasm
     for wasm in "$SRC"/crates/kyomi-ui/dist/*_bg.wasm; do
         [ -f "$wasm" ] || die "trunk produced no *_bg.wasm in crates/kyomi-ui/dist"
-        wasm-opt --enable-bulk-memory-opt --enable-nontrapping-float-to-int -O -o "${wasm}.opt" "$wasm"
+        run_in "$SRC" wasm-opt --enable-bulk-memory-opt --enable-nontrapping-float-to-int -O -o "${wasm}.opt" "$wasm"
         mv "${wasm}.opt" "$wasm"
     done
 
@@ -348,7 +350,7 @@ main() {
     fi
 
     echo "==> upload $(basename "$dmg") to release $ref"
-    if ! gh release upload "$ref" "$dmg"; then
+    if ! run_in "$SRC" gh release upload "$ref" "$dmg"; then
         # The work directory is deleted on exit, and it holds the only copy of a
         # 45-minute build: keep the dmg so the upload can be retried by hand.
         cp "$dmg" "$START_DIR/" || die "upload failed and the dmg could not be saved from $dmg"
