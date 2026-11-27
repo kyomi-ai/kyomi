@@ -68,10 +68,28 @@ struct ToolResultPayload {
 /// The host sends a partial `HostContext` (MCP Apps protocol), so either half
 /// can be present on its own. `styles` is kept as raw JSON so a styles payload
 /// this build cannot parse does not cost the theme update beside it.
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 struct HostContextPayload {
     theme: Option<String>,
     styles: Option<serde_json::Value>,
+}
+
+/// Read a `ui/notifications/host-context-changed` payload.
+///
+/// The error is the whole warning line, naming the field that could not be read
+/// (a bad value deep in the payload otherwise costs the update with no hint of
+/// where), so the caller only has to log it. Built here, not in the handler, so
+/// the message is tested natively: the console call aborts a native process.
+fn parse_host_context_changed(params: &serde_json::Value) -> Result<HostContextPayload, String> {
+    mcp_transport::deserialize_naming_path(params, "params")
+        .map_err(|detail| format!("[kyomi-mcp] host context ignored: {detail}"))
+}
+
+/// Read the `styles` of a host context change, naming the field that could not
+/// be read (see [`parse_host_context_changed`]).
+fn parse_host_styles(styles: &serde_json::Value) -> Result<mcp_transport::HostStyles, String> {
+    mcp_transport::deserialize_naming_path(styles, "params.styles")
+        .map_err(|detail| format!("[kyomi-mcp] host styles ignored: {detail}"))
 }
 
 fn with_state<F: FnOnce(AppState)>(f: F) {
@@ -130,10 +148,10 @@ pub async fn initialize(state: AppState) -> Result<(), String> {
 
     // Register host context change handler
     transport.set_on_host_context_changed(move |params| {
-        let payload: HostContextPayload = match serde_json::from_value(params) {
+        let payload = match parse_host_context_changed(&params) {
             Ok(p) => p,
-            Err(e) => {
-                web_sys::console::warn_1(&format!("[kyomi-mcp] host context ignored: {e}").into());
+            Err(warning) => {
+                web_sys::console::warn_1(&warning.into());
                 return;
             }
         };
@@ -149,11 +167,9 @@ pub async fn initialize(state: AppState) -> Result<(), String> {
         // the theme changes; `light-dark()` values re-resolve on their own. The
         // table surface is taken from them, so apply what the host sends.
         if let Some(styles) = payload.styles {
-            match serde_json::from_value::<mcp_transport::HostStyles>(styles) {
+            match parse_host_styles(&styles) {
                 Ok(styles) => mcp_transport::apply_host_styles(&styles),
-                Err(e) => {
-                    web_sys::console::warn_1(&format!("[kyomi-mcp] host styles ignored: {e}").into());
-                }
+                Err(warning) => web_sys::console::warn_1(&warning.into()),
             }
         }
     });
@@ -166,15 +182,18 @@ pub async fn initialize(state: AppState) -> Result<(), String> {
     // Connect to host
     let host_ctx = transport.connect("Kyomi Chart Viewer", "2.0.0").await?;
 
-    // Apply initial theme and styles
-    if let Some(ref theme) = host_ctx.theme {
-        mcp_transport::apply_theme(theme);
-        with_state(|state| {
-            state.theme.set(theme.clone());
-        });
-    }
-    if let Some(ref styles) = host_ctx.styles {
-        mcp_transport::apply_host_styles(styles);
+    // Apply initial theme and styles. A host that sent no readable context has
+    // nothing to apply, and the app keeps its own defaults.
+    if let Some(host_ctx) = host_ctx {
+        if let Some(ref theme) = host_ctx.theme {
+            mcp_transport::apply_theme(theme);
+            with_state(|state| {
+                state.theme.set(theme.clone());
+            });
+        }
+        if let Some(ref styles) = host_ctx.styles {
+            mcp_transport::apply_host_styles(styles);
+        }
     }
 
     setup_size_notifications(transport);
@@ -223,4 +242,67 @@ fn setup_size_notifications(transport: Rc<McpTransport>) {
         Box::leak(Box::new(observer));
     }
     callback.forget();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn a_host_context_change_with_a_bad_theme_names_the_theme() {
+        let warning = parse_host_context_changed(&json!({ "theme": 3 }))
+            .expect_err("a numeric theme is unreadable");
+
+        assert!(
+            warning.starts_with("[kyomi-mcp] host context ignored: params.theme: "),
+            "the warning must carry the console prefix and the field, got: {warning}"
+        );
+        assert!(
+            warning.contains("invalid type: integer `3`"),
+            "the warning must carry serde's explanation, got: {warning}"
+        );
+    }
+
+    #[test]
+    fn a_host_context_change_is_read_when_well_formed() {
+        let payload = parse_host_context_changed(&json!({
+            "theme": "dark",
+            "styles": { "variables": { "--color-background-primary": "#111" } }
+        }))
+        .expect("a well-formed change is read");
+
+        assert_eq!(payload.theme.as_deref(), Some("dark"));
+        assert!(payload.styles.is_some());
+    }
+
+    #[test]
+    fn bad_host_styles_name_the_variable_that_could_not_be_read() {
+        let warning = parse_host_styles(&json!({
+            "variables": { "--color-background-primary": 17 }
+        }))
+            .expect_err("a numeric variable value is unreadable");
+
+        assert!(
+            warning.starts_with(
+                "[kyomi-mcp] host styles ignored: params.styles.variables.--color-background-primary: "
+            ),
+            "the warning must carry the console prefix and the full path, got: {warning}"
+        );
+        assert!(
+            warning.contains("invalid type: integer `17`, expected a string"),
+            "the warning must carry serde's explanation, got: {warning}"
+        );
+    }
+
+    #[test]
+    fn host_styles_of_the_wrong_shape_name_the_styles_payload() {
+        let warning = parse_host_styles(&json!("light-dark"))
+            .expect_err("a string is not a styles object");
+
+        assert!(
+            warning.starts_with("[kyomi-mcp] host styles ignored: params.styles: "),
+            "a failure at the top of styles must name styles itself, got: {warning}"
+        );
+    }
 }
