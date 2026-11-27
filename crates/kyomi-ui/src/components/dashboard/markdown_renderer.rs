@@ -493,23 +493,29 @@ pub(crate) fn chart_col_span_class(col_span: u8) -> &'static str {
 /// Set `layout.colSpan` in a per-item ChartML YAML string.
 ///
 /// Parses the YAML, sets or creates the `layout.colSpan` field, and
-/// re-serializes. Returns `None` if the YAML cannot be parsed or serialized.
+/// re-serializes, keeping every other key in the order it was written. Returns `None` if the YAML cannot be parsed or serialized.
 ///
 /// Used by the `chart-resize-request` handler in the dashboard editor to
 /// persist width changes made via the WYSIWYG drag-to-resize handles.
 #[cfg(any(target_arch = "wasm32", test))]
 pub(crate) fn set_col_span(yaml: &str, new_col_span: u8) -> Option<String> {
-    let mut spec: serde_json::Value = serde_yaml::from_str(yaml).ok()?;
-    let layout = spec
-        .as_object_mut()?
-        .entry("layout")
-        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
-    let layout_obj = layout.as_object_mut()?;
-    layout_obj.insert(
-        "colSpan".to_string(),
-        serde_json::Value::Number(serde_json::Number::from(new_col_span)),
-    );
+    let mut spec: serde_yaml::Value = serde_yaml::from_str(yaml).ok()?;
+    let layout = mapping_child(spec.as_mapping_mut()?, "layout")?;
+    layout.insert("colSpan".into(), serde_yaml::Value::Number(new_col_span.into()));
     serde_yaml::to_string(&spec).ok()
+}
+
+/// The mapping under `key`, created empty when absent; `None` when the key
+/// holds something that is not a mapping.
+#[cfg(any(target_arch = "wasm32", test))]
+fn mapping_child<'a>(
+    parent: &'a mut serde_yaml::Mapping,
+    key: &str,
+) -> Option<&'a mut serde_yaml::Mapping> {
+    if !parent.contains_key(key) {
+        parent.insert(key.into(), serde_yaml::Value::Mapping(serde_yaml::Mapping::new()));
+    }
+    parent.get_mut(key)?.as_mapping_mut()
 }
 
 /// Set `visualize.style.height` in a per-item ChartML YAML string.
@@ -521,27 +527,16 @@ pub(crate) fn set_col_span(yaml: &str, new_col_span: u8) -> Option<String> {
 /// persist height changes made via the WYSIWYG drag-to-resize handles.
 #[cfg(any(target_arch = "wasm32", test))]
 pub(crate) fn set_chart_height(yaml: &str, new_height: f64) -> Option<String> {
-    let mut spec: serde_json::Value = serde_yaml::from_str(yaml).ok()?;
-    let spec_obj = spec.as_object_mut()?;
-    let visualize = spec_obj
-        .entry("visualize")
-        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
-    let viz_obj = visualize.as_object_mut()?;
-    let style = viz_obj
-        .entry("style")
-        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
-    let style_obj = style.as_object_mut()?;
+    let mut spec: serde_yaml::Value = serde_yaml::from_str(yaml).ok()?;
+    let visualize = mapping_child(spec.as_mapping_mut()?, "visualize")?;
+    let style = mapping_child(visualize, "style")?;
     // Store as integer when the value is whole-number to keep YAML clean
-    let height_val = if new_height.fract() == 0.0 {
-        serde_json::Value::Number(serde_json::Number::from(new_height as i64))
+    let height = if new_height.fract() == 0.0 {
+        serde_yaml::Number::from(new_height as i64)
     } else {
-        serde_json::Number::from_f64(new_height)
-            .map(serde_json::Value::Number)
-            .unwrap_or(serde_json::Value::Number(serde_json::Number::from(
-                new_height as i64,
-            )))
+        serde_yaml::Number::from(new_height)
     };
-    style_obj.insert("height".to_string(), height_val);
+    style.insert("height".into(), serde_yaml::Value::Number(height));
     serde_yaml::to_string(&spec).ok()
 }
 
@@ -1681,7 +1676,7 @@ mod type_switch_tests {
 
     const AUTHORED_YAML: &str = "type: chart\nversion: 1\ntitle: Revenue\n\
         data:\n  provider: inline\n  rows:\n  - region: North\n    revenue: 120\n    cost: 80\n\
-        visualize:\n  type: bar\n  columns: region\n  rows:\n    - revenue\n    - cost\n";
+        visualize:\n  type: bar\n  columns: region\n  rows:\n  - revenue\n  - cost\n";
 
     fn outside_visualize(yaml: &str) -> Vec<&str> {
         yaml.lines()
@@ -1741,5 +1736,18 @@ mod type_switch_tests {
         };
         assert_eq!(head(&block), head(TWO_CHARTS), "{block}");
         assert!(block.contains("type: line"), "{block}");
+    }
+
+    /// A resize save sets one field and leaves every other line of the chart
+    /// item as written, key order included (the item is edited as a
+    /// `serde_yaml::Value`, whose mappings keep their order).
+    #[test]
+    fn a_resize_save_changes_only_the_resized_field() {
+        let with_layout = format!("{AUTHORED_YAML}layout:\n  colSpan: 6\n");
+        let col_span = set_col_span(&with_layout, 12).expect("sets colSpan");
+        assert_eq!(col_span, with_layout.replace("colSpan: 6", "colSpan: 12"));
+
+        let height = set_chart_height(AUTHORED_YAML, 320.0).expect("sets height");
+        assert_eq!(height, format!("{AUTHORED_YAML}  style:\n    height: 320\n"));
     }
 }
