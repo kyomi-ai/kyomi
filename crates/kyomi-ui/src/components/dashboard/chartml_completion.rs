@@ -7,6 +7,8 @@
 
 use std::sync::Arc;
 
+use kyomi_ui_components::dashboard::chart_header_bar::CHART_TYPES;
+
 use kode_leptos::{
     CompletionContext, CompletionItem, CompletionKind, CompletionProviderConfig,
     FenceTracker,
@@ -115,6 +117,9 @@ enum SchemaNode {
     Object(&'static [(&'static str, &'static str)]),
     /// Enum of allowed string values.
     Enum(&'static [&'static str]),
+    /// The chart types the type picker offers (`kyomi_ui_components`' shared
+    /// `CHART_TYPES`), so the editor completes exactly what the picker lists.
+    ChartTypes,
 }
 
 /// Look up what the schema says is valid at `path`.
@@ -144,7 +149,7 @@ fn schema_lookup(path: &[&str]) -> Option<SchemaNode> {
 
         // ── Visualize section ──
         ["visualize"] => Some(SchemaNode::Object(VISUALIZE_KEYS)),
-        ["visualize", "type"] => Some(SchemaNode::Enum(CHART_TYPES)),
+        ["visualize", "type"] => Some(SchemaNode::ChartTypes),
         ["visualize", "mode"] => Some(SchemaNode::Enum(CHART_MODES)),
         ["visualize", "orientation"] => Some(SchemaNode::Enum(ORIENTATIONS)),
 
@@ -307,10 +312,6 @@ const PROVIDERS: &[&str] = &[
 const CACHE_KEYS: &[(&str, &str)] = &[
     ("ttl", "Time to live (e.g., '30s', '5m', '6h', '1d')"),
     ("autoRefresh", "Enable automatic refresh based on TTL"),
-];
-
-const CHART_TYPES: &[&str] = &[
-    "bar", "line", "area", "pie", "doughnut", "scatter", "table", "metric",
 ];
 
 const CHART_MODES: &[&str] = &["grouped", "stacked", "normalized"];
@@ -673,17 +674,10 @@ fn provide_completions(ctx: CompletionContext) -> Vec<CompletionItem> {
     if in_value {
         // We're in value position — look up valid values for this key
         match schema_lookup(&path_refs) {
-            Some(SchemaNode::Enum(values)) => values
-                .iter()
-                .enumerate()
-                .map(|(i, &v)| CompletionItem {
-                    label: v.to_string(),
-                    insert_text: None,
-                    detail: None,
-                    sort_order: i as i32,
-                    kind: CompletionKind::Keyword,
-                })
-                .collect(),
+            Some(SchemaNode::Enum(values)) => keyword_items(values.iter().copied()),
+            Some(SchemaNode::ChartTypes) => {
+                keyword_items(CHART_TYPES.iter().map(|(chart_type, _label)| *chart_type))
+            }
             Some(SchemaNode::Object(_)) => {
                 // Value position but the schema says this is an object —
                 // no inline value completions (user needs to go to next line).
@@ -720,6 +714,20 @@ fn provide_completions(ctx: CompletionContext) -> Vec<CompletionItem> {
             _ => vec![],
         }
     }
+}
+
+/// Keyword completions for a list of allowed values, in the order given.
+fn keyword_items<'a>(values: impl Iterator<Item = &'a str>) -> Vec<CompletionItem> {
+    values
+        .enumerate()
+        .map(|(i, v)| CompletionItem {
+            label: v.to_string(),
+            insert_text: None,
+            detail: None,
+            sort_order: i as i32,
+            kind: CompletionKind::Keyword,
+        })
+        .collect()
 }
 
 /// Collect the key names of sibling lines (same indentation level) around `line`.
@@ -815,6 +823,21 @@ mod tests {
         assert!(labels.contains(&"bar"), "should suggest 'bar', got: {labels:?}");
         assert!(labels.contains(&"line"), "should suggest 'line'");
         assert!(labels.contains(&"table"), "should suggest 'table'");
+    }
+
+    /// The editor completes exactly the chart types the type picker offers.
+    #[test]
+    fn visualize_type_values_are_the_pickers_chart_types() {
+        let yaml = "type: chart\nversion: 1\ndata: my_source\nvisualize:\n  type: ";
+        let items = provide_completions(CompletionContext {
+            text: yaml.to_string(),
+            cursor: kode_leptos::Position::new(4, 8),
+            version: 0,
+            trigger: kode_leptos::CompletionTrigger::TriggerCharacter(' '),
+        });
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        let offered: Vec<&str> = CHART_TYPES.iter().map(|(t, _)| *t).collect();
+        assert_eq!(labels, offered);
     }
 
     #[test]

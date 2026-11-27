@@ -231,8 +231,8 @@ fn find_closing_fence(text: &str) -> Option<usize> {
 /// (or fails to parse), return a single-element vec containing the original
 /// block content unchanged.
 pub(crate) fn split_chartml_block(block_content: &str) -> Vec<String> {
-    match serde_yaml::from_str::<serde_json::Value>(block_content) {
-        Ok(serde_json::Value::Array(items)) => {
+    match serde_yaml::from_str::<serde_yaml::Value>(block_content) {
+        Ok(serde_yaml::Value::Sequence(items)) => {
             let per_item: Vec<String> = items
                 .iter()
                 .filter_map(|v| serde_yaml::to_string(v).ok())
@@ -265,19 +265,19 @@ pub(crate) fn splice_chartml_item(
     array_index: usize,
     new_item_yaml: &str,
 ) -> Option<String> {
-    let parsed: serde_json::Value = serde_yaml::from_str(block_content).ok()?;
+    // Parsed as `serde_yaml::Value`, whose mappings keep their key order, so
+    // splicing one item does not reorder the keys of the others (or its own).
+    let parsed: serde_yaml::Value = serde_yaml::from_str(block_content).ok()?;
     match parsed {
-        serde_json::Value::Array(mut items) => {
+        serde_yaml::Value::Sequence(mut items) => {
             if array_index >= items.len() {
                 return None;
             }
-            let new_item: serde_json::Value =
-                serde_yaml::from_str(new_item_yaml).ok()?;
+            let new_item: serde_yaml::Value = serde_yaml::from_str(new_item_yaml).ok()?;
             items[array_index] = new_item;
-            let replacement = serde_json::Value::Array(items);
-            serde_yaml::to_string(&replacement).ok()
+            serde_yaml::to_string(&serde_yaml::Value::Sequence(items)).ok()
         }
-        serde_json::Value::Object(_) => {
+        serde_yaml::Value::Mapping(_) => {
             if array_index != 0 {
                 return None;
             }
@@ -493,23 +493,29 @@ pub(crate) fn chart_col_span_class(col_span: u8) -> &'static str {
 /// Set `layout.colSpan` in a per-item ChartML YAML string.
 ///
 /// Parses the YAML, sets or creates the `layout.colSpan` field, and
-/// re-serializes. Returns `None` if the YAML cannot be parsed or serialized.
+/// re-serializes, keeping every other key in the order it was written. Returns `None` if the YAML cannot be parsed or serialized.
 ///
 /// Used by the `chart-resize-request` handler in the dashboard editor to
 /// persist width changes made via the WYSIWYG drag-to-resize handles.
 #[cfg(any(target_arch = "wasm32", test))]
 pub(crate) fn set_col_span(yaml: &str, new_col_span: u8) -> Option<String> {
-    let mut spec: serde_json::Value = serde_yaml::from_str(yaml).ok()?;
-    let layout = spec
-        .as_object_mut()?
-        .entry("layout")
-        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
-    let layout_obj = layout.as_object_mut()?;
-    layout_obj.insert(
-        "colSpan".to_string(),
-        serde_json::Value::Number(serde_json::Number::from(new_col_span)),
-    );
+    let mut spec: serde_yaml::Value = serde_yaml::from_str(yaml).ok()?;
+    let layout = mapping_child(spec.as_mapping_mut()?, "layout")?;
+    layout.insert("colSpan".into(), serde_yaml::Value::Number(new_col_span.into()));
     serde_yaml::to_string(&spec).ok()
+}
+
+/// The mapping under `key`, created empty when absent; `None` when the key
+/// holds something that is not a mapping.
+#[cfg(any(target_arch = "wasm32", test))]
+fn mapping_child<'a>(
+    parent: &'a mut serde_yaml::Mapping,
+    key: &str,
+) -> Option<&'a mut serde_yaml::Mapping> {
+    if !parent.contains_key(key) {
+        parent.insert(key.into(), serde_yaml::Value::Mapping(serde_yaml::Mapping::new()));
+    }
+    parent.get_mut(key)?.as_mapping_mut()
 }
 
 /// Set `visualize.style.height` in a per-item ChartML YAML string.
@@ -521,27 +527,16 @@ pub(crate) fn set_col_span(yaml: &str, new_col_span: u8) -> Option<String> {
 /// persist height changes made via the WYSIWYG drag-to-resize handles.
 #[cfg(any(target_arch = "wasm32", test))]
 pub(crate) fn set_chart_height(yaml: &str, new_height: f64) -> Option<String> {
-    let mut spec: serde_json::Value = serde_yaml::from_str(yaml).ok()?;
-    let spec_obj = spec.as_object_mut()?;
-    let visualize = spec_obj
-        .entry("visualize")
-        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
-    let viz_obj = visualize.as_object_mut()?;
-    let style = viz_obj
-        .entry("style")
-        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
-    let style_obj = style.as_object_mut()?;
+    let mut spec: serde_yaml::Value = serde_yaml::from_str(yaml).ok()?;
+    let visualize = mapping_child(spec.as_mapping_mut()?, "visualize")?;
+    let style = mapping_child(visualize, "style")?;
     // Store as integer when the value is whole-number to keep YAML clean
-    let height_val = if new_height.fract() == 0.0 {
-        serde_json::Value::Number(serde_json::Number::from(new_height as i64))
+    let height = if new_height.fract() == 0.0 {
+        serde_yaml::Number::from(new_height as i64)
     } else {
-        serde_json::Number::from_f64(new_height)
-            .map(serde_json::Value::Number)
-            .unwrap_or(serde_json::Value::Number(serde_json::Number::from(
-                new_height as i64,
-            )))
+        serde_yaml::Number::from(new_height)
     };
-    style_obj.insert("height".to_string(), height_val);
+    style.insert("height".into(), serde_yaml::Value::Number(height));
     serde_yaml::to_string(&spec).ok()
 }
 
@@ -614,6 +609,82 @@ fn CodeBlockView(
     }
 }
 
+/// After a chart's type changes: drop the properties the new type does not
+/// have (orientation outside bar, mode outside bar/area) and the per-row `mark`
+/// overrides, so the new type applies uniformly.
+fn strip_properties_incompatible_with(
+    viz: &mut serde_json::Map<String, serde_json::Value>,
+    new_type: &str,
+) {
+    if new_type != "bar" {
+        viz.remove("orientation");
+    }
+    if new_type != "bar" && new_type != "area" {
+        viz.remove("mode");
+    }
+    if let Some(arr) = viz.get_mut("rows").and_then(|r| r.as_array_mut()) {
+        for item in arr.iter_mut() {
+            if let Some(obj) = item.as_object_mut() {
+                obj.remove("mark");
+            }
+        }
+    }
+}
+
+/// Switch one chart item's type in place, for saving to the dashboard source.
+///
+/// Only the item's `visualize` block is rewritten (the type, the fields the new
+/// type needs, and the properties it cannot keep, as the chart shows them, with
+/// the keys that remain in the order they were written);
+/// everything else keeps its keys in the order the author wrote them, because
+/// the item is edited as a `serde_yaml::Value`, whose mappings keep their order.
+/// Returns `None` when the item has no `visualize` block to switch.
+#[cfg(any(target_arch = "wasm32", test))]
+pub(crate) fn switch_chart_item_type(yaml: &str, new_type: &str) -> Option<String> {
+    let mut item: serde_yaml::Value = serde_yaml::from_str(yaml).ok()?;
+    let visualize = item.get_mut("visualize")?;
+    let original = visualize.as_mapping()?.clone();
+    let mut viz_json = match serde_json::to_value(&*visualize).ok()? {
+        serde_json::Value::Object(map) => map,
+        _ => return None,
+    };
+    let original_type = viz_json
+        .get("type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    viz_json.insert("type".to_string(), serde_json::Value::String(new_type.to_string()));
+    if new_type != original_type {
+        kyomi_chart_theme::convert_visualize_for_type_change(&mut viz_json, &original_type, new_type);
+        strip_properties_incompatible_with(&mut viz_json, new_type);
+    }
+    *visualize = serde_yaml::Value::Mapping(rebuild_in_original_order(&original, viz_json)?);
+    serde_yaml::to_string(&item).ok()
+}
+
+/// `converted` (a `serde_json` map, so its keys are sorted) as a YAML mapping
+/// laid out like `original`: keys that survive keep their position, and a value
+/// the switch did not change keeps its own YAML (so its nested key order too);
+/// keys the switch added come last, and keys it removed are gone.
+#[cfg(any(target_arch = "wasm32", test))]
+fn rebuild_in_original_order(
+    original: &serde_yaml::Mapping,
+    mut converted: serde_json::Map<String, serde_json::Value>,
+) -> Option<serde_yaml::Mapping> {
+    let mut rebuilt = serde_yaml::Mapping::new();
+    for (key, old_value) in original {
+        let Some(name) = key.as_str() else { continue };
+        let Some(new_value) = converted.remove(name) else { continue };
+        let unchanged = serde_json::to_value(old_value).ok().as_ref() == Some(&new_value);
+        let value = if unchanged { old_value.clone() } else { serde_yaml::to_value(new_value).ok()? };
+        rebuilt.insert(key.clone(), value);
+    }
+    for (name, value) in converted {
+        rebuilt.insert(name.into(), serde_yaml::to_value(value).ok()?);
+    }
+    Some(rebuilt)
+}
+
 /// Apply type/orientation/mode overrides to a parsed ChartML spec.
 ///
 /// Matches React's `ChartWithChrome` useMemo logic:
@@ -648,6 +719,10 @@ pub(crate) fn apply_spec_overrides(
     // Apply type override
     let effective_type = if let Some(t) = type_override {
         viz.insert("type".to_string(), serde_json::Value::String(t.to_string()));
+        // Switching across chart/table/metric changes which fields the type
+        // reads (columns/rows vs value), the same conversion the MCP chart app
+        // makes, so the new type has what it needs to render.
+        kyomi_chart_theme::convert_visualize_for_type_change(viz, &original_type, t);
         t.to_string()
     } else {
         original_type.clone()
@@ -676,22 +751,7 @@ pub(crate) fn apply_spec_overrides(
 
     // If type changed, clean up incompatible properties
     if type_override.is_some() && effective_type != original_type {
-        // Remove orientation for non-bar charts
-        if effective_type != "bar" {
-            viz.remove("orientation");
-        }
-        // Remove mode for non-bar/area charts
-        if effective_type != "bar" && effective_type != "area" {
-            viz.remove("mode");
-        }
-        // Strip per-row mark overrides so new type applies uniformly
-        if let Some(arr) = viz.get_mut("rows").and_then(|r| r.as_array_mut()) {
-            for item in arr.iter_mut() {
-                if let Some(obj) = item.as_object_mut() {
-                    obj.remove("mark");
-                }
-            }
-        }
+        strip_properties_incompatible_with(viz, &effective_type);
     }
 
     // Re-serialize to YAML
@@ -1444,7 +1504,7 @@ mod splice_tests {
         // Take a sequence, split it, splice each item back at its own index,
         // and verify every intermediate parses to the same structure as the
         // original. We re-parse rather than compare strings because YAML
-        // re-serialization may reorder keys or normalize whitespace.
+        // re-serialization may normalize whitespace and indentation.
         let block = "- type: bar\n  title: A\n  version: 1\n- type: line\n  title: B\n  version: 1\n- type: pie\n  title: C\n  version: 1\n";
         let items = split_chartml_block(block);
         assert_eq!(items.len(), 3);
@@ -1534,5 +1594,219 @@ mod splice_tests {
     #[test]
     fn set_chart_height_returns_none_on_invalid_yaml() {
         assert!(set_chart_height("type: [unclosed", 300.0).is_none());
+    }
+}
+
+// ---------------------------------------------------------------------------
+// apply_spec_overrides — switching chart type across categories (KYO-999)
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod type_switch_tests {
+    use super::*;
+
+    const BAR_YAML: &str = "type: chart\nversion: 1\ntitle: Revenue\n\
+        data:\n  provider: inline\n  rows:\n    - { region: North, revenue: 120, cost: 80 }\n\
+        visualize:\n  type: bar\n  columns: region\n  rows:\n    - revenue\n    - cost\n";
+
+    fn viz_of(yaml: &str) -> serde_json::Value {
+        let spec: serde_json::Value = serde_yaml::from_str(yaml).expect("yaml parses");
+        spec.get("visualize").cloned().expect("visualize present")
+    }
+
+    /// A bar chart switched to metric must name the field to show, as the MCP
+    /// chart app's switch does; without `value` the metric renderer fails with
+    /// "Missing required field: visualize.value".
+    #[test]
+    fn bar_to_metric_sets_the_value_field_from_the_first_row() {
+        let out = apply_spec_overrides(BAR_YAML, Some("metric"), None, None);
+        let viz = viz_of(&out);
+        assert_eq!(viz["type"], "metric");
+        assert_eq!(viz["value"], "revenue");
+        assert!(viz.get("rows").is_none() && viz.get("columns").is_none(), "{viz}");
+    }
+
+    /// A bar chart switched to table must list its fields as table columns;
+    /// the table renderer reads `columns`.
+    #[test]
+    fn bar_to_table_turns_the_axes_into_table_columns() {
+        let out = apply_spec_overrides(BAR_YAML, Some("table"), None, None);
+        let viz = viz_of(&out);
+        assert_eq!(viz["type"], "table");
+        let fields: Vec<&str> = viz["columns"]
+            .as_array()
+            .expect("columns is a list")
+            .iter()
+            .map(|c| c["field"].as_str().expect("field"))
+            .collect();
+        assert_eq!(fields, ["region", "revenue", "cost"]);
+        assert!(viz.get("rows").is_none(), "{viz}");
+    }
+
+    /// A table switched back to a chart gets an x axis and y rows again.
+    #[test]
+    fn table_to_bar_turns_the_columns_into_axes() {
+        let table_yaml = "type: chart\nversion: 1\ndata:\n  provider: inline\n  rows: []\n\
+            visualize:\n  type: table\n  columns:\n    - field: region\n    - field: revenue\n    - field: cost\n";
+        let out = apply_spec_overrides(table_yaml, Some("bar"), None, None);
+        let viz = viz_of(&out);
+        assert_eq!(viz["type"], "bar");
+        assert_eq!(viz["columns"], "region");
+        assert_eq!(viz["rows"], serde_json::json!(["revenue", "cost"]));
+    }
+
+    /// `rows: revenue` (a single field, not a list) is valid ChartML, so the
+    /// switch must keep it rather than drop it.
+    #[test]
+    fn a_single_field_rows_survives_the_switch_to_table_and_metric() {
+        let yaml = "type: chart\nversion: 1\ndata:\n  provider: inline\n  rows: []\n\
+            visualize:\n  type: bar\n  columns: region\n  rows: revenue\n";
+        let table = viz_of(&apply_spec_overrides(yaml, Some("table"), None, None));
+        let fields: Vec<&str> = table["columns"]
+            .as_array()
+            .expect("columns is a list")
+            .iter()
+            .map(|c| c["field"].as_str().expect("field"))
+            .collect();
+        assert_eq!(fields, ["region", "revenue"]);
+        let metric = viz_of(&apply_spec_overrides(yaml, Some("metric"), None, None));
+        assert_eq!(metric["value"], "revenue");
+    }
+
+    /// Switching within a category (bar to line) leaves the axes alone.
+    #[test]
+    fn bar_to_line_keeps_the_axes() {
+        let viz = viz_of(&apply_spec_overrides(BAR_YAML, Some("line"), None, None));
+        assert_eq!(viz["type"], "line");
+        assert_eq!(viz["columns"], "region");
+        assert_eq!(viz["rows"], serde_json::json!(["revenue", "cost"]));
+    }
+
+    /// A switch is saved to the dashboard source as `apply_spec_overrides`'s
+    /// output and the chart then renders from that source with no override, so
+    /// the saved spec has to render as the new type on its own (and switching
+    /// to the type it already has changes nothing).
+    #[test]
+    fn the_saved_spec_of_a_switch_renders_as_the_new_type_on_its_own() {
+        for new_type in ["metric", "table"] {
+            let saved = apply_spec_overrides(BAR_YAML, Some(new_type), None, None);
+            let reloaded = apply_spec_overrides(&saved, None, None, None);
+            assert_eq!(viz_of(&reloaded), viz_of(&saved), "{new_type}");
+            let again = apply_spec_overrides(&saved, Some(new_type), None, None);
+            assert_eq!(viz_of(&again), viz_of(&saved), "{new_type}");
+        }
+        let saved = apply_spec_overrides(BAR_YAML, Some("metric"), None, None);
+        assert_eq!(viz_of(&saved)["value"], "revenue");
+    }
+
+    const AUTHORED_YAML: &str = "type: chart\nversion: 1\ntitle: Revenue\n\
+        data:\n  provider: inline\n  rows:\n  - region: North\n    revenue: 120\n    cost: 80\n\
+        visualize:\n  type: bar\n  columns: region\n  rows:\n  - revenue\n  - cost\n";
+
+    fn outside_visualize(yaml: &str) -> Vec<&str> {
+        yaml.lines()
+            .take_while(|line| !line.starts_with("visualize:"))
+            .collect()
+    }
+
+    /// Saving a type switch rewrites only the `visualize` block: the author's
+    /// key order  (`type`, `version`, `title`, `data`, and a data row's own key
+    /// order) is exactly as written, for a switch within a category and across.
+    #[test]
+    fn a_saved_switch_leaves_everything_outside_visualize_as_written() {
+        for new_type in ["line", "metric", "table"] {
+            let saved = switch_chart_item_type(AUTHORED_YAML, new_type).expect("switches");
+            assert_eq!(
+                outside_visualize(&saved),
+                outside_visualize(AUTHORED_YAML),
+                "{new_type}: {saved}"
+            );
+            assert_eq!(viz_of(&saved)["type"], new_type);
+        }
+    }
+
+    /// The saved item carries what the new type needs, the same as the view.
+    #[test]
+    fn a_saved_switch_converts_visualize_like_the_view() {
+        let metric = switch_chart_item_type(AUTHORED_YAML, "metric").expect("switches");
+        assert_eq!(viz_of(&metric)["value"], "revenue");
+        let table = switch_chart_item_type(AUTHORED_YAML, "table").expect("switches");
+        assert_eq!(
+            viz_of(&table),
+            viz_of(&apply_spec_overrides(AUTHORED_YAML, Some("table"), None, None))
+        );
+    }
+
+    #[test]
+    fn an_item_without_visualize_is_not_switched() {
+        assert!(switch_chart_item_type("type: chart\ntitle: x\n", "line").is_none());
+    }
+
+    const TWO_CHARTS: &str = "- type: chart\n  version: 1\n  title: First\n  data:\n    provider: inline\n    rows:\n    - region: North\n      revenue: 120\n      cost: 80\n  visualize:\n    type: bar\n    columns: region\n    rows:\n    - revenue\n- type: chart\n  version: 1\n  title: Second\n  data:\n    provider: inline\n    rows:\n    - region: South\n      revenue: 90\n      cost: 60\n  visualize:\n    type: bar\n    columns: region\n    rows:\n    - revenue\n";
+
+    /// A chart that is one item of a list block: switching its type through the
+    /// split, the item switch and the splice, as the editor does, changes only
+    /// that item's `visualize` and keeps every other line in the block as is.
+    #[test]
+    fn switching_one_chart_of_a_block_list_changes_only_its_visualize() {
+        let items = split_chartml_block(TWO_CHARTS);
+        assert_eq!(items.len(), 2);
+        let switched = switch_chart_item_type(&items[1], "line").expect("switches");
+        let block = splice_chartml_item(TWO_CHARTS, 1, &switched).expect("splices");
+        // Everything before the switched chart's `visualize` (the whole first
+        // chart and the second chart's own keys and data) is as written.
+        let head = |text: &str| {
+            let cut = text.rfind("  visualize:").expect("second chart has visualize");
+            text[..cut].to_string()
+        };
+        assert_eq!(head(&block), head(TWO_CHARTS), "{block}");
+        assert!(block.contains("type: line"), "{block}");
+    }
+
+    /// A resize save sets one field and leaves every other line of the chart
+    /// item as written, key order included (the item is edited as a
+    /// `serde_yaml::Value`, whose mappings keep their order).
+    #[test]
+    fn a_resize_save_changes_only_the_resized_field() {
+        let with_layout = format!("{AUTHORED_YAML}layout:\n  colSpan: 6\n");
+        let col_span = set_col_span(&with_layout, 12).expect("sets colSpan");
+        assert_eq!(col_span, with_layout.replace("colSpan: 6", "colSpan: 12"));
+
+        let height = set_chart_height(AUTHORED_YAML, 320.0).expect("sets height");
+        assert_eq!(height, format!("{AUTHORED_YAML}  style:\n    height: 320\n"));
+    }
+
+    /// The lines of the `visualize` block of an item written like `AUTHORED_YAML`.
+    fn visualize_lines(yaml: &str) -> Vec<&str> {
+        yaml.lines()
+            .skip_while(|line| !line.starts_with("visualize:"))
+            .collect()
+    }
+
+    /// Within a category only the type value changes: the `visualize` block
+    /// keeps its keys in the order written (`type`, then `columns`, `rows`).
+    #[test]
+    fn bar_to_line_changes_only_the_type_line_of_visualize() {
+        let saved = switch_chart_item_type(AUTHORED_YAML, "line").expect("switches");
+        let expected: Vec<String> = visualize_lines(AUTHORED_YAML)
+            .iter()
+            .map(|line| line.replace("type: bar", "type: line"))
+            .collect();
+        assert_eq!(visualize_lines(&saved), expected, "{saved}");
+    }
+
+    /// Across categories the keys that survive stay in their written order and
+    /// the key the conversion adds (`value`) comes after them.
+    #[test]
+    fn bar_to_metric_keeps_the_surviving_keys_in_order() {
+        let saved = switch_chart_item_type(AUTHORED_YAML, "metric").expect("switches");
+        assert_eq!(visualize_lines(&saved), ["visualize:", "  type: metric", "  value: revenue"], "{saved}");
+        let keyed = "type: chart\nvisualize:\n  type: bar\n  title: Keep me\n  columns: region\n  rows:\n  - revenue\n";
+        let saved = switch_chart_item_type(keyed, "metric").expect("switches");
+        assert_eq!(
+            visualize_lines(&saved),
+            ["visualize:", "  type: metric", "  title: Keep me", "  value: revenue"],
+            "{saved}"
+        );
     }
 }

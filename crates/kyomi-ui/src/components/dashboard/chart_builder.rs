@@ -46,23 +46,11 @@ use crate::chartml_provider::configured_chartml;
 #[cfg(target_arch = "wasm32")]
 use super::markdown_renderer::{kyomi_palette, kyomi_theme};
 use super::shared::{BTN_BASE, BTN_DEFAULT, BTN_SIZE};
+use kyomi_ui_components::dashboard::chart_header_bar::CHART_TYPES;
 
 /// Label classes — matches the design system (uppercase tracking-wide like React).
 const LABEL_CLASS: &str =
     "text-xs font-medium text-muted-foreground uppercase tracking-wide";
-
-/// Chart type options matching the React `CHART_TYPE_OPTIONS` in
-/// `ChartVisualEditor.jsx` and the ChartML spec.
-const CHART_TYPES: &[(&str, &str)] = &[
-    ("bar", "Bar"),
-    ("line", "Line"),
-    ("area", "Area"),
-    ("scatter", "Scatter"),
-    ("pie", "Pie"),
-    ("doughnut", "Doughnut"),
-    ("table", "Table"),
-    ("metric", "Metric"),
-];
 
 /// Seed YAML for a new (blank) chart.
 ///

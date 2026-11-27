@@ -4,6 +4,8 @@
 //!
 //! When a user switches chart type across categories (chart ↔ table ↔ metric),
 //! the visualize structure must be converted to match the target type's schema.
+//! Shared by every surface with a chart-type picker (the app's dashboards and
+//! the MCP chart app), so a switch gives the same spec on both.
 
 use serde_json::{json, Map, Value};
 
@@ -48,6 +50,15 @@ fn extract_field(val: &Value) -> Option<String> {
         Value::String(s) => Some(s.clone()),
         Value::Object(obj) => obj.get("field").and_then(|f| f.as_str()).map(String::from),
         _ => None,
+    }
+}
+
+/// The entries of a `rows`/`columns` value: a list is its items, and a single
+/// field (`rows: revenue`) is a list of one, as ChartML allows both.
+fn entries(val: Value) -> Vec<Value> {
+    match val {
+        Value::Array(items) => items,
+        other => vec![other],
     }
 }
 
@@ -157,25 +168,16 @@ fn chart_to_table(viz: &mut Map<String, Value>) {
 
     // columns (x-axis) → first table column(s)
     if let Some(cv) = columns_val {
-        match cv {
-            Value::Array(arr) => {
-                for item in arr {
-                    if let Some(obj) = to_field_object(&item) {
-                        cols.push(obj);
-                    }
-                }
-            }
-            _ => {
-                if let Some(obj) = to_field_object(&cv) {
-                    cols.push(obj);
-                }
+        for item in entries(cv) {
+            if let Some(obj) = to_field_object(&item) {
+                cols.push(obj);
             }
         }
     }
 
     // rows (y-axis) → additional table columns
-    if let Some(Value::Array(arr)) = rows_val {
-        for item in arr {
+    if let Some(rv) = rows_val {
+        for item in entries(rv) {
             if let Some(obj) = to_field_object(&item) {
                 cols.push(obj);
             }
@@ -190,12 +192,10 @@ fn chart_to_metric(viz: &mut Map<String, Value>) {
     viz.remove("columns");
 
     // Use first row field as metric value
-    if let Some(Value::Array(arr)) = rows_val {
-        if let Some(first) = arr.first() {
-            if let Some(field) = extract_field(first) {
-                viz.insert("value".to_string(), Value::String(field));
-            }
-        }
+    if let Some(first) = rows_val.map(entries).and_then(|items| items.into_iter().next())
+        && let Some(field) = extract_field(&first)
+    {
+        viz.insert("value".to_string(), Value::String(field));
     }
 }
 
@@ -250,5 +250,25 @@ mod tests {
         let original = viz.clone();
         convert_visualize_for_type_change(&mut viz, "bar", "line");
         assert_eq!(viz, original);
+    }
+
+    #[test]
+    fn a_single_field_rows_is_kept_when_switching_to_table_and_metric() {
+        let mut to_table = serde_json::from_value::<Map<String, Value>>(json!({
+            "type": "table",
+            "columns": "region",
+            "rows": "revenue"
+        })).unwrap();
+        convert_visualize_for_type_change(&mut to_table, "bar", "table");
+        let fields: Vec<&Value> = to_table["columns"].as_array().unwrap().iter().map(|c| &c["field"]).collect();
+        assert_eq!(fields, ["region", "revenue"]);
+
+        let mut to_metric = serde_json::from_value::<Map<String, Value>>(json!({
+            "type": "metric",
+            "columns": "region",
+            "rows": "revenue"
+        })).unwrap();
+        convert_visualize_for_type_change(&mut to_metric, "bar", "metric");
+        assert_eq!(to_metric["value"], "revenue");
     }
 }

@@ -7,10 +7,11 @@ use chartml_core::ChartML;
 use chartml_leptos::{ChartMLChart, ChartMLRef};
 
 use leptos::prelude::Callback;
+use kyomi_ui_components::dashboard::chart_header_bar::CHART_TYPES;
 use kyomi_ui_components::dashboard::ChartHeaderBar;
 use crate::info_panel::InfoPanel;
 use crate::dashboard_panel::DashboardPanel;
-use crate::type_convert::convert_visualize_for_type_change;
+use kyomi_chart_theme::convert_visualize_for_type_change;
 
 const KYOMI_LOGO_SVG: &str = r#"<svg width="18" height="18" viewBox="0 0 50 50" xmlns="http://www.w3.org/2000/svg"><g transform="translate(25, 25)"><g fill="currentColor"><polygon points="0,-22 3.5,-9 0,-5.5 -3.5,-9"/><polygon points="15.5,-15.5 9,-3.5 5.5,-5.5 9,-9"/><polygon points="22,0 9,3.5 5.5,0 9,-3.5"/><polygon points="15.5,15.5 3.5,9 0,5.5 3.5,9"/><polygon points="0,22 -3.5,9 0,5.5 3.5,9"/><polygon points="-15.5,15.5 -9,3.5 -5.5,5.5 -9,9"/><polygon points="-22,0 -9,-3.5 -5.5,0 -9,3.5"/><polygon points="-15.5,-15.5 -3.5,-9 0,-5.5 -3.5,-9"/></g><circle cx="0" cy="0" r="4.5" fill="currentColor"/></g></svg>"#;
 
@@ -84,12 +85,10 @@ fn setup_chartml(is_dark: bool, palette: Option<&[String]>) -> ChartMLRef {
 // Chart type helpers
 // ---------------------------------------------------------------------------
 
-const SWITCHABLE_TYPES: &[&str] = &[
-    "bar", "line", "area", "scatter", "pie", "doughnut", "table", "metric",
-];
-
+/// Whether the shared type picker offers `chart_type`, which is what decides
+/// that the selector is shown for the current chart.
 fn is_switchable(chart_type: &str) -> bool {
-    SWITCHABLE_TYPES.contains(&chart_type)
+    CHART_TYPES.iter().any(|(offered, _label)| *offered == chart_type)
 }
 
 fn get_chart_type(spec: &serde_json::Value) -> Option<String> {
@@ -294,7 +293,6 @@ pub fn App() -> impl IntoView {
 mod tests {
     use super::*;
     use kyomi_chart_theme::KYOMI_CHART_TYPES;
-    use kyomi_ui_components::dashboard::chart_header_bar::CHART_TYPES;
 
     /// The chart app draws exactly the chart types the main app does, because
     /// both register their renderers through `register_kyomi_renderers`. Before
@@ -310,12 +308,11 @@ mod tests {
     /// Every type the chart app can be asked to draw must have a renderer
     /// registered in its ChartML setup.
     ///
-    /// Two lists decide what the app can be asked to draw: the shared type
-    /// selector's `CHART_TYPES` (what the user can pick) and the app's own
-    /// `SWITCHABLE_TYPES` (whether the selector is shown for the current type).
-    /// Both a spec sent by the chart tool and one reached through the selector
-    /// render through the registry `setup_chartml` builds, so a type offered by
-    /// either list but not registered fails with chartml-core's
+    /// The shared type selector's `CHART_TYPES` is the one list of what the user
+    /// can pick, and `is_switchable` (whether the selector is shown for the
+    /// current type) reads it too. A spec sent by the chart tool and one reached
+    /// through the selector both render through the registry `setup_chartml`
+    /// builds, so a type offered but not registered fails with chartml-core's
     /// `UnknownChartType` — how "table" (KYO-987) shipped broken in the MCP app
     /// while working in Kyomi's own dashboards. This asks the real registry
     /// rather than reading source text, so it holds however the renderers are
@@ -325,20 +322,29 @@ mod tests {
     fn every_chart_type_the_app_offers_has_a_registered_renderer() {
         let chartml = setup_chartml(false, None);
 
-        let offered = CHART_TYPES
-            .iter()
-            .map(|(chart_type, _label)| *chart_type)
-            .chain(SWITCHABLE_TYPES.iter().copied());
-        let mut checked = 0;
-        for chart_type in offered {
+        assert!(!CHART_TYPES.is_empty(), "CHART_TYPES was empty");
+        for (chart_type, _label) in CHART_TYPES {
             assert!(
                 chartml.registry().has_renderer(chart_type),
                 "the chart app can be asked for {chart_type:?} but setup_chartml registers no \
                  renderer for it, so that type fails with chartml-core's UnknownChartType \
                  instead of rendering"
             );
-            checked += 1;
         }
-        assert!(checked > SWITCHABLE_TYPES.len(), "CHART_TYPES was empty");
+    }
+
+    /// The one picker list (`CHART_TYPES`) drives the header bar here and in the
+    /// main app, and the chart builder's type select. It may carry labels and
+    /// leave out aliases (`donut`), but every entry must be a type
+    /// `register_kyomi_renderers` registers (`KYOMI_CHART_TYPES`).
+    #[test]
+    fn every_picker_type_is_a_shared_renderer_type() {
+        for (chart_type, _label) in CHART_TYPES {
+            assert!(
+                KYOMI_CHART_TYPES.contains(chart_type),
+                "the shared picker offers {chart_type:?}, which \
+                 kyomi_chart_theme::KYOMI_CHART_TYPES does not register a renderer for"
+            );
+        }
     }
 }

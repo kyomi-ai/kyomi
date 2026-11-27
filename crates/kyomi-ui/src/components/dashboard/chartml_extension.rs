@@ -13,7 +13,7 @@ use leptos::prelude::*;
 use leptos::tachys::view::any_view::AnyView;
 
 use crate::chartml_provider::configured_chartml;
-use crate::components::dashboard::chart_header_bar::ChartHeaderBar;
+use kyomi_ui_components::dashboard::ChartHeaderBar;
 use crate::components::dashboard::kyomi_chart::chart_card_type_until_rendered;
 use crate::components::dashboard::markdown_renderer::{
     apply_spec_overrides, chart_col_span_class, extract_chart_mode, extract_chart_orientation,

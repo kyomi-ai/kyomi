@@ -8,6 +8,7 @@ license.workspace = true
 description = "Kyomi chart palettes, editorial chart theme and renderer registry — shared across the browser (kyomi-ui), the MCP chart app and server (kyomi-agent) render paths."
 
 [dependencies]
+serde_json = { workspace = true }
 chartml-core = { workspace = true }
 # The renderers `register_kyomi_renderers` installs, so every app that draws
 # Kyomi charts registers the same set from this one definition.

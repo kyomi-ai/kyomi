@@ -13,7 +13,6 @@ mod dashboard_panel;
 mod info_panel;
 mod mcp_interop;
 pub mod mcp_transport;
-mod type_convert;
 
 fn main() {
     console_error_panic_hook::set_once();
