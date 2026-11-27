@@ -160,6 +160,58 @@ assert_run "a Developer ID signature is refused (CI signed ad hoc)" 1 "not ad-ho
 assert_run "an unexpected bundle identifier is refused" 1 "identifier is not ai.kyomi.desktop" \
     inspect arm64 0 $'Identifier=com.example.other\nSignature=adhoc'
 
+# --- cleanup and interruption -------------------------------------------------------
+assert_run "a relative CARGO_TARGET_DIR is refused before anything runs" 1 "must be an absolute path" \
+    env CARGO_TARGET_DIR=target "$SCRIPT" v2.7.17
+
+# cleanup must remove the work directory even when its start directory is gone
+# (it runs under set -e; a failing step must not skip the rest) and must exit 0.
+mkdir -p "$TMP/clean/work/src"
+set +e
+(
+    set -e
+    source "$SCRIPT"
+    START_DIR="$TMP/no-such-dir" REPO="$TMP" WORK="$TMP/clean/work" SRC="$TMP/clean/work/src" MOUNT=""
+    cleanup
+) > /dev/null 2> "$TMP/err"
+rc=$?
+set -e
+checks=$((checks + 1))
+if [ "$rc" -eq 0 ] && [ ! -e "$TMP/clean/work" ]; then
+    pass "cleanup removes the work directory even when the start directory is gone"
+else
+    fail "cleanup removes the work directory even when the start directory is gone (rc $rc)" "$TMP/err"
+fi
+
+# A TERM sent to the script while a long step runs must stop the step's whole
+# process group promptly, not after the step ends.
+printf '#!/bin/sh\nsleep 300\n' > "$TMP/longstep"
+chmod +x "$TMP/longstep"
+(
+    source "$SCRIPT"
+    trap 'terminate 143' TERM
+    run_in "$TMP" "$TMP/longstep"
+) > /dev/null 2>&1 &
+runner=$!
+sleep 1
+kill -TERM "$runner"
+waited=0
+while kill -0 "$runner" 2> /dev/null && [ "$waited" -lt 10 ]; do
+    sleep 1
+    waited=$((waited + 1))
+done
+checks=$((checks + 1))
+if kill -0 "$runner" 2> /dev/null; then
+    kill -KILL "$runner" 2> /dev/null || true
+    pkill -f "$TMP/longstep" 2> /dev/null || true
+    fail "TERM stops the running step promptly (still running after 10s)"
+elif pgrep -f "$TMP/longstep" > /dev/null 2>&1; then
+    pkill -f "$TMP/longstep" 2> /dev/null || true
+    fail "TERM stops the running step's process group (the step survived)"
+else
+    pass "TERM stops the running step and its process group promptly (${waited}s)"
+fi
+
 # --- the config strip CI did (BSD sed -i '', so only where that sed exists) --------
 if [ "$(uname -s)" = Darwin ]; then
     mkdir -p "$TMP/strip/.cargo" "$TMP/strip/crates/kyomi-ui"

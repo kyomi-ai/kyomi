@@ -101,6 +101,32 @@ parse_args() {
     printf '%s %s\n' "$mode" "$ref"
 }
 
+# run_in <dir> <command...> runs a long step as a background job in its own
+# process group and waits for it, so that a signal sent to this script is
+# acted on at once (bash defers a trapped signal until a foreground command
+# ends, which here would be the end of a 45-minute build) and takes the whole
+# build tree down with it, not just the shell that started it.
+CHILD=""
+run_in() {
+    local dir="$1" status=0
+    shift
+    set -m
+    (cd "$dir" && exec "$@") < /dev/null &
+    CHILD=$!
+    wait "$CHILD" || status=$?
+    CHILD=""
+    return "$status"
+}
+
+# terminate <exit-code>: the INT/TERM/HUP handler.
+terminate() {
+    if [ -n "$CHILD" ]; then
+        kill -TERM -- "-$CHILD" 2> /dev/null || true
+        wait "$CHILD" 2> /dev/null || true
+    fi
+    exit "$1"
+}
+
 # Download one pinned release asset. curl --fail makes a missing asset an error.
 fetch() { curl --fail --silent --show-error --location "$1"; }
 
@@ -128,7 +154,7 @@ install_pinned_tools() {
     ln -s "$tools/binaryen-${binaryen}/bin/wasm-opt" "$tools/bin/wasm-opt"
 
     # The same compile CI ran. --root keeps it out of ~/.cargo/bin.
-    cargo install tauri-cli --version "^2" --locked --root "$tools"
+    run_in "$PWD" cargo install tauri-cli --version "^2" --locked --root "$tools"
 
     [ "$("$tools/bin/trunk" --version)" = "trunk $trunk" ] || die "installed trunk is not $trunk"
     [ "$("$tools/bin/wasm-bindgen" --version)" = "wasm-bindgen $wasm_bindgen" ] || die "installed wasm-bindgen is not $wasm_bindgen"
@@ -172,10 +198,11 @@ inspect_app() {
 # interrupted or failed run never leaves the dmg attached.
 verify_dmg() {
     local dmg="$1" status=0
-    MOUNT="$WORK/dmg-mount"
-    mkdir -p "$MOUNT"
-    hdiutil attach -readonly -nobrowse -mountpoint "$MOUNT" "$dmg" > /dev/null \
+    local mountpoint="$WORK/dmg-mount"
+    mkdir -p "$mountpoint"
+    hdiutil attach -readonly -nobrowse -mountpoint "$mountpoint" "$dmg" > /dev/null \
         || die "cannot mount $dmg"
+    MOUNT="$mountpoint"
     (inspect_app "$MOUNT/Kyomi.app" "$dmg") || status=$?
     hdiutil detach "$MOUNT" > /dev/null || die "cannot detach $MOUNT"
     MOUNT=""
@@ -187,19 +214,26 @@ verify_dmg() {
 # named, never silently left.
 MOUNT=""
 cleanup() {
-    cd "$START_DIR"
-    if [ -n "$MOUNT" ]; then
-        hdiutil detach -force "$MOUNT" > /dev/null 2>&1 \
-            || printf 'release-macos-desktop: could not detach %s\n' "$MOUNT" >&2
+    set +e # an EXIT trap runs under the script's `set -e`; every step must run
+    cd "$START_DIR" || cd /
+    if [ -n "$MOUNT" ] && ! hdiutil detach -force "$MOUNT" > /dev/null 2>&1; then
+        printf 'release-macos-desktop: could not detach %s; leaving %s in place\n' "$MOUNT" "$WORK" >&2
+        return 0
     fi
-    git -C "$REPO" worktree remove --force "$SRC" > /dev/null 2>&1 \
-        || printf 'release-macos-desktop: could not remove worktree %s (git worktree prune)\n' "$SRC" >&2
-    git -C "$REPO" worktree prune
+    if [ -e "$SRC/.git" ]; then
+        git -C "$REPO" worktree remove --force "$SRC" > /dev/null 2>&1 \
+            || printf 'release-macos-desktop: could not remove worktree %s; run: git worktree remove --force %s\n' "$SRC" "$SRC" >&2
+    fi
     rm -rf "$WORK"
+    return 0
 }
 
 main() {
     local parsed mode ref
+    case "${CARGO_TARGET_DIR:-/}" in
+        /*) ;;
+        *) die "CARGO_TARGET_DIR must be an absolute path (the build runs from inside the checkout): $CARGO_TARGET_DIR" ;;
+    esac
     parsed="$(parse_args "$@")" || exit $?
     mode="${parsed%% *}"
     ref="${parsed#* }"
@@ -244,8 +278,9 @@ main() {
 
     # Interrupting the run still removes the worktree: turn the signals into an
     # exit so the EXIT trap runs.
-    trap 'exit 130' INT
-    trap 'exit 143' TERM
+    trap 'terminate 130' INT
+    trap 'terminate 143' TERM
+    trap 'terminate 129' HUP
 
     echo "==> clean checkout of $ref ($commit)"
     git -C "$REPO" worktree add --quiet --detach "$SRC" "$commit"
@@ -270,11 +305,19 @@ main() {
     cargo metadata --locked --format-version 1 > /dev/null \
         || die "Cargo.lock is stale or a local [patch.crates-io] override is active; a release must build from the lock on the registry"
 
+    # A dmg left in a reused target directory by an earlier build would make
+    # "exactly one dmg" fail after the whole build, so clear it first.
+    local target_dir
+    target_dir="$(cargo metadata --locked --format-version 1 --no-deps \
+        | python3 -I -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')" \
+        || die "cannot read the cargo target directory"
+    rm -f "$target_dir"/release/bundle/dmg/*_aarch64.dmg
+
     install_pinned_tools "$tools" "$SRC"
     strip_local_dev_config "$SRC"
 
     echo "==> trunk build --release (kyomi-ui)"
-    (cd "$SRC/crates/kyomi-ui" && trunk build --release)
+    run_in "$SRC/crates/kyomi-ui" trunk build --release
 
     echo "==> wasm-opt"
     local wasm
@@ -285,14 +328,12 @@ main() {
     done
 
     echo "==> MCP chart app"
-    (cd "$SRC/apps/mcp-chart-app-wasm" && bash build.sh)
+    run_in "$SRC/apps/mcp-chart-app-wasm" bash build.sh
 
     echo "==> cargo tauri build --bundles dmg (fat LTO, release profile)"
-    (cd "$SRC/apps/desktop" && CARGO_PROFILE_RELEASE_LTO=true cargo tauri build --bundles dmg)
+    run_in "$SRC/apps/desktop" env CARGO_PROFILE_RELEASE_LTO=true cargo tauri build --bundles dmg
 
-    local target_dir dmgs dmg
-    target_dir="$(cd "$SRC" && cargo metadata --locked --format-version 1 --no-deps \
-        | python3 -I -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')"
+    local dmgs dmg
     dmgs=("$target_dir"/release/bundle/dmg/*_aarch64.dmg)
     [ "${#dmgs[@]}" -eq 1 ] && [ -f "${dmgs[0]}" ] \
         || die "expected exactly one *_aarch64.dmg in $target_dir/release/bundle/dmg, found ${#dmgs[@]}"
@@ -311,7 +352,7 @@ main() {
         # The work directory is deleted on exit, and it holds the only copy of a
         # 45-minute build: keep the dmg so the upload can be retried by hand.
         cp "$dmg" "$START_DIR/" || die "upload failed and the dmg could not be saved from $dmg"
-        die "upload to $ref failed; the built dmg is saved as $START_DIR/$(basename "$dmg"); retry with: gh release upload $ref $START_DIR/$(basename "$dmg")"
+        die "upload to $ref failed; the built dmg is saved as $START_DIR/$(basename "$dmg"). Check gh release view $ref --json assets for a partial asset first; then retry with: gh release upload $ref $START_DIR/$(basename "$dmg") (add --clobber only if a partial asset exists)"
     fi
     echo "==> done: $(basename "$dmg") attached to $ref"
 }

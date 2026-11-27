@@ -33,7 +33,7 @@
 # ("fix: disable sccache on Windows desktop build (linker exit code 2)
 # (#30)"). Run 25530975421 was green on all three legs.
 #
-# Re-verified 2026-08-10 on `72343862` via run 31437801869: linux, macos and
+# Re-verified 2026-08-10 on `72343862` via run 31437801869: linux, macos (still built then) and
 # windows all green, three months and a large amount of workspace churn after
 # that fix. If you are here because the 1-in-8 statistic looked alarming, it
 # was measuring a debugging session (KYO-320).
