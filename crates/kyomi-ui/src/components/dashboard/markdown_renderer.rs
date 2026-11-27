@@ -634,7 +634,8 @@ fn strip_properties_incompatible_with(
 /// Switch one chart item's type in place, for saving to the dashboard source.
 ///
 /// Only the item's `visualize` block is rewritten (the type, the fields the new
-/// type needs, and the properties it cannot keep, as the chart shows them);
+/// type needs, and the properties it cannot keep, as the chart shows them, with
+/// the keys that remain in the order they were written);
 /// everything else keeps its keys in the order the author wrote them, because
 /// the item is edited as a `serde_yaml::Value`, whose mappings keep their order.
 /// Returns `None` when the item has no `visualize` block to switch.
@@ -642,6 +643,7 @@ fn strip_properties_incompatible_with(
 pub(crate) fn switch_chart_item_type(yaml: &str, new_type: &str) -> Option<String> {
     let mut item: serde_yaml::Value = serde_yaml::from_str(yaml).ok()?;
     let visualize = item.get_mut("visualize")?;
+    let original = visualize.as_mapping()?.clone();
     let mut viz_json = match serde_json::to_value(&*visualize).ok()? {
         serde_json::Value::Object(map) => map,
         _ => return None,
@@ -656,8 +658,31 @@ pub(crate) fn switch_chart_item_type(yaml: &str, new_type: &str) -> Option<Strin
         kyomi_chart_theme::convert_visualize_for_type_change(&mut viz_json, &original_type, new_type);
         strip_properties_incompatible_with(&mut viz_json, new_type);
     }
-    *visualize = serde_yaml::to_value(serde_json::Value::Object(viz_json)).ok()?;
+    *visualize = serde_yaml::Value::Mapping(rebuild_in_original_order(&original, viz_json)?);
     serde_yaml::to_string(&item).ok()
+}
+
+/// `converted` (a `serde_json` map, so its keys are sorted) as a YAML mapping
+/// laid out like `original`: keys that survive keep their position, and a value
+/// the switch did not change keeps its own YAML (so its nested key order too);
+/// keys the switch added come last, and keys it removed are gone.
+#[cfg(any(target_arch = "wasm32", test))]
+fn rebuild_in_original_order(
+    original: &serde_yaml::Mapping,
+    mut converted: serde_json::Map<String, serde_json::Value>,
+) -> Option<serde_yaml::Mapping> {
+    let mut rebuilt = serde_yaml::Mapping::new();
+    for (key, old_value) in original {
+        let Some(name) = key.as_str() else { continue };
+        let Some(new_value) = converted.remove(name) else { continue };
+        let unchanged = serde_json::to_value(old_value).ok().as_ref() == Some(&new_value);
+        let value = if unchanged { old_value.clone() } else { serde_yaml::to_value(new_value).ok()? };
+        rebuilt.insert(key.clone(), value);
+    }
+    for (name, value) in converted {
+        rebuilt.insert(name.into(), serde_yaml::to_value(value).ok()?);
+    }
+    Some(rebuilt)
 }
 
 /// Apply type/orientation/mode overrides to a parsed ChartML spec.
@@ -1749,5 +1774,39 @@ mod type_switch_tests {
 
         let height = set_chart_height(AUTHORED_YAML, 320.0).expect("sets height");
         assert_eq!(height, format!("{AUTHORED_YAML}  style:\n    height: 320\n"));
+    }
+
+    /// The lines of the `visualize` block of an item written like `AUTHORED_YAML`.
+    fn visualize_lines(yaml: &str) -> Vec<&str> {
+        yaml.lines()
+            .skip_while(|line| !line.starts_with("visualize:"))
+            .collect()
+    }
+
+    /// Within a category only the type value changes: the `visualize` block
+    /// keeps its keys in the order written (`type`, then `columns`, `rows`).
+    #[test]
+    fn bar_to_line_changes_only_the_type_line_of_visualize() {
+        let saved = switch_chart_item_type(AUTHORED_YAML, "line").expect("switches");
+        let expected: Vec<String> = visualize_lines(AUTHORED_YAML)
+            .iter()
+            .map(|line| line.replace("type: bar", "type: line"))
+            .collect();
+        assert_eq!(visualize_lines(&saved), expected, "{saved}");
+    }
+
+    /// Across categories the keys that survive stay in their written order and
+    /// the key the conversion adds (`value`) comes after them.
+    #[test]
+    fn bar_to_metric_keeps_the_surviving_keys_in_order() {
+        let saved = switch_chart_item_type(AUTHORED_YAML, "metric").expect("switches");
+        assert_eq!(visualize_lines(&saved), ["visualize:", "  type: metric", "  value: revenue"], "{saved}");
+        let keyed = "type: chart\nvisualize:\n  type: bar\n  title: Keep me\n  columns: region\n  rows:\n  - revenue\n";
+        let saved = switch_chart_item_type(keyed, "metric").expect("switches");
+        assert_eq!(
+            visualize_lines(&saved),
+            ["visualize:", "  type: metric", "  title: Keep me", "  value: revenue"],
+            "{saved}"
+        );
     }
 }
