@@ -38,7 +38,7 @@ use crate::components::dashboard::{
 };
 #[cfg(target_arch = "wasm32")]
 use crate::components::dashboard::{
-    markdown_renderer::{apply_spec_overrides, set_chart_height, set_col_span},
+    markdown_renderer::{set_chart_height, set_col_span, switch_chart_item_type},
 };
 use crate::components::{Alert, AlertDescription, AlertTitle, AlertVariant, Button, ButtonLink, ButtonSize, ButtonVariant, DetailPageSkeleton, ToggleButton, Spinner};
 use crate::server_fns::context::UserContext;
@@ -954,10 +954,10 @@ fn DashboardEditorInner(
                     .unwrap_or("");
                 let array_index = array_index as usize;
 
-                // Save the same spec the chart now shows: the new type with the
-                // fields it needs (a metric's `value`, a table's `columns`), so
-                // it still renders after a reload.
-                let updated_yaml = apply_spec_overrides(yaml, Some(new_type), None, None);
+                // Save the chart as it now shows: the new type with the fields it
+                // needs (a metric's `value`, a table's `columns`), so it still
+                // renders after a reload. Only `visualize` is rewritten.
+                let Some(updated_yaml) = switch_chart_item_type(yaml, new_type) else { return; };
 
                 // Locate the block in the current editor source.
                 let current = editor_content.get_untracked();

@@ -614,6 +614,57 @@ fn CodeBlockView(
     }
 }
 
+/// After a chart's type changes: drop the properties the new type does not
+/// have (orientation outside bar, mode outside bar/area) and the per-row `mark`
+/// overrides, so the new type applies uniformly.
+fn strip_properties_incompatible_with(
+    viz: &mut serde_json::Map<String, serde_json::Value>,
+    new_type: &str,
+) {
+    if new_type != "bar" {
+        viz.remove("orientation");
+    }
+    if new_type != "bar" && new_type != "area" {
+        viz.remove("mode");
+    }
+    if let Some(arr) = viz.get_mut("rows").and_then(|r| r.as_array_mut()) {
+        for item in arr.iter_mut() {
+            if let Some(obj) = item.as_object_mut() {
+                obj.remove("mark");
+            }
+        }
+    }
+}
+
+/// Switch one chart item's type in place, for saving to the dashboard source.
+///
+/// Only the item's `visualize` block is rewritten (the type, the fields the new
+/// type needs, and the properties it cannot keep, as the chart shows them);
+/// everything else keeps its keys in the order the author wrote them, because
+/// the item is edited as a `serde_yaml::Value`, whose mappings keep their order.
+/// Returns `None` when the item has no `visualize` block to switch.
+#[cfg(any(target_arch = "wasm32", test))]
+pub(crate) fn switch_chart_item_type(yaml: &str, new_type: &str) -> Option<String> {
+    let mut item: serde_yaml::Value = serde_yaml::from_str(yaml).ok()?;
+    let visualize = item.get_mut("visualize")?;
+    let mut viz_json = match serde_json::to_value(&*visualize).ok()? {
+        serde_json::Value::Object(map) => map,
+        _ => return None,
+    };
+    let original_type = viz_json
+        .get("type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    viz_json.insert("type".to_string(), serde_json::Value::String(new_type.to_string()));
+    if new_type != original_type {
+        kyomi_chart_theme::convert_visualize_for_type_change(&mut viz_json, &original_type, new_type);
+        strip_properties_incompatible_with(&mut viz_json, new_type);
+    }
+    *visualize = serde_yaml::to_value(serde_json::Value::Object(viz_json)).ok()?;
+    serde_yaml::to_string(&item).ok()
+}
+
 /// Apply type/orientation/mode overrides to a parsed ChartML spec.
 ///
 /// Matches React's `ChartWithChrome` useMemo logic:
@@ -680,22 +731,7 @@ pub(crate) fn apply_spec_overrides(
 
     // If type changed, clean up incompatible properties
     if type_override.is_some() && effective_type != original_type {
-        // Remove orientation for non-bar charts
-        if effective_type != "bar" {
-            viz.remove("orientation");
-        }
-        // Remove mode for non-bar/area charts
-        if effective_type != "bar" && effective_type != "area" {
-            viz.remove("mode");
-        }
-        // Strip per-row mark overrides so new type applies uniformly
-        if let Some(arr) = viz.get_mut("rows").and_then(|r| r.as_array_mut()) {
-            for item in arr.iter_mut() {
-                if let Some(obj) = item.as_object_mut() {
-                    obj.remove("mark");
-                }
-            }
-        }
+        strip_properties_incompatible_with(viz, &effective_type);
     }
 
     // Re-serialize to YAML
@@ -1641,5 +1677,48 @@ mod type_switch_tests {
         }
         let saved = apply_spec_overrides(BAR_YAML, Some("metric"), None, None);
         assert_eq!(viz_of(&saved)["value"], "revenue");
+    }
+
+    const AUTHORED_YAML: &str = "type: chart\nversion: 1\ntitle: Revenue\n\
+        data:\n  provider: inline\n  rows:\n  - region: North\n    revenue: 120\n    cost: 80\n\
+        visualize:\n  type: bar\n  columns: region\n  rows:\n    - revenue\n    - cost\n";
+
+    fn outside_visualize(yaml: &str) -> Vec<&str> {
+        yaml.lines()
+            .take_while(|line| !line.starts_with("visualize:"))
+            .collect()
+    }
+
+    /// Saving a type switch rewrites only the `visualize` block: the author's
+    /// key order  (`type`, `version`, `title`, `data`, and a data row's own key
+    /// order) is exactly as written, for a switch within a category and across.
+    #[test]
+    fn a_saved_switch_leaves_everything_outside_visualize_as_written() {
+        for new_type in ["line", "metric", "table"] {
+            let saved = switch_chart_item_type(AUTHORED_YAML, new_type).expect("switches");
+            assert_eq!(
+                outside_visualize(&saved),
+                outside_visualize(AUTHORED_YAML),
+                "{new_type}: {saved}"
+            );
+            assert_eq!(viz_of(&saved)["type"], new_type);
+        }
+    }
+
+    /// The saved item carries what the new type needs, the same as the view.
+    #[test]
+    fn a_saved_switch_converts_visualize_like_the_view() {
+        let metric = switch_chart_item_type(AUTHORED_YAML, "metric").expect("switches");
+        assert_eq!(viz_of(&metric)["value"], "revenue");
+        let table = switch_chart_item_type(AUTHORED_YAML, "table").expect("switches");
+        assert_eq!(
+            viz_of(&table),
+            viz_of(&apply_spec_overrides(AUTHORED_YAML, Some("table"), None, None))
+        );
+    }
+
+    #[test]
+    fn an_item_without_visualize_is_not_switched() {
+        assert!(switch_chart_item_type("type: chart\ntitle: x\n", "line").is_none());
     }
 }
