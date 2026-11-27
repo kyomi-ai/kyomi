@@ -63,12 +63,12 @@ assert_value() {
 in_script() { (source "$SCRIPT" && "$@"); }
 
 # --- argument handling ---------------------------------------------------------
-assert_run "no arguments is a usage error" 2 "Usage:" "$SCRIPT"
-assert_run "--dry-run without a ref is a usage error" 2 "Usage:" "$SCRIPT" --dry-run
-assert_run "too many arguments is a usage error" 2 "Usage:" "$SCRIPT" v2.7.17 extra
-assert_run "an option in the ref position is a usage error" 2 "Usage:" "$SCRIPT" --dry-run --upload
-assert_run "a non-tag is refused without --dry-run" 2 "is not a release tag" "$SCRIPT" main
-assert_run "a malformed tag is refused" 2 "is not a release tag" "$SCRIPT" v2.7
+assert_run "no arguments is a usage error" 2 "Usage:" env -u CARGO_TARGET_DIR "$SCRIPT"
+assert_run "--dry-run without a ref is a usage error" 2 "Usage:" env -u CARGO_TARGET_DIR "$SCRIPT" --dry-run
+assert_run "too many arguments is a usage error" 2 "Usage:" env -u CARGO_TARGET_DIR "$SCRIPT" v2.7.17 extra
+assert_run "an option in the ref position is a usage error" 2 "Usage:" env -u CARGO_TARGET_DIR "$SCRIPT" --dry-run --upload
+assert_run "a non-tag is refused without --dry-run" 2 "is not a release tag" env -u CARGO_TARGET_DIR "$SCRIPT" main
+assert_run "a malformed tag is refused" 2 "is not a release tag" env -u CARGO_TARGET_DIR "$SCRIPT" v2.7
 assert_value "a release tag selects release mode" "release v2.7.17" \
     "$(in_script parse_args v2.7.17)"
 assert_value "--dry-run accepts any ref" "dry-run origin/main" \
@@ -79,7 +79,7 @@ assert_run "a missing tool is named and stops the run" 1 "required tool not foun
     in_script require_tool no-such-tool-xyz
 if [ "$(uname -s)-$(uname -m)" != "Darwin-arm64" ]; then
     assert_run "a host that is not an Apple-silicon Mac is refused" 1 "must run on a Mac" \
-        "$SCRIPT" v2.7.17
+        env -u CARGO_TARGET_DIR "$SCRIPT" v2.7.17
 fi
 
 # --- pins are read from the repository, not hardcoded ----------------------------
@@ -185,7 +185,9 @@ fi
 
 # A TERM sent to the script while a long step runs must stop the step's whole
 # process group promptly, not after the step ends.
-printf '#!/bin/sh\nsleep 300\n' > "$TMP/longstep"
+# The step starts a grandchild and records its pid, so the test can check that
+# the signal reached the whole process group and not only the step's shell.
+printf '#!/bin/sh\nsleep 300 &\necho $! > "%s/grandchild.pid"\nwait\n' "$TMP" > "$TMP/longstep"
 chmod +x "$TMP/longstep"
 (
     source "$SCRIPT"
@@ -205,9 +207,9 @@ if kill -0 "$runner" 2> /dev/null; then
     kill -KILL "$runner" 2> /dev/null || true
     pkill -f "$TMP/longstep" 2> /dev/null || true
     fail "TERM stops the running step promptly (still running after 10s)"
-elif pgrep -f "$TMP/longstep" > /dev/null 2>&1; then
-    pkill -f "$TMP/longstep" 2> /dev/null || true
-    fail "TERM stops the running step's process group (the step survived)"
+elif kill -0 "$(cat "$TMP/grandchild.pid")" 2> /dev/null; then
+    kill -KILL "$(cat "$TMP/grandchild.pid")" 2> /dev/null || true
+    fail "TERM stops the running step's process group (the step's child survived)"
 else
     pass "TERM stops the running step and its process group promptly (${waited}s)"
 fi

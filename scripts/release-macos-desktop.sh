@@ -230,13 +230,13 @@ cleanup() {
 
 main() {
     local parsed mode ref
+    parsed="$(parse_args "$@")" || exit $?
+    mode="${parsed%% *}"
+    ref="${parsed#* }"
     case "${CARGO_TARGET_DIR:-/}" in
         /*) ;;
         *) die "CARGO_TARGET_DIR must be an absolute path (the build runs from inside the checkout): $CARGO_TARGET_DIR" ;;
     esac
-    parsed="$(parse_args "$@")" || exit $?
-    mode="${parsed%% *}"
-    ref="${parsed#* }"
 
     require_apple_silicon_mac
     for tool in git cargo rustup curl tar python3 brew hdiutil lipo codesign plutil; do
