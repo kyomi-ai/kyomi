@@ -123,9 +123,11 @@ Upgrade procedure:
    hydration. Preserve workflow/preflight parity self-tests.
 4. Validate production server/Docker and standalone Linux x86_64 builds
    with `release.yml` on the candidate branch: manual dispatch builds artifacts
-   without publishing images, releases or deployments. Validate Linux/macOS/
-   Windows desktop with branch dispatch of `desktop.yml` (only tag runs attach
-   installers). Run the release-profile LTO smoke test on the same branch.
+   without publishing images, releases or deployments. Validate Linux/Windows
+   desktop with branch dispatch of `desktop.yml` (only tag runs attach
+   installers) and macOS with `scripts/release-macos-desktop.sh --dry-run
+   <branch>` on an Apple-silicon Mac (`desktop.yml` no longer builds macOS).
+   Run the release-profile LTO smoke test on the same branch.
    Never create a release tag merely to validate a toolchain.
 5. Record run links, installed compiler/Cargo versions, cache namespaces and
    genuine platform limitations in the PR. Merge after supported checks pass.

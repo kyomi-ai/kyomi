@@ -13,6 +13,18 @@ All scripts are organized by environment. **Every script is environment-specific
   in `.githooks/`; the setting is shared with every worktree of that clone.
   See root `CLAUDE.md` "Setup".
 
+- **`release-macos-desktop.sh`** - Builds the macOS desktop installer by hand
+  on an Apple-silicon Mac and uploads it to a release (KYO-991: the macOS leg
+  of `desktop.yml` ran past its 300-minute limit, so that workflow builds
+  Linux and Windows only). `release-macos-desktop.sh <tag>` builds a clean
+  checkout of the tag with the pinned tools and the CI leg's steps and
+  settings, checks the dmg's app is arm64-only and ad-hoc signed, and runs
+  `gh release upload`; `--dry-run <ref>` does everything but upload. Exit
+  codes: `0` success, `2` usage, `1` any failed step or missing tool. Argument
+  handling, failure paths and the pin lookups are self-tested by
+  `release-macos-desktop-test.sh` (run in CI); the build itself is exercised
+  by a `--dry-run` on a Mac. See `kyomi-private/docs/RELEASING.md`.
+
 - **`mine-review-logs.sh`** - Locates recent code-review logs for the
   coding-standards-mining step (KYO-373 / KYO-386), from any worktree.
   `docs/review-logs/` is **intentionally untracked and machine-local** —
