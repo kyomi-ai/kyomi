@@ -38,11 +38,13 @@
 # If the final upload fails, the built dmg is copied to the current directory
 # so the upload can be retried without a rebuild.
 #
-# The build must not inherit anything that changes what is shipped, so it runs
-# with no rustc wrapper (sccache included; CI used sccache only for speed) and
-# refuses to start if cargo would read a profile, rustflags, target, linker,
-# patch, source or env setting from a config file outside the checkout, or from
-# a CARGO_PROFILE_*, CARGO_BUILD_* or CARGO_TARGET_* environment variable.
+# The build must not inherit anything that changes what is shipped. It runs
+# with a fresh, empty CARGO_HOME inside the work directory (as on a CI runner,
+# so no user-level cargo config is read and every crate is downloaded again),
+# with no rustc wrapper (sccache included; CI used sccache only for speed), and
+# refuses to start if a cargo config file exists above the checkout or a
+# CARGO_PROFILE_*, CARGO_BUILD_* or CARGO_TARGET_* variable that changes the
+# build is set.
 #
 # Exit codes: 0 success; 2 usage error; 1 any other failure. Nothing here
 # falls back: a missing tool, a version mismatch or a failed step stops the run.
@@ -142,33 +144,36 @@ terminate() {
     exit "$1"
 }
 
-# check_cargo_config <cargo-home> <checkout> refuses to continue when cargo
-# would read a setting that changes the compiled output from outside the
-# checkout: a config file in <cargo-home> or in any directory above <checkout>,
-# or a CARGO_PROFILE_*, CARGO_BUILD_* or CARGO_TARGET_* variable (CARGO_TARGET_DIR
-# only moves the build products and is allowed). The checkout's own
-# .cargo/config.toml is reviewed source and is allowed. A rustc wrapper is not
-# refused: main clears it explicitly, so it cannot change the output.
-CARGO_CONFIG_SECTIONS='^[[:space:]]*\[(profile|patch|target|source|env|unstable)([].]|$)'
-CARGO_CONFIG_KEYS='^[[:space:]]*(rustflags|rustdocflags|linker|rustc|rustc-workspace-wrapper|rustdoc|target|codegen-units|lto|opt-level|debug|strip|panic|overflow-checks|debug-assertions|incremental)[[:space:]]*='
+# The build gets a fresh, empty CARGO_HOME inside the work directory, which is
+# what a CI runner has: cargo then reads no user-level config (no profile,
+# rustflags, target, linker, patch, source, env or include, however it is
+# spelled) and the crates are downloaded again. This replaces trying to
+# recognise dangerous settings in a user's files.
+use_clean_cargo_home() {
+    mkdir -p "$1/cargo-home" || die "cannot create $1/cargo-home"
+    export CARGO_HOME="$1/cargo-home"
+}
+
+# check_cargo_config <checkout> refuses to continue when cargo would still read a
+# setting from somewhere a clean CARGO_HOME does not cover: any cargo config file
+# in a directory above <checkout> (cargo merges those too), or a CARGO_PROFILE_*,
+# CARGO_BUILD_* or CARGO_TARGET_* variable that changes the build. The variables
+# that cannot change the output are allowed: CARGO_TARGET_DIR and
+# CARGO_BUILD_TARGET_DIR only move the products, CARGO_BUILD_JOBS only sets
+# parallelism, and CARGO_BUILD_RUSTC_WRAPPER is cleared by main. The checkout's
+# own .cargo/config.toml is reviewed source and is allowed.
 check_cargo_config() {
-    local cargo_home="$1" checkout="$2" dir file name hits
-    local dirs=("$cargo_home")
+    local checkout="$1" dir file name
     dir="$(dirname "$checkout")"
     while :; do
-        dirs+=("$dir/.cargo")
+        for file in "$dir/.cargo/config.toml" "$dir/.cargo/config"; do
+            [ ! -f "$file" ] || die "cargo would read $file, which can change the build; a release must build from the checkout's own settings. Move that file aside for the build."
+        done
         [ "$dir" = / ] && break
         dir="$(dirname "$dir")"
     done
-    for dir in "${dirs[@]}"; do
-        for file in "$dir/config.toml" "$dir/config"; do
-            [ -f "$file" ] || continue
-            hits="$(grep -nE "$CARGO_CONFIG_SECTIONS|$CARGO_CONFIG_KEYS" "$file" | head -5)" || true
-            [ -z "$hits" ] || die "cargo would read $file, which changes the build ($(printf '%s' "$hits" | tr '\n' ' ')); a release must build from the checkout's own settings. Move that file aside for the build."
-        done
-    done
     for name in $(env | cut -d= -f1 | grep -E '^CARGO_(PROFILE|BUILD|TARGET)_' || true); do
-        case "$name" in CARGO_TARGET_DIR | CARGO_BUILD_TARGET_DIR) continue ;; esac
+        case "$name" in CARGO_TARGET_DIR | CARGO_BUILD_TARGET_DIR | CARGO_BUILD_JOBS | CARGO_BUILD_RUSTC_WRAPPER) continue ;; esac
         die "$name is set; it changes the build, and a release must build from the checkout's own settings. Unset it for the build."
     done
 }
@@ -355,12 +360,16 @@ main() {
     # Homebrew llvm first on PATH, and CI=true, which makes Tauri's dmg bundler
     # skip the Finder-scripted window styling exactly as it did on the runner.
     # Settings that could change the compiled output are refused (see
-    # check_cargo_config) or cleared; the rustc wrapper is set empty, which
-    # overrides a build.rustc-wrapper in any cargo config (CI used sccache as a
-    # wrapper only to go faster, and this build uses none). Everything below runs
-    # from inside the checkout.
-    check_cargo_config "${CARGO_HOME:-$HOME/.cargo}" "$SRC"
-    unset RUSTUP_TOOLCHAIN RUSTC_WORKSPACE_WRAPPER RUSTFLAGS CARGO_ENCODED_RUSTFLAGS
+    # check_cargo_config), cleared, or kept out of reach by the clean CARGO_HOME
+    # (so a user's ~/.cargo/config.toml, with a wrapper such as sccache or any
+    # profile or flags, is never read); the rustc wrapper is also set empty (CI
+    # used sccache only to go faster, and this build uses none). Everything below
+    # runs from inside the checkout.
+    check_cargo_config "$SRC"
+    use_clean_cargo_home "$WORK"
+    unset RUSTUP_TOOLCHAIN RUSTC RUSTDOC RUSTC_BOOTSTRAP RUSTC_WORKSPACE_WRAPPER RUSTFLAGS \
+        CARGO_ENCODED_RUSTFLAGS RUSTDOCFLAGS CARGO_ENCODED_RUSTDOCFLAGS
+    export CARGO_INCREMENTAL=0 # as on the CI runner (dtolnay/rust-toolchain sets it)
     export RUSTC_WRAPPER="" CARGO_BUILD_RUSTC_WRAPPER=""
     export PATH="$tools/bin:$llvm/bin:$PATH"
     export CC_wasm32_unknown_unknown="$llvm/bin/clang"
@@ -411,7 +420,7 @@ main() {
 
     echo "==> verify $dmg"
     verify_dmg "$dmg"
-    echo "==> disk used by the build products: $(du -sk "$target_dir" | cut -f1) KB in $target_dir"
+    echo "==> disk used (KB): build products $(du -sk "$target_dir" | cut -f1), crates $(du -sk "$CARGO_HOME" | cut -f1), tools $(du -sk "$tools" | cut -f1)"
 
     if [ "$mode" = dry-run ]; then
         echo "==> dry run: built and verified $(basename "$dmg"); nothing uploaded"

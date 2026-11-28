@@ -241,41 +241,43 @@ else
     pass "TERM stops the running step and its process group promptly (${waited}s)"
 fi
 
-# --- cargo settings outside the checkout that would change the shipped binary -----
+# --- cargo settings that would change the shipped binary -------------------------
+# The build gets a fresh CARGO_HOME, so a user's ~/.cargo/config.toml is never read.
+mkdir -p "$TMP/home-a"
+assert_value "a clean CARGO_HOME replaces the user's" "$TMP/home-a/cargo-home" \
+    "$(CARGO_HOME=/somewhere/else bash -c 'source "$1" && use_clean_cargo_home "$2" && echo "$CARGO_HOME"' _ "$SCRIPT" "$TMP/home-a")"
+checks=$((checks + 1))
+if [ -d "$TMP/home-a/cargo-home" ] && [ -z "$(ls -A "$TMP/home-a/cargo-home")" ]; then
+    pass "the clean CARGO_HOME exists and is empty"
+else
+    fail "the clean CARGO_HOME exists and is empty"
+fi
+
+# Config files above the checkout are merged by cargo whatever the clean CARGO_HOME holds.
 mkdir -p "$TMP/cc/up/src/.cargo" "$TMP/cc/up/.cargo"
 CHECKOUT="$TMP/cc/up/src"
-write_home() { rm -rf "$TMP/ch"; mkdir -p "$TMP/ch"; printf '%s\n' "$1" > "$TMP/ch/config.toml"; }
-refused() { # <label> <config text>
-    write_home "$2"
-    assert_run "cargo config refused: $1" 1 "which changes the build" \
-        in_script check_cargo_config "$TMP/ch" "$CHECKOUT"
-}
-refused "[profile.release]" $'[profile.release]\nlto = false'
-refused "[patch.crates-io]" $'[patch.crates-io]\nfoo = { path = "../foo" }'
-refused "[target.aarch64-apple-darwin]" $'[target.aarch64-apple-darwin]\nrustflags = ["-Cfoo"]'
-refused "build.rustflags" $'[build]\nrustflags = ["-Cfoo"]'
-refused "build.target" $'[build]\ntarget = "x86_64-apple-darwin"'
-refused "a linker" $'[build]\nlinker = "foo"'
-refused "[source] replacement" $'[source.crates-io]\nreplace-with = "mirror"'
-refused "[env]" $'[env]\nFOO = "1"'
-write_home $'[build]\nrustc-wrapper = "sccache"\n[net]\nretry = 5'
-assert_run "a wrapper and net settings are allowed (the wrapper is cleared explicitly)" 0 "" \
-    in_script check_cargo_config "$TMP/ch" "$CHECKOUT"
-write_home ""
-rm -f "$TMP/ch/config.toml"
-assert_run "no cargo home config passes" 0 "" in_script check_cargo_config "$TMP/ch" "$CHECKOUT"
-printf '[profile.release]\nlto = false\n' > "$TMP/cc/up/.cargo/config.toml"
-assert_run "a config in a directory above the checkout is refused" 1 "which changes the build" \
-    in_script check_cargo_config "$TMP/ch" "$CHECKOUT"
+assert_run "no cargo config above the checkout passes" 0 "" in_script check_cargo_config "$CHECKOUT"
+printf '[ profile . release ]\nlto = false\n' > "$TMP/cc/up/.cargo/config.toml"
+assert_run "a config.toml above the checkout is refused, however it is written" 1 "which can change the build" \
+    in_script check_cargo_config "$CHECKOUT"
 rm -f "$TMP/cc/up/.cargo/config.toml"
+printf '[build]\nrustflags = ["-Cfoo"]\n' > "$TMP/cc/up/.cargo/config"
+assert_run "a legacy config above the checkout is refused" 1 "which can change the build" \
+    in_script check_cargo_config "$CHECKOUT"
+rm -f "$TMP/cc/up/.cargo/config"
 printf '[profile.release]\nlto = false\n' > "$CHECKOUT/.cargo/config.toml"
-assert_run "the checkout's own config is allowed" 0 "" in_script check_cargo_config "$TMP/ch" "$CHECKOUT"
-assert_run "CARGO_PROFILE_RELEASE_LTO in the environment is refused" 1 "CARGO_PROFILE_RELEASE_LTO is set" \
-    env CARGO_PROFILE_RELEASE_LTO=false bash -c 'source "$1" && check_cargo_config "$2" "$3"' _ "$SCRIPT" "$TMP/ch" "$CHECKOUT"
-assert_run "CARGO_BUILD_RUSTFLAGS in the environment is refused" 1 "CARGO_BUILD_RUSTFLAGS is set" \
-    env CARGO_BUILD_RUSTFLAGS=-Cfoo bash -c 'source "$1" && check_cargo_config "$2" "$3"' _ "$SCRIPT" "$TMP/ch" "$CHECKOUT"
-assert_run "CARGO_TARGET_DIR is allowed (it only moves the build products)" 0 "" \
-    env CARGO_TARGET_DIR=/somewhere bash -c 'source "$1" && check_cargo_config "$2" "$3"' _ "$SCRIPT" "$TMP/ch" "$CHECKOUT"
+assert_run "the checkout's own config is allowed" 0 "" in_script check_cargo_config "$CHECKOUT"
+
+with_env() { # <NAME=value> -> check_cargo_config with that variable set
+    env "$1" bash -c 'source "$1" && check_cargo_config "$2"' _ "$SCRIPT" "$CHECKOUT"
+}
+assert_run "CARGO_PROFILE_RELEASE_LTO in the environment is refused" 1 "CARGO_PROFILE_RELEASE_LTO is set" with_env CARGO_PROFILE_RELEASE_LTO=false
+assert_run "CARGO_BUILD_RUSTFLAGS in the environment is refused" 1 "CARGO_BUILD_RUSTFLAGS is set" with_env CARGO_BUILD_RUSTFLAGS=-Cfoo
+assert_run "CARGO_BUILD_TARGET in the environment is refused" 1 "CARGO_BUILD_TARGET is set" with_env CARGO_BUILD_TARGET=x86_64-apple-darwin
+assert_run "CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER is refused" 1 "is set" with_env CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER=foo
+assert_run "CARGO_TARGET_DIR is allowed (it only moves the build products)" 0 "" with_env CARGO_TARGET_DIR=/somewhere
+assert_run "CARGO_BUILD_JOBS is allowed (parallelism only)" 0 "" with_env CARGO_BUILD_JOBS=4
+assert_run "CARGO_BUILD_RUSTC_WRAPPER is allowed (main clears it)" 0 "" with_env CARGO_BUILD_RUSTC_WRAPPER=sccache
 
 # --- the release checks and the upload, with a stand-in for gh ---------------------
 mkdir -p "$TMP/ghstub"
