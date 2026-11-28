@@ -25,7 +25,7 @@ mod renderers;
 mod type_convert;
 
 pub use renderers::{register_kyomi_renderers, KYOMI_CHART_TYPES};
-pub use type_convert::convert_visualize_for_type_change;
+pub use type_convert::switch_visualize_type;
 
 /// Return the 12-color qualitative palette for the given palette name.
 ///

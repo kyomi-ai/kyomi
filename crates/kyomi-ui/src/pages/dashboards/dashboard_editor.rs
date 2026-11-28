@@ -40,6 +40,8 @@ use crate::components::dashboard::{
 use crate::components::dashboard::{
     markdown_renderer::{set_chart_height, set_col_span, switch_chart_item_type},
 };
+#[cfg(target_arch = "wasm32")]
+use crate::components::toast::toast_error;
 use crate::components::{Alert, AlertDescription, AlertTitle, AlertVariant, Button, ButtonLink, ButtonSize, ButtonVariant, DetailPageSkeleton, ToggleButton, Spinner};
 use crate::server_fns::context::UserContext;
 use crate::server_fns::dashboards::{create_editor_dashboard, get_dashboard, update_dashboard};
@@ -957,7 +959,10 @@ fn DashboardEditorInner(
                 // Save the chart as it now shows: the new type with the fields it
                 // needs (a metric's `value`, a table's `columns`), so it still
                 // renders after a reload. Only `visualize` is rewritten.
-                let Some(updated_yaml) = switch_chart_item_type(yaml, new_type) else { return; };
+                let Some(updated_yaml) = switch_chart_item_type(yaml, new_type) else {
+                    toast_error("Cannot switch the chart type: this chart's `visualize` block is missing or cannot be rewritten.");
+                    return;
+                };
 
                 // Locate the block in the current editor source.
                 let current = editor_content.get_untracked();

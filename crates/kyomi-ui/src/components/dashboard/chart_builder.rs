@@ -45,6 +45,8 @@ use crate::server_fns::datasources::list_datasources;
 use crate::chartml_provider::configured_chartml;
 #[cfg(target_arch = "wasm32")]
 use super::markdown_renderer::{kyomi_palette, kyomi_theme};
+use super::markdown_renderer::switch_visualize_type_in_place;
+use crate::components::toast::toast_error;
 use super::shared::{BTN_BASE, BTN_DEFAULT, BTN_SIZE};
 use kyomi_ui_components::dashboard::chart_header_bar::CHART_TYPES;
 
@@ -290,16 +292,17 @@ fn ast_get_chart_type(ast: &Value) -> String {
     get_string_at(ast, &["visualize", "type"]).unwrap_or_else(|| "bar".to_string())
 }
 
-pub(crate) fn ast_set_chart_type(ast: &mut Value, val: &str) {
+/// Switch the chart type through the one cleanup every type switch uses (see
+/// `switch_visualize_type_in_place`), so the builder gives the same `visualize`
+/// block as the MCP chart app and a dashboard, with the author's key order kept.
+///
+/// Returns `false` (the AST untouched) when `visualize` cannot be switched, i.e. it
+/// has a key that is not text.
+pub(crate) fn ast_set_chart_type(ast: &mut Value, val: &str) -> bool {
     ensure_root_mapping(ast);
     ensure_nested_mapping(ast, "visualize");
     let vis = ast.get_mut("visualize").expect("ensured");
-    if let Some(map) = vis.as_mapping_mut() {
-        map.insert(
-            Value::String("type".to_string()),
-            Value::String(val.to_string()),
-        );
-    }
+    switch_visualize_type_in_place(vis, val).is_some()
 }
 
 fn ast_get_x_field(ast: &Value) -> String {
@@ -1424,16 +1427,29 @@ pub fn ChartBuilderModal(
                                                             .collect::<Vec<_>>()
                                                     )
                                                     on_change=move |ct: String| {
-                                                        mutate_ast(ast, yaml_text, yaml_parse_error, move |a| {
-                                                            // Clear incompatible modifiers on type change.
-                                                            if ct != "bar" {
-                                                                ast_set_orientation(a, None);
-                                                            }
-                                                            if ct != "bar" && ct != "area" {
-                                                                ast_set_mode(a, None);
-                                                            }
+                                                        // Try the switch on a copy first, so one that cannot be
+                                                        // made leaves the AST and the saved raw YAML as they were.
+                                                        let can_switch = ast.with_untracked(|a| ast_set_chart_type(&mut a.clone(), &ct));
+                                                        if !can_switch {
+                                                            toast_error("Cannot switch the chart type: `visualize` has a key that is not text.");
+                                                            return;
+                                                        }
+                                                        mutate_ast(ast, yaml_text, yaml_parse_error, |a| {
                                                             ast_set_chart_type(a, &ct);
                                                         });
+                                                        // The switch rewrote `rows` (and `columns`), so the
+                                                        // series list is re-derived from the AST, as after a
+                                                        // YAML-tab edit; otherwise a series edit would write
+                                                        // the old type's rows back.
+                                                        // Rows get fresh ids: the list is keyed by id, and a row
+                                                        // that kept its id would keep the input text typed into it.
+                                                        let mut switched = visual_series_from_ast(&ast.get_untracked());
+                                                        let first_id = next_series_id.get_untracked();
+                                                        for (offset, entry) in switched.iter_mut().enumerate() {
+                                                            entry.id = first_id + offset as u32;
+                                                        }
+                                                        set_next_series_id.set(first_id + switched.len() as u32);
+                                                        visual_series.set(switched);
                                                     }
                                                 />
 
@@ -1988,5 +2004,80 @@ fn ChartCopilot(
             custom_ws_events=vec!["chart_update".to_string()]
             on_custom_ws_event=on_custom
         />
+    }
+}
+
+#[cfg(test)]
+mod type_switch_tests {
+    use super::*;
+
+    const BAR_WITH_EVERY_SETTING: &str = "type: chart\nversion: 1\ntitle: Revenue\n\
+        visualize:\n  type: bar\n  columns: region\n  orientation: horizontal\n  mode: stacked\n\
+        \x20 rows:\n  - field: revenue\n    mark: line\n    label: Revenue\n  - cost\n";
+
+    fn switched(new_type: &str) -> Value {
+        let mut ast: Value = serde_yaml::from_str(BAR_WITH_EVERY_SETTING).expect("parses");
+        assert!(ast_set_chart_type(&mut ast, new_type));
+        ast
+    }
+
+    fn visualize_json(ast: &Value) -> serde_json::Value {
+        serde_json::to_value(ast.get("visualize").expect("visualize")).expect("json")
+    }
+
+    /// The builder's type select is the shared cleanup: the same `visualize`
+    /// block `kyomi_chart_theme::switch_visualize_type` gives (what the MCP chart
+    /// app and a dashboard produce), including a table's `columns`.
+    #[test]
+    fn the_builder_switch_is_the_shared_cleanup() {
+        for new_type in ["line", "area", "table", "metric"] {
+            let original: Value = serde_yaml::from_str(BAR_WITH_EVERY_SETTING).expect("parses");
+            let serde_json::Value::Object(mut expected) = visualize_json(&original) else {
+                panic!("visualize is not a map")
+            };
+            kyomi_chart_theme::switch_visualize_type(&mut expected, "bar", new_type);
+            assert_eq!(
+                visualize_json(&switched(new_type)),
+                serde_json::Value::Object(expected),
+                "bar -> {new_type}"
+            );
+        }
+    }
+
+    /// After a switch the series list is re-derived from the AST: a bar chart's
+    /// two series are gone from a table's `visualize` (the builder shows one
+    /// blank row), and a metric switched back to a chart has its single row.
+    #[test]
+    fn the_series_list_follows_the_switched_ast() {
+        let table = switched("table");
+        let blank = visual_series_from_ast(&table);
+        assert_eq!(blank.len(), 1);
+        assert!(blank[0].y_field.is_empty());
+        let mut metric = switched("metric");
+        assert!(ast_set_chart_type(&mut metric, "bar"));
+        let fields: Vec<String> = visual_series_from_ast(&metric).into_iter().map(|s| s.y_field).collect();
+        assert_eq!(fields, ["revenue"]);
+    }
+
+    /// The author's key order survives: the keys that stay are where they were
+    /// written, outside `visualize` too.
+    #[test]
+    fn the_builder_switch_keeps_the_key_order() {
+        let ast = switched("line");
+        let keys: Vec<&str> = ast.as_mapping().expect("mapping").keys().filter_map(Value::as_str).collect();
+        assert_eq!(keys, ["type", "version", "title", "visualize"]);
+        let viz_keys: Vec<&str> = ast["visualize"].as_mapping().expect("mapping").keys().filter_map(Value::as_str).collect();
+        assert_eq!(viz_keys, ["type", "columns", "rows"]);
+        assert_eq!(serialize_ast(&ast).matches("mark").count(), 0);
+    }
+
+    /// A `visualize` block that cannot be switched is reported, not ignored, and
+    /// is left as it was.
+    #[test]
+    fn a_visualize_with_a_non_text_key_is_reported_and_left_alone() {
+        let mut ast: Value = serde_yaml::from_str("type: chart\nvisualize:\n  type: bar\n  1: x\n").expect("parses");
+        let before = ast.clone();
+        assert!(!ast_set_chart_type(&mut ast, "line"));
+        assert_eq!(ast, before);
     }
 }

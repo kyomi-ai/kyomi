@@ -11,7 +11,7 @@ use kyomi_ui_components::dashboard::chart_header_bar::CHART_TYPES;
 use kyomi_ui_components::dashboard::ChartHeaderBar;
 use crate::info_panel::InfoPanel;
 use crate::dashboard_panel::DashboardPanel;
-use kyomi_chart_theme::convert_visualize_for_type_change;
+use kyomi_chart_theme::switch_visualize_type;
 
 const KYOMI_LOGO_SVG: &str = r#"<svg width="18" height="18" viewBox="0 0 50 50" xmlns="http://www.w3.org/2000/svg"><g transform="translate(25, 25)"><g fill="currentColor"><polygon points="0,-22 3.5,-9 0,-5.5 -3.5,-9"/><polygon points="15.5,-15.5 9,-3.5 5.5,-5.5 9,-9"/><polygon points="22,0 9,3.5 5.5,0 9,-3.5"/><polygon points="15.5,15.5 3.5,9 0,5.5 3.5,9"/><polygon points="0,22 -3.5,9 0,5.5 3.5,9"/><polygon points="-15.5,15.5 -9,3.5 -5.5,5.5 -9,9"/><polygon points="-22,0 -9,-3.5 -5.5,0 -9,3.5"/><polygon points="-15.5,-15.5 -3.5,-9 0,-5.5 -3.5,-9"/></g><circle cx="0" cy="0" r="4.5" fill="currentColor"/></g></svg>"#;
 
@@ -167,17 +167,7 @@ pub fn App() -> impl IntoView {
     let on_type_change = Callback::new(move |new_type: String| {
         state.spec.update(|spec_opt| {
             if let Some(spec) = spec_opt {
-                let previous_type = get_chart_type(spec).unwrap_or_default();
-                if let Some(viz) = spec.get_mut("visualize").and_then(|v| v.as_object_mut()) {
-                    viz.insert("type".to_string(), serde_json::Value::String(new_type.clone()));
-                    if new_type != "bar" {
-                        viz.remove("orientation");
-                    }
-                    if new_type != "bar" && new_type != "area" {
-                        viz.remove("mode");
-                    }
-                    convert_visualize_for_type_change(viz, &previous_type, &new_type);
-                }
+                switch_spec_type(spec, &new_type);
             }
         });
     });
@@ -185,12 +175,7 @@ pub fn App() -> impl IntoView {
     let on_orientation_change = Callback::new(move |orientation: Option<String>| {
         state.spec.update(|spec_opt| {
             if let Some(spec) = spec_opt {
-                if let Some(viz) = spec.get_mut("visualize").and_then(|v| v.as_object_mut()) {
-                    match orientation {
-                        Some(o) => { viz.insert("orientation".to_string(), serde_json::Value::String(o)); }
-                        None => { viz.remove("orientation"); }
-                    }
-                }
+                set_visualize_key(spec, "orientation", orientation);
             }
         });
     });
@@ -198,12 +183,7 @@ pub fn App() -> impl IntoView {
     let on_mode_change = Callback::new(move |mode: Option<String>| {
         state.spec.update(|spec_opt| {
             if let Some(spec) = spec_opt {
-                if let Some(viz) = spec.get_mut("visualize").and_then(|v| v.as_object_mut()) {
-                    match mode {
-                        Some(m) => { viz.insert("mode".to_string(), serde_json::Value::String(m)); }
-                        None => { viz.remove("mode"); }
-                    }
-                }
+                set_visualize_key(spec, "mode", mode);
             }
         });
     });
@@ -289,6 +269,30 @@ pub fn App() -> impl IntoView {
     }
 }
 
+/// Set (`Some`) or remove (`None`) one `visualize` key. Removing uses `retain`,
+/// since with `preserve_order` `Map::remove` swaps the last key into the gap and
+/// would reorder the author's keys.
+fn set_visualize_key(spec: &mut serde_json::Value, key: &str, value: Option<String>) {
+    if let Some(viz) = spec.get_mut("visualize").and_then(|v| v.as_object_mut()) {
+        match value {
+            Some(v) => {
+                viz.insert(key.to_string(), serde_json::Value::String(v));
+            }
+            None => viz.retain(|k, _| k != key),
+        }
+    }
+}
+
+/// Switch the chart spec's `visualize` block to `new_type` through the one
+/// shared cleanup, `kyomi_chart_theme::switch_visualize_type`, that dashboards
+/// and the chart builder use too.
+fn switch_spec_type(spec: &mut serde_json::Value, new_type: &str) {
+    let previous_type = get_chart_type(spec).unwrap_or_default();
+    if let Some(viz) = spec.get_mut("visualize").and_then(|v| v.as_object_mut()) {
+        switch_visualize_type(viz, &previous_type, new_type);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -346,5 +350,53 @@ mod tests {
                  kyomi_chart_theme::KYOMI_CHART_TYPES does not register a renderer for"
             );
         }
+    }
+
+    const BAR_SPEC: &str = r#"{
+        "title": "Revenue",
+        "visualize": {
+            "type": "bar", "columns": "region", "orientation": "horizontal", "mode": "stacked",
+            "rows": [{"field": "revenue", "mark": "line", "label": "Revenue"}, "cost"]
+        }
+    }"#;
+
+    /// The app's type switch is the shared cleanup: for every switch it gives the
+    /// `visualize` block `kyomi_chart_theme::switch_visualize_type` gives, the
+    /// same one a dashboard and the chart builder produce.
+    #[test]
+    fn the_chart_app_switch_is_the_shared_cleanup() {
+        for new_type in ["line", "area", "table", "metric"] {
+            let mut spec: serde_json::Value = serde_json::from_str(BAR_SPEC).unwrap();
+            switch_spec_type(&mut spec, new_type);
+
+            let original: serde_json::Value = serde_json::from_str(BAR_SPEC).unwrap();
+            let mut expected = original["visualize"].as_object().unwrap().clone();
+            switch_visualize_type(&mut expected, "bar", new_type);
+            assert_eq!(spec["visualize"], serde_json::Value::Object(expected), "bar -> {new_type}");
+            assert_eq!(spec["title"], "Revenue");
+        }
+    }
+
+    /// The keys that stay keep the order the spec was sent in.
+    #[test]
+    fn the_chart_app_switch_keeps_the_key_order() {
+        let mut spec: serde_json::Value = serde_json::from_str(BAR_SPEC).unwrap();
+        switch_spec_type(&mut spec, "line");
+        let keys: Vec<&str> = spec["visualize"].as_object().unwrap().keys().map(String::as_str).collect();
+        assert_eq!(keys, ["type", "columns", "rows"]);
+        let top: Vec<&str> = spec.as_object().unwrap().keys().map(String::as_str).collect();
+        assert_eq!(top, ["title", "visualize"]);
+    }
+
+    /// Clearing an orientation or mode keeps the order of the other keys.
+    #[test]
+    fn clearing_an_orientation_or_mode_keeps_the_key_order() {
+        let mut spec: serde_json::Value = serde_json::from_str(BAR_SPEC).unwrap();
+        set_visualize_key(&mut spec, "orientation", None);
+        set_visualize_key(&mut spec, "mode", None);
+        let keys: Vec<&str> = spec["visualize"].as_object().unwrap().keys().map(String::as_str).collect();
+        assert_eq!(keys, ["type", "columns", "rows"]);
+        set_visualize_key(&mut spec, "orientation", Some("horizontal".to_string()));
+        assert_eq!(spec["visualize"]["orientation"], "horizontal");
     }
 }
