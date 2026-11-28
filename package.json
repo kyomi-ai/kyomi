@@ -11,6 +11,7 @@
   },
   "scripts": {
     "e2e:regression:discovery-failure-message": "node scripts/e2e-regression/discovery-failure-message.cjs",
-    "e2e:regression:kyo-977-chart-title-layout-shift": "node scripts/e2e-regression/kyo-977-chart-title-layout-shift.cjs"
+    "e2e:regression:kyo-977-chart-title-layout-shift": "node scripts/e2e-regression/kyo-977-chart-title-layout-shift.cjs",
+    "e2e:regression:kyo-1002-login-refresh-loop": "node scripts/e2e-regression/kyo-1002-login-refresh-loop.cjs"
   }
 }
