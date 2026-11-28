@@ -241,6 +241,81 @@ else
     pass "TERM stops the running step and its process group promptly (${waited}s)"
 fi
 
+# --- cargo settings outside the checkout that would change the shipped binary -----
+mkdir -p "$TMP/cc/up/src/.cargo" "$TMP/cc/up/.cargo"
+CHECKOUT="$TMP/cc/up/src"
+write_home() { rm -rf "$TMP/ch"; mkdir -p "$TMP/ch"; printf '%s\n' "$1" > "$TMP/ch/config.toml"; }
+refused() { # <label> <config text>
+    write_home "$2"
+    assert_run "cargo config refused: $1" 1 "which changes the build" \
+        in_script check_cargo_config "$TMP/ch" "$CHECKOUT"
+}
+refused "[profile.release]" $'[profile.release]\nlto = false'
+refused "[patch.crates-io]" $'[patch.crates-io]\nfoo = { path = "../foo" }'
+refused "[target.aarch64-apple-darwin]" $'[target.aarch64-apple-darwin]\nrustflags = ["-Cfoo"]'
+refused "build.rustflags" $'[build]\nrustflags = ["-Cfoo"]'
+refused "build.target" $'[build]\ntarget = "x86_64-apple-darwin"'
+refused "a linker" $'[build]\nlinker = "foo"'
+refused "[source] replacement" $'[source.crates-io]\nreplace-with = "mirror"'
+refused "[env]" $'[env]\nFOO = "1"'
+write_home $'[build]\nrustc-wrapper = "sccache"\n[net]\nretry = 5'
+assert_run "a wrapper and net settings are allowed (the wrapper is cleared explicitly)" 0 "" \
+    in_script check_cargo_config "$TMP/ch" "$CHECKOUT"
+write_home ""
+rm -f "$TMP/ch/config.toml"
+assert_run "no cargo home config passes" 0 "" in_script check_cargo_config "$TMP/ch" "$CHECKOUT"
+printf '[profile.release]\nlto = false\n' > "$TMP/cc/up/.cargo/config.toml"
+assert_run "a config in a directory above the checkout is refused" 1 "which changes the build" \
+    in_script check_cargo_config "$TMP/ch" "$CHECKOUT"
+rm -f "$TMP/cc/up/.cargo/config.toml"
+printf '[profile.release]\nlto = false\n' > "$CHECKOUT/.cargo/config.toml"
+assert_run "the checkout's own config is allowed" 0 "" in_script check_cargo_config "$TMP/ch" "$CHECKOUT"
+assert_run "CARGO_PROFILE_RELEASE_LTO in the environment is refused" 1 "CARGO_PROFILE_RELEASE_LTO is set" \
+    env CARGO_PROFILE_RELEASE_LTO=false bash -c 'source "$1" && check_cargo_config "$2" "$3"' _ "$SCRIPT" "$TMP/ch" "$CHECKOUT"
+assert_run "CARGO_BUILD_RUSTFLAGS in the environment is refused" 1 "CARGO_BUILD_RUSTFLAGS is set" \
+    env CARGO_BUILD_RUSTFLAGS=-Cfoo bash -c 'source "$1" && check_cargo_config "$2" "$3"' _ "$SCRIPT" "$TMP/ch" "$CHECKOUT"
+assert_run "CARGO_TARGET_DIR is allowed (it only moves the build products)" 0 "" \
+    env CARGO_TARGET_DIR=/somewhere bash -c 'source "$1" && check_cargo_config "$2" "$3"' _ "$SCRIPT" "$TMP/ch" "$CHECKOUT"
+
+# --- the release checks and the upload, with a stand-in for gh ---------------------
+mkdir -p "$TMP/ghstub"
+cat > "$TMP/ghstub/gh" <<'SH'
+#!/bin/sh
+# STUB_GH_VIEW_RC: exit status of `gh release view`; STUB_GH_ASSETS: the asset
+# names the --jq query would print; STUB_GH_UPLOAD_RC: exit status of upload.
+case "$2" in
+    view)
+        for arg in "$@"; do
+            if [ "$arg" = "--jq" ]; then
+                [ "$STUB_GH_VIEW_RC" -eq 0 ] && echo "$STUB_GH_ASSETS"
+                exit "$STUB_GH_VIEW_RC"
+            fi
+        done
+        exit "$STUB_GH_VIEW_RC"
+        ;;
+    upload) exit "$STUB_GH_UPLOAD_RC" ;;
+esac
+exit 99
+SH
+chmod +x "$TMP/ghstub/gh"
+release_ready() { ( export PATH="$TMP/ghstub:$PATH" STUB_GH_VIEW_RC="$1" STUB_GH_ASSETS="$2"; source "$SCRIPT"; check_release_ready v2.7.17 ); }
+assert_run "a tag with no GitHub release is refused" 1 "no GitHub release exists for v2.7.17" release_ready 1 ""
+assert_run "a release that already has a Mac installer is refused" 1 "already has a Mac installer (Kyomi_0.1.0_aarch64.dmg)" \
+    release_ready 0 "Kyomi_0.1.0_aarch64.dmg"
+assert_run "a release without a Mac installer is accepted" 0 "" release_ready 0 ""
+
+mkdir -p "$TMP/up/start"
+printf 'dmg' > "$TMP/up/Kyomi_0.1.0_aarch64.dmg"
+upload() { ( export PATH="$TMP/ghstub:$PATH" STUB_GH_UPLOAD_RC="$1"; source "$SCRIPT"; START_DIR="$TMP/up/start"; upload_release_asset v2.7.17 "$TMP/up/Kyomi_0.1.0_aarch64.dmg" ); }
+assert_run "a successful upload passes and keeps no copy" 0 "" upload 0
+assert_run "a failed upload fails loudly" 1 "upload to v2.7.17 failed" upload 1
+checks=$((checks + 1))
+if [ -f "$TMP/up/start/Kyomi_0.1.0_aarch64.dmg" ]; then
+    pass "a failed upload saves the built dmg in the start directory"
+else
+    fail "a failed upload saves the built dmg in the start directory"
+fi
+
 # --- the config strip CI did (BSD sed -i '', so only where that sed exists) --------
 if [ "$(uname -s)" = Darwin ]; then
     mkdir -p "$TMP/strip/.cargo" "$TMP/strip/crates/kyomi-ui"

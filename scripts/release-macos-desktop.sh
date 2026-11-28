@@ -24,11 +24,25 @@
 # <tag> is a release tag (vMAJOR.MINOR.PATCH, for example v2.7.17) whose
 # GitHub release already exists (release.yml creates it) and does not yet have
 # a Mac installer attached. Run from a logged-in Mac session with `gh`
-# authenticated for the repository. A release build takes about 45 minutes
-# plus the one-off compile of the pinned tauri-cli. Set CARGO_TARGET_DIR to an
-# absolute path to keep build products between runs; otherwise every run
-# compiles from scratch. If the final upload fails, the built dmg is copied to
-# the current directory so the upload can be retried without a rebuild.
+# authenticated for the repository.
+#
+# The Mac needs: Apple silicon; at least 16 GB of RAM (the build's largest
+# process peaked at 13 GB on a 32 GB M1 Max, which is the machine it was
+# tested on); and DISK_NEEDED_GB of free disk for the build (it compiles every
+# dependency from scratch into the temporary checkout, or into CARGO_TARGET_DIR
+# when that is set). A cold build takes well over an hour (a warm one, with the
+# dependencies already compiled, took 61 minutes on that machine). `cargo
+# install tauri-cli --version "^2" --locked` is compiled from source, as in CI,
+# so the newest 2.x release that its lock allows is used, not a pinned one.
+# Set CARGO_TARGET_DIR to an absolute path to keep build products between runs.
+# If the final upload fails, the built dmg is copied to the current directory
+# so the upload can be retried without a rebuild.
+#
+# The build must not inherit anything that changes what is shipped, so it runs
+# with no rustc wrapper (sccache included; CI used sccache only for speed) and
+# refuses to start if cargo would read a profile, rustflags, target, linker,
+# patch, source or env setting from a config file outside the checkout, or from
+# a CARGO_PROFILE_*, CARGO_BUILD_* or CARGO_TARGET_* environment variable.
 #
 # Exit codes: 0 success; 2 usage error; 1 any other failure. Nothing here
 # falls back: a missing tool, a version mismatch or a failed step stops the run.
@@ -126,6 +140,59 @@ terminate() {
     done
     wait 2> /dev/null || true
     exit "$1"
+}
+
+# check_cargo_config <cargo-home> <checkout> refuses to continue when cargo
+# would read a setting that changes the compiled output from outside the
+# checkout: a config file in <cargo-home> or in any directory above <checkout>,
+# or a CARGO_PROFILE_*, CARGO_BUILD_* or CARGO_TARGET_* variable (CARGO_TARGET_DIR
+# only moves the build products and is allowed). The checkout's own
+# .cargo/config.toml is reviewed source and is allowed. A rustc wrapper is not
+# refused: main clears it explicitly, so it cannot change the output.
+CARGO_CONFIG_SECTIONS='^[[:space:]]*\[(profile|patch|target|source|env|unstable)([].]|$)'
+CARGO_CONFIG_KEYS='^[[:space:]]*(rustflags|rustdocflags|linker|rustc|rustc-workspace-wrapper|rustdoc|target|codegen-units|lto|opt-level|debug|strip|panic|overflow-checks|debug-assertions|incremental)[[:space:]]*='
+check_cargo_config() {
+    local cargo_home="$1" checkout="$2" dir file name hits
+    local dirs=("$cargo_home")
+    dir="$(dirname "$checkout")"
+    while :; do
+        dirs+=("$dir/.cargo")
+        [ "$dir" = / ] && break
+        dir="$(dirname "$dir")"
+    done
+    for dir in "${dirs[@]}"; do
+        for file in "$dir/config.toml" "$dir/config"; do
+            [ -f "$file" ] || continue
+            hits="$(grep -nE "$CARGO_CONFIG_SECTIONS|$CARGO_CONFIG_KEYS" "$file" | head -5)" || true
+            [ -z "$hits" ] || die "cargo would read $file, which changes the build ($(printf '%s' "$hits" | tr '\n' ' ')); a release must build from the checkout's own settings. Move that file aside for the build."
+        done
+    done
+    for name in $(env | cut -d= -f1 | grep -E '^CARGO_(PROFILE|BUILD|TARGET)_' || true); do
+        case "$name" in CARGO_TARGET_DIR | CARGO_BUILD_TARGET_DIR) continue ;; esac
+        die "$name is set; it changes the build, and a release must build from the checkout's own settings. Unset it for the build."
+    done
+}
+
+# check_release_ready <tag> stops before the build when the release does not
+# exist or already carries a Mac installer. Needs gh and GH_REPO.
+check_release_ready() {
+    local ref="$1" existing
+    gh release view "$ref" > /dev/null \
+        || die "no GitHub release exists for $ref in ${GH_REPO:-this repository}; push the tag and let release.yml create it first"
+    existing="$(gh release view "$ref" --json assets --jq '[.assets[].name | select(endswith("_aarch64.dmg"))] | join(" ")')" \
+        || die "cannot list the assets of release $ref"
+    [ -z "$existing" ] \
+        || die "release $ref already has a Mac installer ($existing); delete that asset first if it must be replaced"
+}
+
+# upload_release_asset <tag> <dmg>: the work directory is deleted on exit and
+# holds the only copy of a long build, so a failed upload saves the dmg first.
+upload_release_asset() {
+    local ref="$1" dmg="$2"
+    if ! run_in "$PWD" gh release upload "$ref" "$dmg"; then
+        cp "$dmg" "$START_DIR/" || die "upload failed and the dmg could not be saved from $dmg"
+        die "upload to $ref failed; the built dmg is saved as $START_DIR/$(basename "$dmg"). Check gh release view $ref --json assets for a partial asset first; then retry with: gh release upload $ref $START_DIR/$(basename "$dmg") (add --clobber only if a partial asset exists)"
+    fi
 }
 
 # Download one pinned release asset. curl --fail makes a missing asset an error.
@@ -253,7 +320,7 @@ main() {
         gh auth status > /dev/null 2>&1 || die "gh is not authenticated (gh auth login)"
     fi
 
-    local commit tools existing
+    local commit tools
     REPO="$(git rev-parse --show-toplevel)" || die "run this from inside a kyomi checkout"
     if [ "$mode" = release ]; then
         # gh reads the repository from GH_REPO; take it from origin, where the
@@ -262,12 +329,8 @@ main() {
         export GH_REPO
         git -C "$REPO" fetch --quiet origin "refs/tags/$ref:refs/tags/$ref" \
             || die "could not fetch tag $ref from origin (git's message is above)"
-        # Check the release before the 45-minute build, not after it.
-        gh release view "$ref" > /dev/null \
-            || die "no GitHub release exists for $ref in $GH_REPO; push the tag and let release.yml create it first"
-        existing="$(gh release view "$ref" --json assets --jq '[.assets[].name | select(endswith("_aarch64.dmg"))] | join(" ")')"
-        [ -z "$existing" ] \
-            || die "release $ref already has a Mac installer ($existing); delete that asset first if it must be replaced"
+        # Check the release before the long build, not after it.
+        check_release_ready "$ref"
         commit="$(git -C "$REPO" rev-parse --verify "refs/tags/$ref^{commit}")"
     else
         commit="$(git -C "$REPO" rev-parse --verify "$ref^{commit}")" || die "$ref is not a git ref"
@@ -288,12 +351,17 @@ main() {
     git -C "$REPO" worktree add --quiet --detach "$SRC" "$commit"
 
     # The build environment CI had: the toolchain pinned by rust-toolchain.toml
-    # (so nothing inherited from this shell picks another compiler, wrapper or
-    # flags), Homebrew llvm first on PATH, and CI=true, which makes Tauri's dmg
-    # bundler skip the Finder-scripted window styling exactly as it did on the
-    # runner. Everything below runs from inside the checkout.
-    unset RUSTUP_TOOLCHAIN RUSTC_WRAPPER RUSTC_WORKSPACE_WRAPPER CARGO_BUILD_RUSTC_WRAPPER \
-        RUSTFLAGS CARGO_ENCODED_RUSTFLAGS CARGO_BUILD_TARGET
+    # (so nothing inherited from this shell picks another compiler or flags),
+    # Homebrew llvm first on PATH, and CI=true, which makes Tauri's dmg bundler
+    # skip the Finder-scripted window styling exactly as it did on the runner.
+    # Settings that could change the compiled output are refused (see
+    # check_cargo_config) or cleared; the rustc wrapper is set empty, which
+    # overrides a build.rustc-wrapper in any cargo config (CI used sccache as a
+    # wrapper only to go faster, and this build uses none). Everything below runs
+    # from inside the checkout.
+    check_cargo_config "${CARGO_HOME:-$HOME/.cargo}" "$SRC"
+    unset RUSTUP_TOOLCHAIN RUSTC_WORKSPACE_WRAPPER RUSTFLAGS CARGO_ENCODED_RUSTFLAGS
+    export RUSTC_WRAPPER="" CARGO_BUILD_RUSTC_WRAPPER=""
     export PATH="$tools/bin:$llvm/bin:$PATH"
     export CC_wasm32_unknown_unknown="$llvm/bin/clang"
     export CARGO_TERM_COLOR=always
@@ -343,6 +411,7 @@ main() {
 
     echo "==> verify $dmg"
     verify_dmg "$dmg"
+    echo "==> disk used by the build products: $(du -sk "$target_dir" | cut -f1) KB in $target_dir"
 
     if [ "$mode" = dry-run ]; then
         echo "==> dry run: built and verified $(basename "$dmg"); nothing uploaded"
@@ -350,12 +419,7 @@ main() {
     fi
 
     echo "==> upload $(basename "$dmg") to release $ref"
-    if ! run_in "$SRC" gh release upload "$ref" "$dmg"; then
-        # The work directory is deleted on exit, and it holds the only copy of a
-        # 45-minute build: keep the dmg so the upload can be retried by hand.
-        cp "$dmg" "$START_DIR/" || die "upload failed and the dmg could not be saved from $dmg"
-        die "upload to $ref failed; the built dmg is saved as $START_DIR/$(basename "$dmg"). Check gh release view $ref --json assets for a partial asset first; then retry with: gh release upload $ref $START_DIR/$(basename "$dmg") (add --clobber only if a partial asset exists)"
-    fi
+    upload_release_asset "$ref" "$dmg"
     echo "==> done: $(basename "$dmg") attached to $ref"
 }
 
