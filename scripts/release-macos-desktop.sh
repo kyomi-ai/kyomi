@@ -43,8 +43,9 @@
 # so no user-level cargo config is read and every crate is downloaded again),
 # with no rustc wrapper (sccache included; CI used sccache only for speed), and
 # refuses to start if a cargo config file exists above the checkout or a
-# CARGO_PROFILE_*, CARGO_BUILD_*, CARGO_TARGET_*, CARGO_ALIAS_* or per-target
-# compiler (CC_*, CFLAGS_*, ...) variable that changes the build is set.
+# CARGO_PROFILE_*, CARGO_BUILD_*, CARGO_TARGET_*, CARGO_ALIAS_*, TAURI_* (for
+# example TAURI_CONFIG, which rewrites tauri.conf.json) or per-target compiler
+# (CC_*, CFLAGS_*, ...) variable that changes the build is set.
 #
 # Exit codes: 0 success; 2 usage error; 1 any other failure. Nothing here
 # falls back: a missing tool, a version mismatch or a failed step stops the run.
@@ -157,8 +158,8 @@ use_clean_cargo_home() {
 # check_cargo_config <checkout> refuses to continue when cargo would still read a
 # setting from somewhere a clean CARGO_HOME does not cover: any cargo config file
 # in a directory above <checkout> (cargo merges those too), or a CARGO_PROFILE_*,
-# CARGO_BUILD_*, CARGO_TARGET_* or CARGO_ALIAS_* variable, or a per-target compiler variable
-# (CC_*, CXX_*, CFLAGS_*, CXXFLAGS_*, CPPFLAGS_*, LDFLAGS_*), that changes the build. The variables
+# CARGO_BUILD_*, CARGO_TARGET_* or CARGO_ALIAS_* variable, a TAURI_* variable, or a per-target
+# compiler variable (CC_*, CXX_*, CFLAGS_*, CXXFLAGS_*, CPPFLAGS_*, LDFLAGS_*), that changes the build. The variables
 # that cannot change the output are allowed: CARGO_TARGET_DIR and
 # CARGO_BUILD_TARGET_DIR only move the products, CARGO_BUILD_JOBS only sets
 # parallelism, and CARGO_BUILD_RUSTC_WRAPPER is cleared by main. The checkout's
@@ -176,6 +177,13 @@ check_cargo_config() {
     for name in $(env | cut -d= -f1 | grep -E '^CARGO_(PROFILE|BUILD|TARGET|ALIAS)_' || true); do
         case "$name" in CARGO_TARGET_DIR | CARGO_BUILD_TARGET_DIR | CARGO_BUILD_JOBS | CARGO_BUILD_RUSTC_WRAPPER) continue ;; esac
         die "$name is set; it changes the build, and a release must build from the checkout's own settings. Unset it for the build."
+    done
+    # Tauri reads TAURI_CONFIG (a JSON merge into tauri.conf.json: bundle settings,
+    # resources, version) and other TAURI_* variables, which would change the app
+    # while the identifier check still passed. Signing identities (APPLE_*) are
+    # caught by the ad-hoc signature check after the build.
+    for name in $(env | cut -d= -f1 | grep -E '^TAURI_' || true); do
+        die "$name is set; Tauri reads it and it can change the bundle, and a release must build from the checkout's own settings. Unset it for the build."
     done
     # cc-rs reads per-target compiler variables such as CFLAGS_aarch64_apple_darwin
     # and CFLAGS_aarch64-apple-darwin. The hyphenated names cannot be unset from

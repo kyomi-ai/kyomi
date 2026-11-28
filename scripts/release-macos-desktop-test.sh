@@ -293,6 +293,8 @@ assert_run "CARGO_ALIAS_BUILD in the environment is refused (it can redefine car
 assert_run "a hyphenated per-target compiler variable is refused (it cannot be unset from bash 3.2)" 1 "is set" with_env CFLAGS_aarch64-apple-darwin=-Os
 assert_run "an underscored per-target compiler variable is refused" 1 "CC_aarch64_apple_darwin is set" with_env CC_aarch64_apple_darwin=gcc
 assert_run "CC_wasm32_unknown_unknown is allowed (main sets it, as CI did)" 0 "" with_env CC_wasm32_unknown_unknown=/x/clang
+assert_run "TAURI_CONFIG in the environment is refused (it rewrites tauri.conf.json)" 1 "TAURI_CONFIG is set" with_env 'TAURI_CONFIG={"version":"9.9.9"}'
+assert_run "another TAURI_ variable is refused" 1 "TAURI_SIGNING_PRIVATE_KEY is set" with_env TAURI_SIGNING_PRIVATE_KEY=x
 assert_run "CARGO_TARGET_DIR is allowed (it only moves the build products)" 0 "" with_env CARGO_TARGET_DIR=/somewhere
 assert_run "CARGO_BUILD_JOBS is allowed (parallelism only)" 0 "" with_env CARGO_BUILD_JOBS=4
 assert_run "CARGO_BUILD_RUSTC_WRAPPER is allowed (main clears it)" 0 "" with_env CARGO_BUILD_RUSTC_WRAPPER=sccache
