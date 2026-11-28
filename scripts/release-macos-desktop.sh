@@ -157,7 +157,7 @@ use_clean_cargo_home() {
 # check_cargo_config <checkout> refuses to continue when cargo would still read a
 # setting from somewhere a clean CARGO_HOME does not cover: any cargo config file
 # in a directory above <checkout> (cargo merges those too), or a CARGO_PROFILE_*,
-# CARGO_BUILD_* or CARGO_TARGET_* variable that changes the build. The variables
+# CARGO_BUILD_*, CARGO_TARGET_* or CARGO_ALIAS_* variable that changes the build. The variables
 # that cannot change the output are allowed: CARGO_TARGET_DIR and
 # CARGO_BUILD_TARGET_DIR only move the products, CARGO_BUILD_JOBS only sets
 # parallelism, and CARGO_BUILD_RUSTC_WRAPPER is cleared by main. The checkout's
@@ -172,7 +172,7 @@ check_cargo_config() {
         [ "$dir" = / ] && break
         dir="$(dirname "$dir")"
     done
-    for name in $(env | cut -d= -f1 | grep -E '^CARGO_(PROFILE|BUILD|TARGET)_' || true); do
+    for name in $(env | cut -d= -f1 | grep -E '^CARGO_(PROFILE|BUILD|TARGET|ALIAS)_' || true); do
         case "$name" in CARGO_TARGET_DIR | CARGO_BUILD_TARGET_DIR | CARGO_BUILD_JOBS | CARGO_BUILD_RUSTC_WRAPPER) continue ;; esac
         die "$name is set; it changes the build, and a release must build from the checkout's own settings. Unset it for the build."
     done
@@ -369,7 +369,11 @@ main() {
     use_clean_cargo_home "$WORK"
     unset RUSTUP_TOOLCHAIN RUSTC RUSTDOC RUSTC_BOOTSTRAP RUSTC_WORKSPACE_WRAPPER RUSTFLAGS \
         CARGO_ENCODED_RUSTFLAGS RUSTDOCFLAGS CARGO_ENCODED_RUSTDOCFLAGS \
-        CC CXX CFLAGS CXXFLAGS CPPFLAGS LDFLAGS SDKROOT MACOSX_DEPLOYMENT_TARGET
+        CC CXX CFLAGS CXXFLAGS CPPFLAGS LDFLAGS SDKROOT MACOSX_DEPLOYMENT_TARGET CRATE_CC_NO_DEFAULTS
+    # cc-rs also reads per-target forms such as CC_aarch64_apple_darwin and CFLAGS_aarch64-apple-darwin.
+    for name in $(env | cut -d= -f1 | grep -E '^(CC|CXX|CFLAGS|CXXFLAGS|CPPFLAGS|LDFLAGS)_' || true); do
+        unset "$name"
+    done
     export CARGO_INCREMENTAL=0 # as on the CI runner (dtolnay/rust-toolchain sets it)
     export RUSTC_WRAPPER="" CARGO_BUILD_RUSTC_WRAPPER=""
     export PATH="$tools/bin:$llvm/bin:$PATH"
@@ -378,10 +382,12 @@ main() {
     export CI=true
     cd "$SRC"
 
-    # Cheap and first: a stale lock stops the run before any download or compile.
+    # First, before the long compile: this downloads the registry index and the
+    # crates' manifests into the clean CARGO_HOME, and fails if Cargo.lock would
+    # have to change.
     echo "==> verify Cargo.lock is current"
     cargo metadata --locked --format-version 1 > /dev/null \
-        || die "Cargo.lock is stale (or cannot be resolved from the registry); a release must build from the committed lock"
+        || die "cargo metadata --locked failed (see cargo's message above): the lock is stale or the registry is unreachable; a release must build from the committed lock"
 
     # A dmg left in a reused target directory by an earlier build would make
     # "exactly one dmg" fail after the whole build, so clear it first.

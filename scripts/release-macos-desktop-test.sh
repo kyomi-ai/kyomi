@@ -289,6 +289,7 @@ assert_run "CARGO_PROFILE_RELEASE_LTO in the environment is refused" 1 "CARGO_PR
 assert_run "CARGO_BUILD_RUSTFLAGS in the environment is refused" 1 "CARGO_BUILD_RUSTFLAGS is set" with_env CARGO_BUILD_RUSTFLAGS=-Cfoo
 assert_run "CARGO_BUILD_TARGET in the environment is refused" 1 "CARGO_BUILD_TARGET is set" with_env CARGO_BUILD_TARGET=x86_64-apple-darwin
 assert_run "CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER is refused" 1 "is set" with_env CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER=foo
+assert_run "CARGO_ALIAS_BUILD in the environment is refused (it can redefine cargo build)" 1 "CARGO_ALIAS_BUILD is set" with_env CARGO_ALIAS_BUILD=version
 assert_run "CARGO_TARGET_DIR is allowed (it only moves the build products)" 0 "" with_env CARGO_TARGET_DIR=/somewhere
 assert_run "CARGO_BUILD_JOBS is allowed (parallelism only)" 0 "" with_env CARGO_BUILD_JOBS=4
 assert_run "CARGO_BUILD_RUSTC_WRAPPER is allowed (main clears it)" 0 "" with_env CARGO_BUILD_RUSTC_WRAPPER=sccache
