@@ -1441,8 +1441,14 @@ pub fn ChartBuilderModal(
                                                         // series list is re-derived from the AST, as after a
                                                         // YAML-tab edit; otherwise a series edit would write
                                                         // the old type's rows back.
-                                                        let switched = visual_series_from_ast(&ast.get_untracked());
-                                                        set_next_series_id.set(next_id_after(&switched));
+                                                        // Rows get fresh ids: the list is keyed by id, and a row
+                                                        // that kept its id would keep the input text typed into it.
+                                                        let mut switched = visual_series_from_ast(&ast.get_untracked());
+                                                        let first_id = next_series_id.get_untracked();
+                                                        for (offset, entry) in switched.iter_mut().enumerate() {
+                                                            entry.id = first_id + offset as u32;
+                                                        }
+                                                        set_next_series_id.set(first_id + switched.len() as u32);
                                                         visual_series.set(switched);
                                                     }
                                                 />
