@@ -1,4 +1,4 @@
-// KYO-1002: a signed-out visitor on /login must not reload the page over and
+// KYO-1002: a visitor with no cookies on /login must not reload the page over and
 // over (each load fires the pre-boot `POST /api/v1/auth/refresh` from
 // crates/kyomi-ui/index.html).
 //
