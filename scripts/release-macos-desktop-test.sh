@@ -244,8 +244,22 @@ fi
 # --- cargo settings that would change the shipped binary -------------------------
 # The build gets a fresh CARGO_HOME, so a user's ~/.cargo/config.toml is never read.
 mkdir -p "$TMP/home-a"
-assert_value "a clean CARGO_HOME replaces the user's" "$TMP/home-a/cargo-home" \
-    "$(CARGO_HOME=/somewhere/else bash -c 'source "$1" && use_clean_cargo_home "$2" && echo "$CARGO_HOME"' _ "$SCRIPT" "$TMP/home-a")"
+assert_value "a clean CARGO_HOME replaces the user's, and is exported to child processes" "$TMP/home-a/cargo-home" \
+    "$(CARGO_HOME=/somewhere/else bash -c 'source "$1" && use_clean_cargo_home "$2" && sh -c "echo \$CARGO_HOME"' _ "$SCRIPT" "$TMP/home-a")"
+# main must actually use them, in this order, before any download or compile.
+main_body="$(in_script declare -f main)"
+line_of() { printf '%s\n' "$main_body" | grep -nF -- "$1" | head -1 | cut -d: -f1; }
+l_check="$(line_of 'check_cargo_config "$SRC"')"
+l_home="$(line_of 'use_clean_cargo_home "$WORK"')"
+l_lock="$(line_of 'cargo metadata --locked')"
+l_install="$(line_of 'install_pinned_tools "$tools"')"
+checks=$((checks + 1))
+if [ -n "$l_check" ] && [ -n "$l_home" ] && [ -n "$l_lock" ] && [ -n "$l_install" ] \
+    && [ "$l_check" -lt "$l_home" ] && [ "$l_home" -lt "$l_lock" ] && [ "$l_lock" -lt "$l_install" ]; then
+    pass "main checks cargo settings and sets a clean CARGO_HOME before the lock check and any install"
+else
+    fail "main checks cargo settings and sets a clean CARGO_HOME before the lock check and any install (lines: $l_check $l_home $l_lock $l_install)"
+fi
 checks=$((checks + 1))
 if [ -d "$TMP/home-a/cargo-home" ] && [ -z "$(ls -A "$TMP/home-a/cargo-home")" ]; then
     pass "the clean CARGO_HOME exists and is empty"

@@ -368,7 +368,8 @@ main() {
     check_cargo_config "$SRC"
     use_clean_cargo_home "$WORK"
     unset RUSTUP_TOOLCHAIN RUSTC RUSTDOC RUSTC_BOOTSTRAP RUSTC_WORKSPACE_WRAPPER RUSTFLAGS \
-        CARGO_ENCODED_RUSTFLAGS RUSTDOCFLAGS CARGO_ENCODED_RUSTDOCFLAGS
+        CARGO_ENCODED_RUSTFLAGS RUSTDOCFLAGS CARGO_ENCODED_RUSTDOCFLAGS \
+        CC CXX CFLAGS CXXFLAGS CPPFLAGS LDFLAGS SDKROOT MACOSX_DEPLOYMENT_TARGET
     export CARGO_INCREMENTAL=0 # as on the CI runner (dtolnay/rust-toolchain sets it)
     export RUSTC_WRAPPER="" CARGO_BUILD_RUSTC_WRAPPER=""
     export PATH="$tools/bin:$llvm/bin:$PATH"
@@ -377,12 +378,10 @@ main() {
     export CI=true
     cd "$SRC"
 
-    # Cheap and first: a stale lock, or a local [patch.crates-io] override in
-    # ~/.cargo/config.toml (which changes resolution), stops the run before any
-    # download or compile.
+    # Cheap and first: a stale lock stops the run before any download or compile.
     echo "==> verify Cargo.lock is current"
     cargo metadata --locked --format-version 1 > /dev/null \
-        || die "Cargo.lock is stale or a local [patch.crates-io] override is active; a release must build from the lock on the registry"
+        || die "Cargo.lock is stale (or cannot be resolved from the registry); a release must build from the committed lock"
 
     # A dmg left in a reused target directory by an earlier build would make
     # "exactly one dmg" fail after the whole build, so clear it first.
