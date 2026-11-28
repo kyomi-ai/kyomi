@@ -30,8 +30,9 @@ use rust_embed::Embed;
 #[folder = "../../crates/kyomi-ui/dist/"]
 struct LeptosAssets;
 
-/// Serve the Leptos shell for a protected route — redirects to /login if
-/// no `access_token` cookie is present. Matches React's `<ProtectedRoute>`.
+/// Serve the Leptos shell for a protected route. Redirects to /login unless
+/// an `access_token` or `refresh_token` cookie is present; personal mode, which
+/// has no login, is always served. Matches React's `<ProtectedRoute>`.
 pub async fn serve_protected_page(
     State(state): State<crate::state::AppState>,
     headers: HeaderMap,
@@ -189,7 +190,7 @@ pub async fn serve(
     }
 
     // SPA fallback: serve the Leptos shell for any unmatched page request.
-    // Protected routes require an auth cookie — redirect to /login without one.
+    // Protected routes require an auth cookie (except in personal mode) — redirect to /login without one.
     // Public routes (auth pages, trial, welcome, unsubscribe, onboarding) pass through.
     if !is_public_route(path)
         && let Some(redirect) = check_auth_cookie_or_redirect(state.config.is_personal(), &headers, Some(&uri))
