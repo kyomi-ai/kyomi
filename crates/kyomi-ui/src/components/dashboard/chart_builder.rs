@@ -46,6 +46,7 @@ use crate::chartml_provider::configured_chartml;
 #[cfg(target_arch = "wasm32")]
 use super::markdown_renderer::{kyomi_palette, kyomi_theme};
 use super::markdown_renderer::switch_visualize_type_in_place;
+use crate::components::toast::toast_error;
 use super::shared::{BTN_BASE, BTN_DEFAULT, BTN_SIZE};
 use kyomi_ui_components::dashboard::chart_header_bar::CHART_TYPES;
 
@@ -1426,17 +1427,16 @@ pub fn ChartBuilderModal(
                                                             .collect::<Vec<_>>()
                                                     )
                                                     on_change=move |ct: String| {
-                                                        let mut switched_ok = true;
-                                                        mutate_ast(ast, yaml_text, yaml_parse_error, |a| {
-                                                            switched_ok = ast_set_chart_type(a, &ct);
-                                                        });
-                                                        if !switched_ok {
-                                                            yaml_parse_error.set(Some(
-                                                                "Cannot switch the chart type: `visualize` has a key that is not text."
-                                                                    .to_string(),
-                                                            ));
+                                                        // Try the switch on a copy first, so one that cannot be
+                                                        // made leaves the AST and the saved raw YAML as they were.
+                                                        let can_switch = ast.with_untracked(|a| ast_set_chart_type(&mut a.clone(), &ct));
+                                                        if !can_switch {
+                                                            toast_error("Cannot switch the chart type: `visualize` has a key that is not text.");
                                                             return;
                                                         }
+                                                        mutate_ast(ast, yaml_text, yaml_parse_error, |a| {
+                                                            ast_set_chart_type(a, &ct);
+                                                        });
                                                         // The switch rewrote `rows` (and `columns`), so the
                                                         // series list is re-derived from the AST, as after a
                                                         // YAML-tab edit; otherwise a series edit would write
