@@ -21,6 +21,7 @@ use std::sync::RwLock;
 #[cfg(not(debug_assertions))]
 use std::sync::OnceLock;
 
+use axum::extract::State;
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Redirect, Response};
 use rust_embed::Embed;
@@ -31,8 +32,14 @@ struct LeptosAssets;
 
 /// Serve the Leptos shell for a protected route — redirects to /login if
 /// no `access_token` cookie is present. Matches React's `<ProtectedRoute>`.
-pub async fn serve_protected_page(headers: HeaderMap, uri: axum::http::Uri) -> Response {
-    if let Some(redirect) = check_auth_cookie_or_redirect(&headers, Some(&uri)) {
+pub async fn serve_protected_page(
+    State(state): State<crate::state::AppState>,
+    headers: HeaderMap,
+    uri: axum::http::Uri,
+) -> Response {
+    if let Some(redirect) =
+        check_auth_cookie_or_redirect(state.config.is_personal(), &headers, Some(&uri))
+    {
         return redirect;
     }
     serve_leptos_shell().await
@@ -45,9 +52,21 @@ pub async fn serve_protected_page(headers: HeaderMap, uri: axum::http::Uri) -> R
 /// refresh script in index.html will exchange it for a new access token
 /// before WASM boots.
 ///
+/// Personal mode has no login: the server authenticates every request as the
+/// local user without a cookie (`load_auth_user`), and the `/login` page sends
+/// an already-authenticated visitor on to the app. Requiring a cookie there
+/// bounces `/` straight back to `/login`, which loops (KYO-1002).
+///
 /// The redirect path is validated to contain only safe characters (alphanumeric,
 /// `/`, `-`, `_`) to prevent query-param injection or open-redirect attacks.
-fn check_auth_cookie_or_redirect(headers: &HeaderMap, uri: Option<&axum::http::Uri>) -> Option<Response> {
+fn check_auth_cookie_or_redirect(
+    personal: bool,
+    headers: &HeaderMap,
+    uri: Option<&axum::http::Uri>,
+) -> Option<Response> {
+    if personal {
+        return None;
+    }
     let cookies_str = headers
         .get("cookie")
         .and_then(|v| v.to_str().ok())
@@ -149,7 +168,11 @@ pub async fn serve_leptos_asset(
 /// Tries to serve the exact file from the embedded assets (e.g. logos,
 /// manifest.json, favicon). If no file matches, returns the Leptos
 /// HTML shell so client-side routing can handle the path.
-pub async fn serve(headers: HeaderMap, uri: axum::http::Uri) -> Response {
+pub async fn serve(
+    State(state): State<crate::state::AppState>,
+    headers: HeaderMap,
+    uri: axum::http::Uri,
+) -> Response {
     let path = uri.path().trim_start_matches('/');
 
     // Try the exact file first (static assets: logos, icons, manifest, etc.)
@@ -169,7 +192,7 @@ pub async fn serve(headers: HeaderMap, uri: axum::http::Uri) -> Response {
     // Protected routes require an auth cookie — redirect to /login without one.
     // Public routes (auth pages, trial, welcome, unsubscribe, onboarding) pass through.
     if !is_public_route(path)
-        && let Some(redirect) = check_auth_cookie_or_redirect(&headers, Some(&uri))
+        && let Some(redirect) = check_auth_cookie_or_redirect(state.config.is_personal(), &headers, Some(&uri))
     {
         return redirect;
     }
@@ -543,6 +566,7 @@ fn mime_from_path(path: &str) -> HeaderValue {
 
 #[cfg(test)]
 mod tests {
+    use super::check_auth_cookie_or_redirect;
     use super::is_public_route;
     use super::split_template;
     #[cfg(debug_assertions)]
@@ -557,6 +581,51 @@ mod tests {
     #[test]
     fn bare_signup_route_is_public() {
         assert!(is_public_route("signup"));
+    }
+
+    fn headers_with_cookie(cookie: Option<String>) -> axum::http::HeaderMap {
+        let mut headers = axum::http::HeaderMap::new();
+        if let Some(cookie) = cookie {
+            headers.insert("cookie", cookie.parse().unwrap());
+        }
+        headers
+    }
+
+    fn gate(personal: bool, cookie: Option<String>) -> Option<axum::response::Response> {
+        if let Ok(path) = kyomi_core::constants::find_constants_file() {
+            let _ = kyomi_core::constants::load(&path);
+        }
+        check_auth_cookie_or_redirect(
+            personal,
+            &headers_with_cookie(cookie),
+            Some(&"/".parse().unwrap()),
+        )
+    }
+
+    /// KYO-1002: personal mode authenticates every request without a cookie,
+    /// so the gate must let `/` through. Redirecting it to `/login` made
+    /// `/login` (which forwards an authenticated visitor to `/`) and `/`
+    /// bounce forever.
+    #[test]
+    fn personal_mode_needs_no_auth_cookie() {
+        assert!(gate(true, None).is_none());
+    }
+
+    /// Hosted deployments still send a visitor with no auth cookie to `/login`.
+    #[test]
+    fn hosted_mode_without_cookie_redirects_to_login() {
+        let redirect = gate(false, None).expect("redirect");
+        assert_eq!(redirect.status(), axum::http::StatusCode::SEE_OTHER);
+        assert_eq!(redirect.headers()[axum::http::header::LOCATION], "/login");
+    }
+
+    /// An expired access token leaves only the refresh cookie. The page must
+    /// still be served so the pre-boot refresh can renew the session and the
+    /// user stays signed in.
+    #[test]
+    fn hosted_mode_with_only_a_refresh_cookie_serves_the_page() {
+        assert!(gate(false, Some("refresh_token=abc".to_string())).is_none());
+        assert!(gate(false, Some("access_token=abc".to_string())).is_none());
     }
 
     /// The `"signup/"` prefix match (e.g. the post-verification landing

@@ -7,7 +7,14 @@
 //! return the CSR shell.
 
 async fn base_url() -> String {
-    if let Ok(url) = std::env::var("CONTRACT_TEST_BASE_URL") {
+    base_url_for(kyomi_core::config::KyomiMode::Saas).await
+}
+
+/// Start the server in `mode`. `CONTRACT_TEST_BASE_URL` points at an already
+/// running server, so it is only honoured for the default mode.
+async fn base_url_for(mode: kyomi_core::config::KyomiMode) -> String {
+    if mode == kyomi_core::config::KyomiMode::Saas
+        && let Ok(url) = std::env::var("CONTRACT_TEST_BASE_URL") {
         return url;
     }
 
@@ -15,7 +22,8 @@ async fn base_url() -> String {
         let _ = kyomi_core::constants::load(&path);
     }
 
-    let config = kyomi_core::Config::test_config();
+    let mut config = kyomi_core::Config::test_config();
+    config.mode = mode;
     // KYO-242: connects to (and provisions/self-heals) this worktree's
     // private test database rather than the shared `kyomi_test` database.
     let db = kyomi_core::test_db::connect_test_pool()
@@ -223,6 +231,40 @@ async fn signup_complete_returns_csr_shell() {
         !body.contains("Welcome back"),
         "Non-SSR page must NOT contain pre-rendered page content"
     );
+}
+
+// ─── Protected routes and the login redirect (KYO-1002) ─────────────────────
+
+/// Without a session cookie, a protected route in a hosted deployment sends
+/// the visitor to `/login`.
+#[ignore = "Runs in the ssr-contract-tests CI job (KYO-255); see the other tests in this file"]
+#[tokio::test]
+async fn hosted_root_without_cookie_redirects_to_login() {
+    let base = base_url().await;
+    let resp = client().get(format!("{base}/")).send().await.unwrap();
+
+    assert_eq!(resp.status(), 303);
+    assert_eq!(resp.headers()["location"], "/login");
+}
+
+/// Personal mode has no login: the server treats every request as the local
+/// user, and `/login` sends an already-authenticated visitor on to `/`. If `/`
+/// redirected back to `/login` for lack of a cookie the two pages would bounce
+/// forever, reloading `/login` (and its pre-boot `POST /api/v1/auth/refresh`)
+/// about twice a second. Both the explicit protected routes and the SPA
+/// fallback must serve the app shell.
+#[ignore = "Runs in the ssr-contract-tests CI job (KYO-255); see the other tests in this file"]
+#[tokio::test]
+async fn personal_mode_serves_protected_routes_without_cookie() {
+    let base = base_url_for(kyomi_core::config::KyomiMode::Personal).await;
+    for path in ["/", "/dashboards", "/settings/profile", "/chat"] {
+        let resp = client().get(format!("{base}{path}")).send().await.unwrap();
+        assert_eq!(
+            resp.status(),
+            200,
+            "personal mode must serve {path} without a cookie, not redirect to /login"
+        );
+    }
 }
 
 /// Exercise the two real HTML paths that serve the shared Trunk shell: the
