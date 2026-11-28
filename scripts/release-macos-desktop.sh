@@ -27,13 +27,13 @@
 # authenticated for the repository.
 #
 # The Mac needs: Apple silicon; at least 16 GB of RAM (the build's largest
-# process peaked at 13 GB on a 32 GB M1 Max, which is the machine it was
-# tested on); and DISK_NEEDED_GB of free disk for the build (it compiles every
-# dependency from scratch into the temporary checkout, or into CARGO_TARGET_DIR
-# when that is set). A cold build takes well over an hour (a warm one, with the
-# dependencies already compiled, took 61 minutes on that machine). `cargo
-# install tauri-cli --version "^2" --locked` is compiled from source, as in CI,
-# so the newest 2.x release that its lock allows is used, not a pinned one.
+# process peaked at 13.7 GB on a 32 GB M1 Max, the machine it was tested on); and
+# 20 GB of free disk (a cold build used 14 GB: 11.9 GB of build products, 2.0 GB
+# of crates, 0.2 GB of tools, all inside the temporary directory, or in
+# CARGO_TARGET_DIR when that is set). A cold build took 43 minutes on that
+# otherwise idle Mac; expect longer on a smaller Mac or one that is busy.
+# `cargo install tauri-cli --version "^2" --locked` is compiled from source, as
+# in CI, so the newest 2.x release that its lock allows is used, not a pinned one.
 # Set CARGO_TARGET_DIR to an absolute path to keep build products between runs.
 # If the final upload fails, the built dmg is copied to the current directory
 # so the upload can be retried without a rebuild.
