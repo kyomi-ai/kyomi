@@ -960,7 +960,7 @@ fn DashboardEditorInner(
                 // needs (a metric's `value`, a table's `columns`), so it still
                 // renders after a reload. Only `visualize` is rewritten.
                 let Some(updated_yaml) = switch_chart_item_type(yaml, new_type) else {
-                    toast_error("Cannot switch the chart type: this chart has no `visualize` block, or it has a key that is not text.");
+                    toast_error("Cannot switch the chart type: this chart's `visualize` block is missing or cannot be rewritten.");
                     return;
                 };
 
